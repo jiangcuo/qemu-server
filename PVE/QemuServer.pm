@@ -92,6 +92,22 @@ my $OVMF = {
 	],
     },
     aarch64 => {
+    '4m-no-smm' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.fd",
+    ],
+    '4m-no-smm-ms' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.ms.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.ms.fd",
+    ],
+   '4m' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.fd",
+    ],
+    '4m-ms' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.ms.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.ms.fd",
+    ],
 	default => [
 	    "$EDK2_FW_BASE/AAVMF_CODE.fd",
 	    "$EDK2_FW_BASE/AAVMF_VARS.fd",
@@ -187,7 +203,7 @@ my $vga_fmt = {
 	default => 'std',
 	optional => 1,
 	default_key => 1,
-	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio virtio-gl vmware)],
+	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio virtio-gl vmware ramfb)],
     },
     memory => {
 	description => "Sets the VGA memory (in MiB). Has no effect with serial display.",
@@ -1407,7 +1423,7 @@ sub print_tabletdevice_full {
     # we use uhci for old VMs because tablet driver was buggy in older qemu
     my $usbbus;
     if ($q35 || $arch eq 'aarch64') {
-	$usbbus = 'ehci';
+	$usbbus = 'qemu-xhci';
     } else {
 	$usbbus = 'uhci';
     }
@@ -1420,7 +1436,7 @@ sub print_keyboarddevice_full {
 
     return if $arch ne 'aarch64';
 
-    return "usb-kbd,id=keyboard,bus=ehci.0,port=2";
+    return "usb-kbd,id=keyboard,bus=qemu-xhci.0,port=2";
 }
 
 my sub get_drive_id {
@@ -1824,6 +1840,7 @@ my $vga_map = {
     'vmware' => 'vmware-svga',
     'virtio' => 'virtio-vga',
     'virtio-gl' => 'virtio-vga-gl',
+    'ramfb' => 'ramfb',
 };
 
 sub print_vga_device {
@@ -3343,7 +3360,7 @@ sub get_ovmf_files($$$) {
 	or die "no OVMF images known for architecture '$arch'\n";
 
     my $type = 'default';
-    if ($arch ne "aarch64" && defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
+    if (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
 	$type = $smm ? "4m" : "4m-no-smm";
 	$type .= '-ms' if $efidisk->{'pre-enrolled-keys'};
     }
@@ -3801,9 +3818,12 @@ sub config_to_command {
     push @$cmd, '-no-reboot' if  defined($conf->{reboot}) && $conf->{reboot} == 0;
 
     if ($vga->{type} && $vga->{type} !~ m/^serial\d+$/ && $vga->{type} ne 'none'){
-	push @$devices, '-device', print_vga_device(
-	    $conf, $vga, $arch, $machine_version, $machine_type, undef, $qxlnum, $bridges);
-
+        if ($vga->{type} eq 'ramfb'){
+            push @$devices, '-device', 'ramfb';
+        } else {
+            push @$devices, '-device', print_vga_device(
+            $conf, $vga, $arch, $machine_version, $machine_type, undef, $qxlnum, $bridges);
+    	}
 	push @$cmd, '-display', 'egl-headless,gl=core' if $vga->{type} eq 'virtio-gl'; # VIRGL
 
 	my $socket = PVE::QemuServer::Helpers::vnc_socket($vmid);
@@ -4112,8 +4132,11 @@ sub config_to_command {
 	$machine_type_min =~ s/\+pve\d+$//;
 	$machine_type_min .= "+pve$required_pve_version";
     }
-    push @$machineFlags, "type=${machine_type_min}";
-
+    if ($arch eq 'aarch64'){
+        push @$machineFlags, "type=${machine_type_min},gic-version=host";
+    }else{
+       push @$machineFlags, "type=${machine_type_min}";
+    }
     push @$cmd, @$devices;
     push @$cmd, '-rtc', join(',', @$rtcFlags) if scalar(@$rtcFlags);
     push @$cmd, '-machine', join(',', @$machineFlags) if scalar(@$machineFlags);

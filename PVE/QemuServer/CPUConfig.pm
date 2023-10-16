@@ -510,7 +510,7 @@ sub get_cpu_options {
 
     my $cputype = $kvm ? "kvm64" : "qemu64";
     if ($arch eq 'aarch64') {
-	$cputype = 'cortex-a57';
+	$cputype = 'host';
     }
 
     my $cpu = {};
