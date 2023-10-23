@@ -416,7 +416,7 @@ my $confdesc = {
     ostype => {
 	optional => 1,
 	type => 'string',
-	enum => [qw(other wxp w2k w2k3 w2k8 wvista win7 win8 win10 win11 l24 l26 solaris)],
+	enum => [qw(win11 l24 l26 other)],
 	description => "Specify guest operating system.",
 	verbose_description => <<EODESC,
 Specify guest operating system. This is used to enable special
@@ -424,18 +424,9 @@ optimization/features for specific operating systems:
 
 [horizontal]
 other;; unspecified OS
-wxp;; Microsoft Windows XP
-w2k;; Microsoft Windows 2000
-w2k3;; Microsoft Windows 2003
-w2k8;; Microsoft Windows 2008
-wvista;; Microsoft Windows Vista
-win7;; Microsoft Windows 7
-win8;; Microsoft Windows 8/2012/2012r2
-win10;; Microsoft Windows 10/2016/2019
 win11;; Microsoft Windows 11/2022
 l24;; Linux 2.4 Kernel
 l26;; Linux 2.6 - 6.X Kernel
-solaris;; Solaris/OpenSolaris/OpenIndiania kernel
 EODESC
     },
     boot => {
@@ -607,9 +598,9 @@ EODESCR
     },
     cdrom => {
 	optional => 1,
-	type => 'string', format => 'pve-qm-ide',
+	type => 'string', format => 'pve-qm-scsi',
 	typetext => '<volume>',
-	description => "This is an alias for option -ide2",
+	description => "This is an alias for option -scsi",
     },
     cpu => {
 	optional => 1,
@@ -2455,7 +2446,7 @@ sub parse_vm_config {
 	    if ($@) {
 		$handle_error->("vm $vmid - unable to parse value of '$key' - $@");
 	    } else {
-		$key = 'ide2' if $key eq 'cdrom';
+		$key = 'scsi2' if $key eq 'cdrom';
 		my $fmt = $confdesc->{$key}->{format};
 		if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata)$/) {
 		    my $v = parse_drive($key, $value);
@@ -2487,8 +2478,8 @@ sub write_vm_config {
     delete $conf->{snapstate}; # just to be sure
 
     if ($conf->{cdrom}) {
-	die "option ide2 conflicts with cdrom\n" if $conf->{ide2};
-	$conf->{ide2} = $conf->{cdrom};
+	die "option scsi2 conflicts with cdrom\n" if $conf->{scsi2};
+	$conf->{scsi2} = $conf->{cdrom};
 	delete $conf->{cdrom};
     }
 
@@ -3186,7 +3177,14 @@ sub add_tpm_device {
 
     push @$devices, "-chardev", "socket,id=tpmchar,path=$paths->{socket}";
     push @$devices, "-tpmdev", "emulator,id=tpmdev,chardev=tpmchar";
+
+	#https://bugzilla.proxmox.com/show_bug.cgi?id=4219
+	my $arch = $conf->{arch} // get_host_arch();
+	if ($arch eq 'x86_64'){
     push @$devices, "-device", "tpm-tis,tpmdev=tpmdev";
+	}else{
+	push @$devices, "-device", "tpm-tis-device,tpmdev=tpmdev";
+	}
 }
 
 sub start_swtpm {
@@ -3692,7 +3690,7 @@ sub config_to_command {
 	push @$cmd, $fixups->@*;
     }
 
-    if ($conf->{vmgenid}) {
+    if ($conf->{vmgenid} && $arch eq 'x86_64') {
 	push @$devices, '-device', 'vmgenid,guid='.$conf->{vmgenid};
     }
 
@@ -4133,7 +4131,11 @@ sub config_to_command {
 	$machine_type_min .= "+pve$required_pve_version";
     }
     if ($arch eq 'aarch64'){
-        push @$machineFlags, "type=${machine_type_min},gic-version=host";
+	if (!$kvm){
+        push @$machineFlags, "type=${machine_type_min}";
+	}else{
+	 push @$machineFlags, "type=${machine_type_min},gic-version=host";
+	}
     }else{
        push @$machineFlags, "type=${machine_type_min}";
     }
