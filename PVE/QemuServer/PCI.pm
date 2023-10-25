@@ -160,6 +160,7 @@ sub get_pci_addr_map {
 	hostpci8 => { bus => 0, addr => 16 },
 	hostpci19 => { bus => 0, addr => 17 },
 	hostpci10 => { bus => 0, addr => 18 },
+ 	'xhci' => { bus => 0, addr => 19 },
 	hostpci0 => { bus => 0, addr => 22 },
 	hostpci1 => { bus => 0, addr => 23 },
 	vga1 => { bus => 0, addr => 24 },
@@ -195,7 +196,6 @@ sub get_pci_addr_map {
 	'net22' => { bus => 1, addr => 23 },
 	'net23' => { bus => 1, addr => 24 },
 	'net24' => { bus => 1, addr => 25 },	
-	'xhci' => { bus => 1, addr => 27 },
 	'pci.4' => { bus => 1, addr => 28 },
 	'rng0' => { bus => 1, addr => 29 },
 	'pci.2-igd' => { bus => 1, addr => 30 }, # replaces pci.2 in case a legacy IGD device is passed through
