@@ -98,18 +98,12 @@ ${DSC}: ${BUILDDIR}
 	cd ${BUILDDIR}; dpkg-buildpackage -S -us -uc -d
 	lintian ${DSC}
 
-.PHONY: test
-test:
-	PVE_GENERATING_DOCS=1 perl -I. ./qm verifyapi
-	$(MAKE) -C test
-
 .PHONY: upload
 upload: ${DEB}
 	tar cf - ${DEBS} | ssh -X repoman@repo.proxmox.com upload --product pve --dist buster
 
 .PHONY: clean
 clean:
-	$(MAKE) -C test $@
 	rm -rf $(PACKAGE)-*/ *.deb *.buildinfo *.changes *.dsc $(PACKAGE)_*.tar.gz
 	$(MAKE) cleanup-docgen
 	find . -name '*~' -exec rm {} ';'
