@@ -71,6 +71,10 @@ my $OVMF = {
 	"$EDK2_FW_BASE/AAVMF_CODE.fd",
 	"$EDK2_FW_BASE/AAVMF_VARS.fd"
     ],
+	loongarch64 => [
+	"$EDK2_FW_BASE/LOONGARCH_CODE.fd",
+	"$EDK2_FW_BASE/LOONGARCH_VARS.fd",
+	],
 };
 
 my $cpuinfo = PVE::ProcFSTools::read_cpuinfo();
@@ -370,7 +374,7 @@ my $confdesc = {
     ostype => {
 	optional => 1,
 	type => 'string',
-        enum => [qw(other wxp w2k w2k3 w2k8 wvista win7 win8 win10 l24 l26 solaris)],
+        enum => [qw(l26 other)],
 	description => "Specify guest operating system.",
 	verbose_description => <<EODESC,
 Specify guest operating system. This is used to enable special
@@ -378,17 +382,7 @@ optimization/features for specific operating systems:
 
 [horizontal]
 other;; unspecified OS
-wxp;; Microsoft Windows XP
-w2k;; Microsoft Windows 2000
-w2k3;; Microsoft Windows 2003
-w2k8;; Microsoft Windows 2008
-wvista;; Microsoft Windows Vista
-win7;; Microsoft Windows 7
-win8;; Microsoft Windows 8/2012/2012r2
-win10;; Microsoft Windows 10/2016/2019
-l24;; Linux 2.4 Kernel
 l26;; Linux 2.6 - 5.X Kernel
-solaris;; Solaris/OpenSolaris/OpenIndiania kernel
 EODESC
     },
     boot => {
@@ -560,9 +554,9 @@ EODESCR
     },
     cdrom => {
 	optional => 1,
-	type => 'string', format => 'pve-qm-ide',
+	type => 'string', format => 'pve-qm-scsi',
 	typetext => '<volume>',
-	description => "This is an alias for option -ide2",
+	description => "This is an alias for option -scsi2",
     },
     cpu => {
 	optional => 1,
@@ -607,7 +601,7 @@ EODESCR
 	description => "Virtual processor architecture. Defaults to the host.",
 	optional => 1,
 	type => 'string',
-	enum => [qw(x86_64 aarch64)],
+	enum => [qw(x86_64 aarch64 loongarch64)],
     },
     smbios1 => {
 	description => "Specify SMBIOS type 1 fields.",
@@ -1388,21 +1382,21 @@ sub print_tabletdevice_full {
 
     # we use uhci for old VMs because tablet driver was buggy in older qemu
     my $usbbus;
-    if (PVE::QemuServer::Machine::machine_type_is_q35($conf) || $arch eq 'aarch64') {
-	$usbbus = 'ehci';
+    if (PVE::QemuServer::Machine::machine_type_is_q35($conf) || $arch ne 'x86_64') {
+	$usbbus = 'qemu-xhci';
     } else {
 	$usbbus = 'uhci';
     }
 
-    return "usb-tablet,id=tablet,bus=$usbbus.0,port=1";
+    return "usb-tablet,id=tablet";
 }
 
 sub print_keyboarddevice_full {
     my ($conf, $arch, $machine) = @_;
 
-    return if $arch ne 'aarch64';
+    return if $arch eq 'x86_64';
 
-    return "usb-kbd,id=keyboard,bus=ehci.0,port=2";
+    return "usb-kbd,id=keyboard";
 }
 
 my sub get_drive_id {
@@ -2280,8 +2274,8 @@ sub write_vm_config {
     delete $conf->{snapstate}; # just to be sure
 
     if ($conf->{cdrom}) {
-	die "option ide2 conflicts with cdrom\n" if $conf->{ide2};
-	$conf->{ide2} = $conf->{cdrom};
+	die "option scsi2 conflicts with cdrom\n" if $conf->{scsi2};
+	$conf->{scsi2} = $conf->{cdrom};
 	delete $conf->{cdrom};
     }
 
@@ -2934,6 +2928,7 @@ sub get_vm_arch {
 my $default_machines = {
     x86_64 => 'pc',
     aarch64 => 'virt',
+	loongarch64 => 'virt',
 };
 
 sub get_installed_machine_version {
@@ -3012,6 +3007,7 @@ sub get_ovmf_files($) {
 my $Arch2Qemu = {
     aarch64 => '/usr/bin/qemu-system-aarch64',
     x86_64 => '/usr/bin/qemu-system-x86_64',
+	loongarch64 => '/usr/bin/qemu-system-loongarch64',
 };
 sub get_command_for_arch($) {
     my ($arch) = @_;
@@ -3052,8 +3048,8 @@ sub query_supported_cpu_flags {
 
     # FIXME: Once this is merged, the code below should work for ARM as well:
     # https://lists.nongnu.org/archive/html/qemu-devel/2019-06/msg04947.html
-    die "QEMU/KVM cannot detect CPU flags on ARM (aarch64)\n" if
-	$arch eq "aarch64";
+    die "QEMU/KVM cannot detect CPU flags on ! x86_64\n" if
+	$arch ne "x86_64";
 
     my $kvm_supported = defined(kvm_version());
     my $qemu_cmd = get_command_for_arch($arch);
@@ -3069,7 +3065,7 @@ sub query_supported_cpu_flags {
 	    $qemu_cmd,
 	    '-machine', $default_machine,
 	    '-display', 'none',
-	    '-chardev', "socket,id=qmp,path=/var/run/qemu-server/$fakevmid.qmp,server,nowait",
+	    '-chardev', "socket,id=qmp,path=/var/run/qemu-server/$fakevmid.qmp,server=on,wait=off",
 	    '-mon', 'chardev=qmp,mode=control',
 	    '-pidfile', $pidfile,
 	    '-S', '-daemonize'
@@ -3226,7 +3222,7 @@ sub config_to_command {
     my $use_virtio = 0;
 
     my $qmpsocket = PVE::QemuServer::Helpers::qmp_socket($vmid);
-    push @$cmd, '-chardev', "socket,id=qmp,path=$qmpsocket,server,nowait";
+    push @$cmd, '-chardev', "socket,id=qmp,path=$qmpsocket,server=on,wait=off";
     push @$cmd, '-mon', "chardev=qmp,mode=control";
 
     if (min_version($machine_version, 2, 12)) {
@@ -3241,6 +3237,8 @@ sub config_to_command {
     if ($conf->{smbios1}) {
 	my $smbios_conf = parse_smbios1($conf->{smbios1});
 	if ($smbios_conf->{base64}) {
+			# other not need smbios
+	if ( $arch eq 'x86_64' ||$arch eq 'aarch64' ){
 	    # Do not pass base64 flag to qemu
 	    delete $smbios_conf->{base64};
 	    my $smbios_string = "";
@@ -3260,6 +3258,7 @@ sub config_to_command {
 	    push @$cmd, '-smbios', "type=1,$conf->{smbios1}";
 	}
     }
+	}
 
     if ($conf->{bios} && $conf->{bios} eq 'ovmf') {
 	my ($ovmf_code, $ovmf_vars) = get_ovmf_files($arch);
@@ -3294,24 +3293,36 @@ sub config_to_command {
 	    $size_str = ",size=" . (-s $ovmf_vars);
 	}
 
-	push @$cmd, '-drive', "if=pflash,unit=0,format=raw,readonly,file=$ovmf_code";
-	push @$cmd, '-drive', "if=pflash,unit=1,format=$format,id=drive-efidisk0$size_str,file=$path";
+	if ($arch eq 'loongarch64') {
+		push @$cmd, '-bios','/usr/share/pve-edk2-firmware//LOONGARCH_CODE.fd';
+	} elsif ($arch eq 'riscv64') {
+		push @$cmd, '-bios','/usr/share/pve-edk2-firmware//fw_dynamic.bin';
+		push @$cmd, '-drive', "if=pflash,unit=0,format=raw,readonly,file=$ovmf_code";
+		push @$cmd, '-drive', "if=pflash,unit=1,format=$format,id=drive-efidisk0$size_str,file=$path";
+	}else {
+		push @$cmd, '-drive', "if=pflash,unit=0,format=raw,readonly,file=$ovmf_code";
+		push @$cmd, '-drive', "if=pflash,unit=1,format=$format,id=drive-efidisk0$size_str,file=$path";
     }
+	
 
     # load q35 config
     if ($q35) {
+		if ($arch eq 'x86_64'){
 	# we use different pcie-port hardware for qemu >= 4.0 for passthrough
-	if (min_version($machine_version, 4, 0)) {
-	    push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35-4.0.cfg';
-	} else {
-	    push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35.cfg';
+			if (min_version($machine_version, 4, 0)) {
+	    		push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35-4.0.cfg';
+			} else {
+	 		   push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35.cfg';
+			}
+   		}
+	}else{
+		push @$devices, '-readconfig', '/usr/share/qemu-server/pve-port.cfg';
 	}
-    }
 
-    if ($conf->{vmgenid}) {
+    if ($conf->{vmgenid} && $arch eq 'x86_64') {
 	push @$devices, '-device', 'vmgenid,guid='.$conf->{vmgenid};
     }
-
+	}
     # add usb controllers
     my @usbcontrollers = PVE::QemuServer::USB::get_usb_controllers(
         $conf, $bridges, $arch, $machine_type, $usbdesc->{format}, $MAX_USB_DEVICES);
@@ -3322,7 +3333,7 @@ sub config_to_command {
     $vga->{type} = 'qxl' if $qxlnum;
 
     if (!$vga->{type}) {
-	if ($arch eq 'aarch64') {
+	if ($arch ne 'x86_64') {
 	    $vga->{type} = 'virtio';
 	} elsif (min_version($machine_version, 2, 9)) {
 	    $vga->{type} = (!$winversion || $winversion >= 6) ? 'std' : 'cirrus';
@@ -3366,11 +3377,11 @@ sub config_to_command {
 	if (my $path = $conf->{"serial$i"}) {
 	    if ($path eq 'socket') {
 		my $socket = "/var/run/qemu-server/${vmid}.serial$i";
-		push @$devices, '-chardev', "socket,id=serial$i,path=$socket,server,nowait";
+		push @$devices, '-chardev', "socket,id=serial$i,path=$socket,server=on,wait=off";
 		# On aarch64, serial0 is the UART device. Qemu only allows
 		# connecting UART devices via the '-serial' command line, as
 		# the device has a fixed slot on the hardware...
-		if ($arch eq 'aarch64' && $i == 0) {
+		if ($arch ne 'x86_64' && $i == 0) {
 		    push @$devices, '-serial', "chardev:serial$i";
 		} else {
 		    push @$devices, '-device', "isa-serial,chardev=serial$i";
@@ -3438,7 +3449,7 @@ sub config_to_command {
 	push @$devices, '-device', print_vga_device(
 	    $conf, $vga, $arch, $machine_version, $machine_type, undef, $qxlnum, $bridges);
 	my $socket = PVE::QemuServer::Helpers::vnc_socket($vmid);
-	push @$cmd,  '-vnc', "unix:$socket,password";
+	push @$cmd,  '-vnc', "unix:$socket,password=on";
     } else {
 	push @$cmd, '-vga', 'none' if $vga->{type} eq 'none';
 	push @$cmd, '-nographic';
@@ -3486,7 +3497,7 @@ sub config_to_command {
 
     if ($guest_agent->{enabled}) {
 	my $qgasocket = PVE::QemuServer::Helpers::qmp_socket($vmid, 1);
-	push @$devices, '-chardev', "socket,path=$qgasocket,server,nowait,id=qga0";
+	push @$devices, '-chardev', "socket,path=$qgasocket,server=on,wait=off,id=qga0";
 
 	if (!$guest_agent->{type} || $guest_agent->{type} eq 'virtio') {
 	    my $pciaddr = print_pci_addr("qga0", $bridges, $arch, $machine_type);
@@ -4545,10 +4556,10 @@ sub vmconfig_hotplug_pending {
 		if ($defaults->{tablet}) {
 		    vm_deviceplug($storecfg, $conf, $vmid, 'tablet', $arch, $machine_type);
 		    vm_deviceplug($storecfg, $conf, $vmid, 'keyboard', $arch, $machine_type)
-			if $arch eq 'aarch64';
+			if $arch ne 'x86_64';
 		} else {
 		    vm_deviceunplug($vmid, $conf, 'tablet');
-		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch eq 'aarch64';
+		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch ne 'x86_64';
 		}
 	    } elsif ($opt =~ m/^usb\d+/) {
 		die "skip\n";
