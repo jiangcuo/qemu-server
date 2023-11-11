@@ -280,7 +280,7 @@ sub prepare {
 
     my $online = $self->{opts}->{online};
 
-    $self->{storecfg} = PVE::Storage::config();
+    my $storecfg = $self->{storecfg} = PVE::Storage::config();
 
     # test if VM exists
     my $conf = $self->{vmconf} = PVE::QemuConfig->load_config($vmid);
@@ -333,15 +333,22 @@ sub prepare {
     }
 
     my $vollist = PVE::QemuServer::get_vm_volumes($conf);
-
     foreach my $volid (@$vollist) {
 	my ($sid, $volname) = PVE::Storage::parse_volume_id($volid, 1);
 
 	# check if storage is available on both nodes
 	my $targetsid = PVE::QemuServer::map_storage($self->{opts}->{storagemap}, $sid);
 
-	my $scfg = PVE::Storage::storage_check_node($self->{storecfg}, $sid);
-	PVE::Storage::storage_check_node($self->{storecfg}, $targetsid, $self->{node});
+	my $scfg = PVE::Storage::storage_check_enabled($storecfg, $sid);
+	my $target_scfg = PVE::Storage::storage_check_enabled(
+	    $storecfg,
+	    $targetsid,
+	    $self->{node},
+	);
+	my ($vtype) = PVE::Storage::parse_volname($storecfg, $volid);
+
+	die "$volid: content type '$vtype' is not available on storage '$targetsid'\n"
+	    if !$target_scfg->{content}->{$vtype};
 
 	if ($scfg->{shared}) {
 	    # PVE::Storage::activate_storage checks this for non-shared storages
@@ -396,20 +403,20 @@ sub scan_local_volumes {
 	    next if !PVE::Storage::storage_check_enabled($storecfg, $storeid, undef, 1);
 
 	    # get list from PVE::Storage (for unused volumes)
-	    my $dl = PVE::Storage::vdisk_list($storecfg, $storeid, $vmid);
+	    my $dl = PVE::Storage::vdisk_list($storecfg, $storeid, $vmid, undef, 'images');
 
 	    next if @{$dl->{$storeid}} == 0;
 
 	    my $targetsid = PVE::QemuServer::map_storage($self->{opts}->{storagemap}, $storeid);
 	    # check if storage is available on target node
-	    PVE::Storage::storage_check_node($storecfg, $targetsid, $self->{node});
+	    my $target_scfg = PVE::Storage::storage_check_enabled(
+		$storecfg,
+		$targetsid,
+		$self->{node},
+	    );
 
-	    # grandfather in existing mismatches
-	    if ($targetsid ne $storeid) {
-		my $target_scfg = PVE::Storage::storage_config($storecfg, $targetsid);
-		die "content type 'images' is not available on storage '$targetsid'\n"
-		    if !$target_scfg->{content}->{images};
-	    }
+	    die "content type 'images' is not available on storage '$targetsid'\n"
+		if !$target_scfg->{content}->{images};
 
 	    my $bwlimit = PVE::Storage::get_bandwidth_limit(
 		'migration',
@@ -467,8 +474,8 @@ sub scan_local_volumes {
 
 	    my $targetsid = PVE::QemuServer::map_storage($self->{opts}->{storagemap}, $sid);
 	    # check if storage is available on both nodes
-	    my $scfg = PVE::Storage::storage_check_node($storecfg, $sid);
-	    PVE::Storage::storage_check_node($storecfg, $targetsid, $self->{node});
+	    my $scfg = PVE::Storage::storage_check_enabled($storecfg, $sid);
+	    PVE::Storage::storage_check_enabled($storecfg, $targetsid, $self->{node});
 
 	    return if $scfg->{shared};
 
@@ -502,7 +509,10 @@ sub scan_local_volumes {
 		# exceptions: 'zfspool' or 'qcow2' files (on directory storage)
 
 		die "online storage migration not possible if snapshot exists\n" if $self->{running};
-		if (!($scfg->{type} eq 'zfspool' || $local_volumes->{$volid}->{format} eq 'qcow2')) {
+		if (!($scfg->{type} eq 'zfspool'
+		    || ($scfg->{type} eq 'btrfs' && $local_volumes->{$volid}->{format} eq 'raw')
+		    || $local_volumes->{$volid}->{format} eq 'qcow2'
+		)) {
 		    die "non-migratable snapshot exists\n";
 		}
 	    }
@@ -553,7 +563,7 @@ sub scan_local_volumes {
 	    my ($sid, $volname) = PVE::Storage::parse_volume_id($volid);
 	    my $scfg =  PVE::Storage::storage_config($storecfg, $sid);
 
-	    my $migratable = $scfg->{type} =~ /^(?:dir|zfspool|lvmthin|lvm)$/;
+	    my $migratable = $scfg->{type} =~ /^(?:dir|btrfs|zfspool|lvmthin|lvm)$/;
 
 	    die "can't migrate '$volid' - storage type '$scfg->{type}' not supported\n"
 		if !$migratable;
@@ -839,9 +849,8 @@ sub phase2 {
     my $unix_socket_info = {};
     # version > 0 for unix socket support
     my $nbd_protocol_version = 1;
-    # TODO change to 'spice_ticket: <ticket>\n' in 7.0
-    my $input = $spice_ticket ? "$spice_ticket\n" : "\n";
-    $input .= "nbd_protocol_version: $nbd_protocol_version\n";
+    my $input = "nbd_protocol_version: $nbd_protocol_version\n";
+    $input .= "spice_ticket: $spice_ticket\n" if $spice_ticket;
 
     my @online_replicated_volumes = $self->filter_local_volumes('online', 1);
     foreach my $volid (@online_replicated_volumes) {
