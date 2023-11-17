@@ -31,78 +31,15 @@ sub load_custom_model_conf {
 
 my $cpu_vendor_list = {
     # Intel CPUs
-    486 => 'GenuineIntel',
-    pentium => 'GenuineIntel',
-    pentium2 => 'GenuineIntel',
-    pentium3 => 'GenuineIntel',
-    coreduo => 'GenuineIntel',
-    core2duo => 'GenuineIntel',
-    Conroe => 'GenuineIntel',
-    Penryn => 'GenuineIntel',
-    Nehalem => 'GenuineIntel',
-    'Nehalem-IBRS' => 'GenuineIntel',
-    Westmere => 'GenuineIntel',
-    'Westmere-IBRS' => 'GenuineIntel',
-    SandyBridge => 'GenuineIntel',
-    'SandyBridge-IBRS' => 'GenuineIntel',
-    IvyBridge => 'GenuineIntel',
-    'IvyBridge-IBRS' => 'GenuineIntel',
-    Haswell => 'GenuineIntel',
-    'Haswell-IBRS' => 'GenuineIntel',
-    'Haswell-noTSX' => 'GenuineIntel',
-    'Haswell-noTSX-IBRS' => 'GenuineIntel',
-    Broadwell => 'GenuineIntel',
-    'Broadwell-IBRS' => 'GenuineIntel',
-    'Broadwell-noTSX' => 'GenuineIntel',
-    'Broadwell-noTSX-IBRS' => 'GenuineIntel',
-    'Skylake-Client' => 'GenuineIntel',
-    'Skylake-Client-IBRS' => 'GenuineIntel',
-    'Skylake-Client-noTSX-IBRS' => 'GenuineIntel',
-    'Skylake-Server' => 'GenuineIntel',
-    'Skylake-Server-IBRS' => 'GenuineIntel',
-    'Skylake-Server-noTSX-IBRS' => 'GenuineIntel',
-    'Cascadelake-Server' => 'GenuineIntel',
-    'Cascadelake-Server-noTSX' => 'GenuineIntel',
-    KnightsMill => 'GenuineIntel',
-    'Icelake-Client' => 'GenuineIntel',
-    'Icelake-Client-noTSX' => 'GenuineIntel',
-    'Icelake-Server' => 'GenuineIntel',
-    'Icelake-Server-noTSX' => 'GenuineIntel',
-
-    # AMD CPUs
-    athlon => 'AuthenticAMD',
-    phenom => 'AuthenticAMD',
-    Opteron_G1 => 'AuthenticAMD',
-    Opteron_G2 => 'AuthenticAMD',
-    Opteron_G3 => 'AuthenticAMD',
-    Opteron_G4 => 'AuthenticAMD',
-    Opteron_G5 => 'AuthenticAMD',
-    EPYC => 'AuthenticAMD',
-    'EPYC-IBPB' => 'AuthenticAMD',
-    'EPYC-Rome' => 'AuthenticAMD',
-
-    # generic types, use vendor from host node
     host => 'default',
     kvm32 => 'default',
     kvm64 => 'default',
-    qemu32 => 'default',
-    qemu64 => 'default',
     max => 'default',
+    rv64 => 'default',
 };
 
 my @supported_cpu_flags = (
-    'pcid',
-    'spec-ctrl',
-    'ibpb',
-    'ssbd',
-    'virt-ssbd',
-    'amd-ssbd',
-    'amd-no-ssb',
-    'pdpe1gb',
-    'md-clear',
-    'hv-tlbflush',
-    'hv-evmcs',
-    'aes'
+    'pcid'
 );
 my $cpu_flag_supported_re = qr/([+-])(@{[join('|', @supported_cpu_flags)]})/;
 my $cpu_flag_any_re = qr/([+-])([a-zA-Z0-9\-_\.]+)/;
@@ -123,7 +60,7 @@ my $cpu_fmt = {
 		     . " Only valid for custom CPU model definitions, default models will always report themselves to the guest OS.",
 	type => 'string',
 	enum => [ sort { lc("$a") cmp lc("$b") } keys %$cpu_vendor_list ],
-	default => 'kvm64',
+	default => 'rv64',
 	optional => 1,
     },
     hidden => {
@@ -455,8 +392,8 @@ sub get_cpu_options {
     my ($conf, $arch, $kvm, $kvm_off, $machine_version, $winversion, $gpu_passthrough) = @_;
 
     my $cputype = $kvm ? "kvm64" : "qemu64";
-    if ($arch eq 'aarch64') {
-	$cputype = 'cortex-a57';
+    if ($arch eq 'riscv64') {
+	$cputype = 'rv64';
     }
 
     my $cpu = {};
@@ -466,7 +403,7 @@ sub get_cpu_options {
 	$cpu = PVE::JSONSchema::parse_property_string('pve-vm-cpu-conf', $cpu_prop_str)
 	    or die "Cannot parse cpu description: $cpu_prop_str\n";
 
-	$cputype = $cpu->{cputype};
+    $cputype = $cpu->{cputype};
 
 	if (is_custom_model($cputype)) {
 	    $custom_cpu = get_custom_model($cputype);
@@ -519,7 +456,7 @@ sub get_cpu_options {
 	$pve_forced_flags->{'vendor'} = {
 	    value => $cpu_vendor,
 	} if $cpu_vendor ne 'default';
-    } elsif ($arch ne 'aarch64') {
+    } elsif ($arch ne 'riscv64' && $arch ne 'loongarch64' && $arch ne 'aarch64' ) {
 	die "internal error"; # should not happen
     }
 

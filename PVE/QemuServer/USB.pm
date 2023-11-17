@@ -39,9 +39,9 @@ sub get_usb_controllers {
     my $devices = [];
     my $pciaddr = "";
 
-    if ($arch eq 'aarch64') {
-        $pciaddr = print_pci_addr('ehci', $bridges, $arch, $machine);
-        push @$devices, '-device', "usb-ehci,id=ehci$pciaddr";
+    if ($arch ne 'x86_64') {
+        $pciaddr = print_pci_addr('qemu-xhci', $bridges, $arch, $machine);
+        push @$devices, '-device', "qemu-xhci,id=qemu-xhci";
     } elsif ($machine !~ /q35/) { # FIXME: combine this and machine_type_is_q35
         $pciaddr = print_pci_addr("piix3", $bridges, $arch, $machine);
         push @$devices, '-device', "piix3-usb-uhci,id=uhci$pciaddr.0x2";

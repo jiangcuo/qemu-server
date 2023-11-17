@@ -217,7 +217,7 @@ __PACKAGE__->register_method ({
 	my $vnc_socket = PVE::QemuServer::Helpers::vnc_socket($vmid);
 
 	if (my $ticket = $ENV{LC_PVE_TICKET}) {  # NOTE: ssh on debian only pass LC_* variables
-	    mon_cmd($vmid, "change", device => 'vnc', target => "unix:$vnc_socket,password");
+	#   mon_cmd($vmid, "change", device => 'vnc', target => "unix:$vnc_socket,password");
 	    mon_cmd($vmid, "set_password", protocol => 'vnc', password => $ticket);
 	    mon_cmd($vmid, "expire_password", protocol => 'vnc', time => "+30");
 	} else {
