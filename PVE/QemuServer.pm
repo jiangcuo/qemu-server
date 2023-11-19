@@ -406,8 +406,8 @@ my $confdesc = {
 	optional => 1,
 	type => 'string',
 	description => "SCSI controller model",
-	enum => [qw(lsi lsi53c810 virtio-scsi-pci virtio-scsi-single megasas pvscsi)],
-	default => 'lsi',
+	enum => [qw(virtio-scsi-pci virtio-scsi-single)],
+	default => 'virtio-scsi-pci',
     },
     description => {
 	optional => 1,
@@ -419,7 +419,7 @@ my $confdesc = {
     ostype => {
 	optional => 1,
 	type => 'string',
-	enum => [qw(win11 l24 l26 other)],
+	enum => [qw(win11 l26 other)],
 	description => "Specify guest operating system.",
 	verbose_description => <<EODESC,
 Specify guest operating system. This is used to enable special
@@ -428,7 +428,6 @@ optimization/features for specific operating systems:
 [horizontal]
 other;; unspecified OS
 win11;; Microsoft Windows 11/2022
-l24;; Linux 2.4 Kernel
 l26;; Linux 2.6 - 6.X Kernel
 EODESC
     },

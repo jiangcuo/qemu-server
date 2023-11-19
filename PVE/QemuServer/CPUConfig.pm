@@ -145,12 +145,6 @@ my $cpu_vendor_list = {
 };
 
 my @supported_cpu_flags = (
-    'pcid',
-    'spec-ctrl',
-    'ibpb',
-    'ssbd',
-    'virt-ssbd',
-    'pdpe1gb',
     'aes'
 );
 my $cpu_flag_supported_re = qr/([+-])(@{[join('|', @supported_cpu_flags)]})/;
