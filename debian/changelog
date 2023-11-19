@@ -1,3 +1,13 @@
+qemu-server (8.0.8-1) bookworm; urgency=medium
+
+  * remove some scshw
+
+  * add new cputype
+
+  * add virt machine
+
+ -- jiangcuo <jiangcuo@bingsin.com>  Sun, 19 Nov 2023 14:29:21 +0800
+
 qemu-server (8.0.8) bookworm; urgency=medium
 
   * fix #2816: restore: remove timeout when allocating disks
