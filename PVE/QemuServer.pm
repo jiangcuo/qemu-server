@@ -86,6 +86,9 @@ my $OVMF = {
 	    "$EDK2_FW_BASE/OVMF_CODE_4M.secboot.fd",
 	    "$EDK2_FW_BASE/OVMF_VARS_4M.ms.fd",
 	],
+	# FIXME: These are legacy 2MB-sized images that modern OVMF doesn't supports to build
+	# anymore. how can we deperacate this sanely without breaking existing instances, or using
+	# older backups and snapshot?
 	default => [
 	    "$EDK2_FW_BASE/OVMF_CODE.fd",
 	    "$EDK2_FW_BASE/OVMF_VARS.fd",
@@ -3358,7 +3361,7 @@ sub get_ovmf_files($$$) {
 	or die "no OVMF images known for architecture '$arch'\n";
 
     my $type = 'default';
-    if (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
+    if ($arch ne "aarch64" && defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
 	$type = $smm ? "4m" : "4m-no-smm";
 	$type .= '-ms' if $efidisk->{'pre-enrolled-keys'};
     }
@@ -4986,7 +4989,7 @@ sub vmconfig_hotplug_pending {
 	my $force = $pending_delete_hash->{$opt}->{force};
 	eval {
 	    if ($opt eq 'hotplug') {
-		die "skip\n" if ($conf->{hotplug} =~ /memory/);
+		die "skip\n" if ($conf->{hotplug} =~ /(cpu|memory)/);
 	    } elsif ($opt eq 'tablet') {
 		die "skip\n" if !$hotplug_features->{usb};
 		if ($defaults->{tablet}) {
@@ -5047,6 +5050,7 @@ sub vmconfig_hotplug_pending {
 	eval {
 	    if ($opt eq 'hotplug') {
 		die "skip\n" if ($value =~ /memory/) || ($value !~ /memory/ && $conf->{hotplug} =~ /memory/);
+		die "skip\n" if ($value =~ /cpu/) || ($value !~ /cpu/ && $conf->{hotplug} =~ /cpu/);
 	    } elsif ($opt eq 'tablet') {
 		die "skip\n" if !$hotplug_features->{usb};
 		if ($value == 1) {
@@ -6037,6 +6041,15 @@ sub vm_start_nolock {
     }
 
     PVE::GuestHelpers::exec_hookscript($conf, $vmid, 'post-start');
+
+    my ($current_machine, $is_deprecated) =
+	PVE::QemuServer::Machine::get_current_qemu_machine($vmid);
+    if ($is_deprecated) {
+	log_warn(
+	    "current machine version '$current_machine' is deprecated - see the documentation and ".
+	    "change to a newer one",
+	);
+    }
 
     return $res;
 }
@@ -8292,7 +8305,7 @@ sub generate_smbios1_uuid {
 sub nbd_stop {
     my ($vmid) = @_;
 
-    mon_cmd($vmid, 'nbd-server-stop');
+    mon_cmd($vmid, 'nbd-server-stop', timeout => 25);
 }
 
 sub create_reboot_request {
@@ -8522,7 +8535,7 @@ sub complete_migration_storage {
 }
 
 sub vm_is_paused {
-    my ($vmid) = @_;
+    my ($vmid, $include_suspended) = @_;
     my $qmpstatus = eval {
 	PVE::QemuConfig::assert_config_exists_on_node($vmid);
 	mon_cmd($vmid, "query-status");
@@ -8530,8 +8543,8 @@ sub vm_is_paused {
     warn "$@\n" if $@;
     return $qmpstatus && (
 	$qmpstatus->{status} eq "paused" ||
-	$qmpstatus->{status} eq "suspended" ||
-	$qmpstatus->{status} eq "prelaunch"
+	$qmpstatus->{status} eq "prelaunch" ||
+	($include_suspended && $qmpstatus->{status} eq "suspended")
     );
 }
 
@@ -8570,9 +8583,9 @@ sub add_nets_bridge_fdb {
 	    next;
 	}
 	if ($have_sdn) {
-	    PVE::Network::SDN::Zones::add_bridge_fdb($iface, $mac, $bridge, $net->{firewall});
+	    PVE::Network::SDN::Zones::add_bridge_fdb($iface, $mac, $bridge);
 	} elsif (-d "/sys/class/net/$bridge/bridge") { # avoid fdb management with OVS for now
-	    PVE::Network::add_bridge_fdb($iface, $mac, $net->{firewall});
+	    PVE::Network::add_bridge_fdb($iface, $mac);
 	}
     }
 }
@@ -8589,9 +8602,9 @@ sub del_nets_bridge_fdb {
 
 	my $bridge = $net->{bridge};
 	if ($have_sdn) {
-	    PVE::Network::SDN::Zones::del_bridge_fdb($iface, $mac, $bridge, $net->{firewall});
+	    PVE::Network::SDN::Zones::del_bridge_fdb($iface, $mac, $bridge);
 	} elsif (-d "/sys/class/net/$bridge/bridge") { # avoid fdb management with OVS for now
-	    PVE::Network::del_bridge_fdb($iface, $mac, $net->{firewall});
+	    PVE::Network::del_bridge_fdb($iface, $mac);
 	}
     }
 }

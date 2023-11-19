@@ -67,7 +67,9 @@ sub prepare {
     $self->{vm_was_paused} = 0;
     if (!PVE::QemuServer::check_running($vmid)) {
 	$self->{vm_was_running} = 0;
-    } elsif (PVE::QemuServer::vm_is_paused($vmid)) {
+    } elsif (PVE::QemuServer::vm_is_paused($vmid, 0)) {
+	# Do not treat a suspended VM as paused, as it would cause us to skip
+	# fs-freeze even if the VM wakes up before we reach qga_fs_freeze.
 	$self->{vm_was_paused} = 1;
     }
 
@@ -220,10 +222,8 @@ sub assemble {
     my $firewall_src = "/etc/pve/firewall/$vmid.fw";
     my $firewall_dest = "$task->{tmpdir}/qemu-server.fw";
 
-    my $outfd = IO::File->new (">$outfile") ||
-	die "unable to open '$outfile'";
-    my $conffd = IO::File->new ($conffile, 'r') ||
-	die "unable open '$conffile'";
+    my $outfd = IO::File->new(">$outfile") or die "unable to open '$outfile' - $!\n";
+    my $conffd = IO::File->new($conffile, 'r') or die "unable to open '$conffile' - $!\n";
 
     my $found_snapshot;
     my $found_pending;

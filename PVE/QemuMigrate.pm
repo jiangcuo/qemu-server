@@ -224,7 +224,9 @@ sub prepare {
 	    }
 	}
 
-	$self->{vm_was_paused} = 1 if PVE::QemuServer::vm_is_paused($vmid);
+	# Do not treat a suspended VM as paused, as it might wake up
+	# during migration and remain paused after migration finishes.
+	$self->{vm_was_paused} = 1 if PVE::QemuServer::vm_is_paused($vmid, 0);
     }
 
     my ($loc_res, $mapped_res, $missing_mappings_by_node) = PVE::QemuServer::check_local_resources($conf, 1);
@@ -1475,7 +1477,13 @@ sub phase3_cleanup {
 	    $self->log('info', "stopping NBD storage migration server on target.");
 	    # stop nbd server on remote vm - requirement for resume since 2.9
 	    if ($tunnel && $tunnel->{version} && $tunnel->{version} >= 2) {
-		PVE::Tunnel::write_tunnel($tunnel, 30, 'nbdstop');
+		eval {
+		    PVE::Tunnel::write_tunnel($tunnel, 30, 'nbdstop');
+		};
+		if (my $err = $@) {
+		    $self->log('err', $err);
+		    $self->{errors} = 1;
+		}
 	    } else {
 		my $cmd = [@{$self->{rem_ssh}}, 'qm', 'nbdstop', $vmid];
 
