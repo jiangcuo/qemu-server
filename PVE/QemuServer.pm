@@ -366,7 +366,7 @@ my $confdesc = {
 	type => 'string',
 	description => "SCSI controller model",
 	enum => [qw(lsi lsi53c810 virtio-scsi-pci virtio-scsi-single megasas pvscsi)],
-	default => 'lsi',
+	default => 'virtio-scsi-pci',
     },
     description => {
 	optional => 1,
@@ -2265,7 +2265,7 @@ sub parse_vm_config {
 	    if ($@) {
 		warn "vm $vmid - unable to parse value of '$key' - $@";
 	    } else {
-		$key = 'ide2' if $key eq 'cdrom';
+		$key = 'scsi2' if $key eq 'cdrom';
 		my $fmt = $confdesc->{$key}->{format};
 		if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata)$/) {
 		    my $v = parse_drive($key, $value);
