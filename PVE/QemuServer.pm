@@ -64,6 +64,7 @@ use PVE::QemuServer::USB;
 my $have_sdn;
 eval {
     require PVE::Network::SDN::Zones;
+    require PVE::Network::SDN::Vnets;
     $have_sdn = 1;
 };
 
@@ -214,6 +215,13 @@ my $vga_fmt = {
 	optional => 1,
 	minimum => 4,
 	maximum => 512,
+    },
+    clipboard => {
+	description => 'Enable a specific clipboard. If not set, depending on'
+	    .' the display type the SPICE one will be added.',
+	type => 'string',
+	enum => ['vnc'],
+	optional => 1,
     },
 };
 
@@ -1348,6 +1356,21 @@ sub pve_verify_hotplug_features {
     die "unable to parse hotplug option\n";
 }
 
+sub assert_clipboard_config {
+    my ($vga) = @_;
+
+    my $clipboard_regex = qr/^(std|cirrus|vmware|virtio|qxl)/;
+
+    if (
+	$vga->{'clipboard'}
+	&& $vga->{'clipboard'} eq 'vnc'
+	&& $vga->{type}
+	&& $vga->{type} !~ $clipboard_regex
+    ) {
+	die "vga type $vga->{type} is not compatible with VNC clipboard\n";
+    }
+}
+
 sub scsi_inquiry {
     my($fh, $noerr) = @_;
 
@@ -2346,6 +2369,9 @@ sub destroy_vm {
 	    warn $@ if $@;
 	});
     }
+
+    eval { delete_ifaces_ipams_ips($conf, $vmid)};
+    warn $@ if $@;
 
     if (defined $replacement_conf) {
 	PVE::QemuConfig->write_config($vmid, $replacement_conf);
@@ -3905,7 +3931,10 @@ sub config_to_command {
 
     my $spice_port;
 
-    if ($qxlnum || $vga->{type} =~ /^virtio/) {
+    assert_clipboard_config($vga);
+    my $is_spice = $qxlnum || $vga->{type} =~ /^virtio/;
+
+    if ($is_spice || ($vga->{'clipboard'} && $vga->{'clipboard'} eq 'vnc')) {
 	if ($qxlnum > 1) {
 	    if ($winversion){
 		for (my $i = 1; $i < $qxlnum; $i++){
@@ -3926,29 +3955,34 @@ sub config_to_command {
 
 	my $pciaddr = print_pci_addr("spice", $bridges, $arch, $machine_type);
 
-	my $pfamily = PVE::Tools::get_host_address_family($nodename);
-	my @nodeaddrs = PVE::Tools::getaddrinfo_all('localhost', family => $pfamily);
-	die "failed to get an ip address of type $pfamily for 'localhost'\n" if !@nodeaddrs;
-
 	push @$devices, '-device', "virtio-serial,id=spice$pciaddr";
-	push @$devices, '-chardev', "spicevmc,id=vdagent,name=vdagent";
+	if ($vga->{'clipboard'} && $vga->{'clipboard'} eq 'vnc') {
+	    push @$devices, '-chardev', 'qemu-vdagent,id=vdagent,name=vdagent,clipboard=on';
+	} else {
+	    push @$devices, '-chardev', 'spicevmc,id=vdagent,name=vdagent';
+	}
 	push @$devices, '-device', "virtserialport,chardev=vdagent,name=com.redhat.spice.0";
 
-	my $localhost = PVE::Network::addr_to_ip($nodeaddrs[0]->{addr});
-	$spice_port = PVE::Tools::next_spice_port($pfamily, $localhost);
+	if ($is_spice) {
+	    my $pfamily = PVE::Tools::get_host_address_family($nodename);
+	    my @nodeaddrs = PVE::Tools::getaddrinfo_all('localhost', family => $pfamily);
+	    die "failed to get an ip address of type $pfamily for 'localhost'\n" if !@nodeaddrs;
 
-	my $spice_enhancement_str = $conf->{spice_enhancements} // '';
-	my $spice_enhancement = parse_property_string($spice_enhancements_fmt, $spice_enhancement_str);
-	if ($spice_enhancement->{foldersharing}) {
-	    push @$devices, '-chardev', "spiceport,id=foldershare,name=org.spice-space.webdav.0";
-	    push @$devices, '-device', "virtserialport,chardev=foldershare,name=org.spice-space.webdav.0";
+	    my $localhost = PVE::Network::addr_to_ip($nodeaddrs[0]->{addr});
+	    $spice_port = PVE::Tools::next_spice_port($pfamily, $localhost);
+
+	    my $spice_enhancement_str = $conf->{spice_enhancements} // '';
+	    my $spice_enhancement = parse_property_string($spice_enhancements_fmt, $spice_enhancement_str);
+	    if ($spice_enhancement->{foldersharing}) {
+		push @$devices, '-chardev', "spiceport,id=foldershare,name=org.spice-space.webdav.0";
+		push @$devices, '-device', "virtserialport,chardev=foldershare,name=org.spice-space.webdav.0";
+	    }
+
+	    my $spice_opts = "tls-port=${spice_port},addr=$localhost,tls-ciphers=HIGH,seamless-migration=on";
+	    $spice_opts .= ",streaming-video=$spice_enhancement->{videostreaming}"
+		if $spice_enhancement->{videostreaming};
+	    push @$devices, '-spice', "$spice_opts";
 	}
-
-	my $spice_opts = "tls-port=${spice_port},addr=$localhost,tls-ciphers=HIGH,seamless-migration=on";
-	$spice_opts .= ",streaming-video=$spice_enhancement->{videostreaming}"
-	    if $spice_enhancement->{videostreaming};
-
-	push @$devices, '-spice', "$spice_opts";
     }
 
     # enable balloon by default, unless explicitly disabled
@@ -5018,6 +5052,10 @@ sub vmconfig_hotplug_pending {
 	    } elsif ($opt =~ m/^net(\d+)$/) {
 		die "skip\n" if !$hotplug_features->{network};
 		vm_deviceunplug($vmid, $conf, $opt);
+		if($have_sdn) {
+		    my $net = PVE::QemuServer::parse_net($conf->{$opt});
+		    PVE::Network::SDN::Vnets::del_ips_from_mac($net->{bridge}, $net->{macaddr}, $conf->{name});
+		}
 	    } elsif (is_valid_drivename($opt)) {
 		die "skip\n" if !$hotplug_features->{disk} || $opt =~ m/(ide|sata)(\d+)/;
 		vm_deviceunplug($vmid, $conf, $opt);
@@ -5223,6 +5261,12 @@ sub vmconfig_apply_pending {
 		die "internal error";
 	    } elsif (defined($conf->{$opt}) && is_valid_drivename($opt)) {
 		vmconfig_delete_or_detach_drive($vmid, $storecfg, $conf, $opt, $force);
+	    } elsif (defined($conf->{$opt}) && $opt =~ m/^net\d+$/) {
+		if($have_sdn) {
+		    my $net = PVE::QemuServer::parse_net($conf->{$opt});
+		    eval { PVE::Network::SDN::Vnets::del_ips_from_mac($net->{bridge}, $net->{macaddr}, $conf->{name}) };
+		    warn if $@;
+		}
 	    }
 	};
 	if (my $err = $@) {
@@ -5242,6 +5286,20 @@ sub vmconfig_apply_pending {
 	eval {
 	    if (defined($conf->{$opt}) && is_valid_drivename($opt)) {
 		vmconfig_register_unused_drive($storecfg, $vmid, $conf, parse_drive($opt, $conf->{$opt}))
+	    } elsif (defined($conf->{pending}->{$opt}) && $opt =~ m/^net\d+$/) {
+		if($have_sdn) {
+                    my $new_net = PVE::QemuServer::parse_net($conf->{pending}->{$opt});
+		    if ($conf->{$opt}){
+		        my $old_net = PVE::QemuServer::parse_net($conf->{$opt});
+
+			if ($old_net->{bridge} ne $new_net->{bridge} ||
+			    $old_net->{macaddr} ne $new_net->{macaddr}) {
+			    PVE::Network::SDN::Vnets::del_ips_from_mac($old_net->{bridge}, $old_net->{macaddr}, $conf->{name});
+			}
+		   }
+		   #fixme: reuse ip if mac change && same bridge
+		   PVE::Network::SDN::Vnets::add_next_free_cidr($new_net->{bridge}, $conf->{name}, $new_net->{macaddr}, $vmid, undef, 1);
+		}
 	    }
 	};
 	if (my $err = $@) {
@@ -5285,6 +5343,11 @@ sub vmconfig_update_net {
             # for non online change, we try to hot-unplug
 	    die "skip\n" if !$hotplug;
 	    vm_deviceunplug($vmid, $conf, $opt);
+
+	    if($have_sdn) {
+		PVE::Network::SDN::Vnets::del_ips_from_mac($oldnet->{bridge}, $oldnet->{macaddr}, $conf->{name});
+	    }
+
 	} else {
 
 	    die "internal error" if $opt !~ m/net(\d+)/;
@@ -5296,11 +5359,31 @@ sub vmconfig_update_net {
 		safe_num_ne($oldnet->{firewall}, $newnet->{firewall})) {
 		PVE::Network::tap_unplug($iface);
 
+		#set link_down in guest if bridge or vlan change to notify guest (dhcp renew for example)
+		if (safe_string_ne($oldnet->{bridge}, $newnet->{bridge}) ||
+		    safe_num_ne($oldnet->{tag}, $newnet->{tag})) {
+		    qemu_set_link_status($vmid, $opt, 0);
+		}
+
+		if (safe_string_ne($oldnet->{bridge}, $newnet->{bridge})) {
+		    if ($have_sdn) {
+			PVE::Network::SDN::Vnets::del_ips_from_mac($oldnet->{bridge}, $oldnet->{macaddr}, $conf->{name});
+			PVE::Network::SDN::Vnets::add_next_free_cidr($newnet->{bridge}, $conf->{name}, $newnet->{macaddr}, $vmid, undef, 1);
+		    }
+		}
+
 		if ($have_sdn) {
 		    PVE::Network::SDN::Zones::tap_plug($iface, $newnet->{bridge}, $newnet->{tag}, $newnet->{firewall}, $newnet->{trunks}, $newnet->{rate});
 		} else {
 		    PVE::Network::tap_plug($iface, $newnet->{bridge}, $newnet->{tag}, $newnet->{firewall}, $newnet->{trunks}, $newnet->{rate});
 		}
+
+		#set link_up in guest if bridge or vlan change to notify guest (dhcp renew for example)
+		if (safe_string_ne($oldnet->{bridge}, $newnet->{bridge}) ||
+		    safe_num_ne($oldnet->{tag}, $newnet->{tag})) {
+		    qemu_set_link_status($vmid, $opt, 1);
+		}
+
 	    } elsif (safe_num_ne($oldnet->{rate}, $newnet->{rate})) {
 		# Rate can be applied on its own but any change above needs to
 		# include the rate in tap_plug since OVS resets everything.
@@ -5316,6 +5399,10 @@ sub vmconfig_update_net {
     }
 
     if ($hotplug) {
+	if ($have_sdn) {
+	    PVE::Network::SDN::Vnets::add_next_free_cidr($newnet->{bridge}, $conf->{name}, $newnet->{macaddr}, $vmid, undef, 1);
+	    PVE::Network::SDN::Vnets::add_dhcp_mapping($newnet->{bridge}, $newnet->{macaddr}, $vmid, $conf->{name});
+	}
 	vm_deviceplug($storecfg, $conf, $vmid, $opt, $newnet, $arch, $machine_type);
     } else {
 	die "skip\n";
@@ -8604,6 +8691,35 @@ sub del_nets_bridge_fdb {
 	    PVE::Network::SDN::Zones::del_bridge_fdb($iface, $mac, $bridge);
 	} elsif (-d "/sys/class/net/$bridge/bridge") { # avoid fdb management with OVS for now
 	    PVE::Network::del_bridge_fdb($iface, $mac);
+	}
+    }
+}
+
+sub create_ifaces_ipams_ips {
+    my ($conf, $vmid) = @_;
+
+    return if !$have_sdn;
+
+    foreach my $opt (keys %$conf) {
+        if ($opt =~ m/^net(\d+)$/) {
+            my $value = $conf->{$opt};
+            my $net = PVE::QemuServer::parse_net($value);
+            eval { PVE::Network::SDN::Vnets::add_next_free_cidr($net->{bridge}, $conf->{name}, $net->{macaddr}, $vmid, undef, 1) };
+            warn $@ if $@;
+        }
+    }
+}
+
+sub delete_ifaces_ipams_ips {
+    my ($conf, $vmid) = @_;
+
+    return if !$have_sdn;
+
+    foreach my $opt (keys %$conf) {
+	if ($opt =~ m/^net(\d+)$/) {
+	    my $net = PVE::QemuServer::parse_net($conf->{$opt});
+	    eval { PVE::Network::SDN::Vnets::del_ips_from_mac($net->{bridge}, $net->{macaddr}, $conf->{name}) };
+	    warn $@ if $@;
 	}
     }
 }

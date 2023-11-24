@@ -991,6 +991,8 @@ __PACKAGE__->register_method({
 		    eval { PVE::QemuServer::template_create($vmid, $restored_conf) };
 		    warn $@ if $@;
 		}
+
+		PVE::QemuServer::create_ifaces_ipams_ips($restored_conf, $vmid) if $unique;
 	    };
 
 	    # ensure no old replication state are exists
@@ -1035,6 +1037,9 @@ __PACKAGE__->register_method({
 			$conf->{boot} = PVE::QemuServer::print_bootorder($devs);
 		    }
 
+		    my $vga = PVE::QemuServer::parse_vga($conf->{vga});
+		    PVE::QemuServer::assert_clipboard_config($vga);
+
 		    # auto generate uuid if user did not specify smbios1 option
 		    if (!$conf->{smbios1}) {
 			$conf->{smbios1} = PVE::QemuServer::generate_smbios1_uuid();
@@ -1066,6 +1071,8 @@ __PACKAGE__->register_method({
 		}
 
 		PVE::AccessControl::add_vm_to_pool($vmid, $pool) if $pool;
+
+		PVE::QemuServer::create_ifaces_ipams_ips($conf, $vmid);
 	    };
 
 	    PVE::QemuConfig->lock_config_full($vmid, 1, $realcmd);
@@ -1856,6 +1863,10 @@ my $update_vm_api  = sub {
 		    } elsif ($authuser ne 'root@pam') {
 			die "only root can modify '$opt' config for real devices\n";
 		    }
+		    $conf->{pending}->{$opt} = $param->{$opt};
+		} elsif ($opt eq 'vga') {
+		    my $vga = PVE::QemuServer::parse_vga($param->{$opt});
+		    PVE::QemuServer::assert_clipboard_config($vga);
 		    $conf->{pending}->{$opt} = $param->{$opt};
 		} elsif ($opt =~ m/^usb\d+/) {
 		    if (my $olddevice = $conf->{$opt}) {
@@ -2692,6 +2703,13 @@ __PACKAGE__->register_method({
 		type => 'boolean',
 		optional => 1,
 	    },
+	    clipboard => {
+		description => 'Enable a specific clipboard. If not set, depending on'
+		    .' the display type the SPICE one will be added.',
+		type => 'string',
+		enum => ['vnc'],
+		optional => 1,
+	    },
 	},
     },
     code => sub {
@@ -2710,6 +2728,7 @@ __PACKAGE__->register_method({
 	    my $spice = defined($vga->{type}) && $vga->{type} =~ /^virtio/;
 	    $spice ||= PVE::QemuServer::vga_conf_has_spice($conf->{vga});
 	    $status->{spice} = 1 if $spice;
+	    $status->{clipboard} = $vga->{clipboard};
 	}
 	$status->{agent} = 1 if PVE::QemuServer::get_qga_key($conf, 'enabled');
 
@@ -3762,6 +3781,8 @@ __PACKAGE__->register_method({
 		}
 
 		PVE::QemuConfig->write_config($newid, $newconf);
+
+		PVE::QemuServer::create_ifaces_ipams_ips($newconf, $newid);
 
 		if ($target) {
 		    # always deactivate volumes - avoid lvm LVs to be active on several nodes
