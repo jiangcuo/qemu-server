@@ -3104,6 +3104,8 @@ sub query_supported_cpu_flags {
 
 	if (!$kvm) {
 	    push @$cmd, '-accel', 'tcg';
+	}else{
+	    push @$cmd, '-accel', 'kvm';
 	}
 
 	my $rc = run_command($cmd, noerr => 1, quiet => 0);
