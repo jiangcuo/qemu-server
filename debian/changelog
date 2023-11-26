@@ -1,3 +1,9 @@
+qemu-server (7.0-8+loong64) bullseye; urgency=medium
+
+  * add loongarch64 kvm hardware accel support
+
+ -- jiangcuo <jiangcuo@bingsin.com>  Sun, 26 Nov 2023 20:13:27 +0800
+
 qemu-server (7.0-8) bullseye; urgency=medium
 
   * cpu weight: always clamp value to lower maximum for cgroup v2
