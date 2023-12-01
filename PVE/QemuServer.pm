@@ -179,10 +179,10 @@ my $vga_fmt = {
     type => {
 	description => "Select the VGA type.",
 	type => 'string',
-	default => 'std',
+	default => 'virtio',
 	optional => 1,
 	default_key => 1,
-	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio vmware)],
+	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio vmware virtio-gl)],
     },
     memory => {
 	description => "Sets the VGA memory (in MiB). Has no effect with serial display.",
@@ -1753,16 +1753,18 @@ my $vga_map = {
     'cirrus' => 'cirrus-vga',
     'std' => 'VGA',
     'vmware' => 'vmware-svga',
-    'virtio' => 'virtio-vga',
+    'virtio' => 'virtio-gpu',
+	'virtio-gl' => 'virtio-gpu-gl',
 };
 
 sub print_vga_device {
     my ($conf, $vga, $arch, $machine_version, $machine, $id, $qxlnum, $bridges) = @_;
 
     my $type = $vga_map->{$vga->{type}};
-    if ($arch eq 'aarch64' && defined($type) && $type eq 'virtio-vga') {
+    if ($arch eq 'aarch64' && defined($type) && $type eq 'virtio-gpu') {
 	$type = 'virtio-gpu';
     }
+
     my $vgamem_mb = $vga->{memory};
 
     my $max_outputs = '';
@@ -1781,7 +1783,7 @@ sub print_vga_device {
 
     my $memory = "";
     if ($vgamem_mb) {
-	if ($vga->{type} eq 'virtio') {
+	if ($vga->{type}  =~ /^virtio/) {
 	    my $bytes = PVE::Tools::convert_size($vgamem_mb, "mb" => "b");
 	    $memory = ",max_hostmem=$bytes";
 	} elsif ($qxlnum) {
@@ -3492,6 +3494,9 @@ sub config_to_command {
     if ($vga->{type} && $vga->{type} !~ m/^serial\d+$/ && $vga->{type} ne 'none'){
 	push @$devices, '-device', print_vga_device(
 	    $conf, $vga, $arch, $machine_version, $machine_type, undef, $qxlnum, $bridges);
+
+		push @$cmd, '-display', 'egl-headless,gl=core' if $vga->{type} eq 'virtio-gl'; # VIRGL
+		
 	my $socket = PVE::QemuServer::Helpers::vnc_socket($vmid);
 	push @$cmd,  '-vnc', "unix:$socket,password=on";
     } else {
