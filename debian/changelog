@@ -1,3 +1,9 @@
+qemu-server (8.0.10+pve1) bookworm; urgency=medium
+
+  * add pve-edk2-firmware-aarch64 depends
+
+ -- jiangcuo <jiangcuo@bingsin.com>  Sun, 03 Dec 2023 01:46:23 -0500
+
 qemu-server (8.0.10) bookworm; urgency=medium
 
   * sdn: pass vmid and hostname to allow requesting a new mapping
