@@ -4289,7 +4289,7 @@ sub qemu_usb_hotplug {
 
 	my $devicelist = vm_devices_list($vmid);
 
-	if (!$devicelist->{qemu-xhci}) {
+	if (!$devicelist->{'qemu-xhci'}) {
 	    my $pciaddr = print_pci_addr("xhci", undef, $arch, $machine_type);
 	    qemu_deviceadd($vmid, "nec-usb-xhci,id=xhci$pciaddr");
 	}
@@ -4616,10 +4616,10 @@ sub vmconfig_hotplug_pending {
 		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch ne 'x86_64';
 		}
 	    } elsif ($opt =~ m/^usb\d+/) {
-		die "skip\n";
+		# die "skip\n";
 		# since we cannot reliably hot unplug usb devices we are disabling it
-		#die "skip\n" if !$hotplug_features->{usb} || $conf->{$opt} =~ m/spice/i;
-		#vm_deviceunplug($vmid, $conf, $opt);
+		die "skip\n" if !$hotplug_features->{usb} || $conf->{$opt} =~ m/spice/i;
+		vm_deviceunplug($vmid, $conf, $opt);
 	    } elsif ($opt eq 'vcpus') {
 		die "skip\n" if !$hotplug_features->{cpu};
 		qemu_cpu_hotplug($vmid, $conf, undef);
