@@ -89,8 +89,9 @@ sub get_usb_devices {
 	    $hostdevice->{usb3} = $d->{usb3};
 	    if ($hostdevice->{spice}) {
 		# usb redir support for spice
-		my $bus = 'ehci';
-		$bus = 'xhci' if $hostdevice->{usb3} && $features->{spice_usb3};
+		my $bus = 'qemu-xhci';
+        
+		# $bus = 'qemu-xhci' if $hostdevice->{usb3} && $features->{spice_usb3};
 
 		push @$devices, '-chardev', "spicevmc,id=usbredirchardev$i,name=usbredir";
 		push @$devices, '-device', "usb-redir,chardev=usbredirchardev$i,id=usbredirdev$i,bus=$bus.0";
@@ -113,7 +114,7 @@ sub print_usbdevice_full {
 
     # if it is a usb3 device, attach it to the xhci controller, else omit the bus option
     if($device->{usb3}) {
-	$usbdevice .= ",bus=xhci.0";
+	$usbdevice .= ",bus=qemu-xhci.0";
     }
 
     if (defined($device->{vendorid}) && defined($device->{productid})) {

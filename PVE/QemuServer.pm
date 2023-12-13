@@ -3921,10 +3921,10 @@ sub vm_deviceplug {
 
     } elsif ($deviceid =~ m/^usb(\d+)$/) {
 
-	die "usb hotplug currently not reliable\n";
+	#die "usb hotplug currently not reliable\n";
 	# since we can't reliably hot unplug all added usb devices and usb
 	# passthrough breaks live migration we disable usb hotplugging for now
-	#qemu_deviceadd($vmid, PVE::QemuServer::USB::print_usbdevice_full($conf, $deviceid, $device));
+	qemu_deviceadd($vmid, PVE::QemuServer::USB::print_usbdevice_full($conf, $deviceid, $device));
 
     } elsif ($deviceid =~ m/^(virtio)(\d+)$/) {
 
@@ -4028,11 +4028,11 @@ sub vm_deviceunplug {
 
     } elsif ($deviceid =~ m/^usb\d+$/) {
 
-	die "usb hotplug currently not reliable\n";
+	#die "usb hotplug currently not reliable\n";
 	# when unplugging usb devices this way, there may be remaining usb
 	# controllers/hubs so we disable it for now
-	#qemu_devicedel($vmid, $deviceid);
-	#qemu_devicedelverify($vmid, $deviceid);
+	qemu_devicedel($vmid, $deviceid);
+	qemu_devicedelverify($vmid, $deviceid);
 
     } elsif ($deviceid =~ m/^(virtio)(\d+)$/) {
 
@@ -4289,7 +4289,7 @@ sub qemu_usb_hotplug {
 
 	my $devicelist = vm_devices_list($vmid);
 
-	if (!$devicelist->{xhci}) {
+	if (!$devicelist->{qemu-xhci}) {
 	    my $pciaddr = print_pci_addr("xhci", undef, $arch, $machine_type);
 	    qemu_deviceadd($vmid, "nec-usb-xhci,id=xhci$pciaddr");
 	}
@@ -4699,12 +4699,13 @@ sub vmconfig_hotplug_pending {
 		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch eq 'aarch64';
 		}
 	    } elsif ($opt =~ m/^usb\d+$/) {
-		die "skip\n";
+		# die "skip\n";
 		# since we cannot reliably hot unplug usb devices we disable it for now
-		#die "skip\n" if !$hotplug_features->{usb} || $value =~ m/spice/i;
-		#my $d = eval { parse_property_string($usbdesc->{format}, $value) };
-		#die "skip\n" if !$d;
-		#qemu_usb_hotplug($storecfg, $conf, $vmid, $opt, $d, $arch, $machine_type);
+		die "skip\n" if !$hotplug_features->{usb} || $value =~ m/spice/i;
+		my $d = eval { parse_property_string($usbdesc->{format}, $value) };
+		die "skip\n" if !$d;
+		qemu_usb_hotplug($storecfg, $conf, $vmid, $opt, $d, $arch, $machine_type);
+
 	    } elsif ($opt eq 'vcpus') {
 		die "skip\n" if !$hotplug_features->{cpu};
 		qemu_cpu_hotplug($vmid, $conf, $value);

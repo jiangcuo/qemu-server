@@ -153,8 +153,8 @@ sub get_pci_addr_map {
 	'net21' => { bus => 1, addr => 22 },
 	'net22' => { bus => 1, addr => 23 },
 	'net23' => { bus => 1, addr => 24 },
-	'net24' => { bus => 1, addr => 25 },	
-	'xhci' => { bus => 1, addr => 27 },
+	'net24' => { bus => 1, addr => 25 },
+	'xhci' => { bus => 1, addr => 26 },	
 	'pci.4' => { bus => 1, addr => 28 },
 	'rng0' => { bus => 1, addr => 29 },
 	'pci.2-igd' => { bus => 1, addr => 30 }, # replaces pci.2 in case a legacy IGD device is passed through
