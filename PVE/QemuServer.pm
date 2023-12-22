@@ -1855,7 +1855,7 @@ my $vga_map = {
     'std' => 'VGA',
     'vmware' => 'vmware-svga',
     'virtio' => 'virtio-vga',
-    'virtio-gl' => 'virtio-vga-gl',
+    'virtio-gl' => 'virtio-gpu-gl',
     'ramfb' => 'ramfb',
 };
 
