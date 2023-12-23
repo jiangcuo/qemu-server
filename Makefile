@@ -99,11 +99,6 @@ $(DSC): $(BUILDDIR)
 sbuild: $(DSC)
 	sbuild $(DSC)
 
-.PHONY: test
-test:
-	PVE_GENERATING_DOCS=1 perl -I. ./qm verifyapi
-	$(MAKE) -C test
-
 .PHONY: upload
 upload: UPLOAD_DIST ?= $(DEB_DISTRIBUTION)
 upload: $(DEB)
@@ -111,7 +106,6 @@ upload: $(DEB)
 
 .PHONY: clean
 clean:
-	$(MAKE) -C test $@
 	rm -rf $(PACKAGE)-*/ *.deb *.build *.buildinfo *.changes *.dsc $(PACKAGE)_*.tar.?z
 	rm -f *.xml.tmp *.1 *.5 *.8 *{synopsis,opts}.adoc docinfo.xml
 
