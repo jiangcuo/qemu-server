@@ -1439,7 +1439,7 @@ sub print_tabletdevice_full {
 sub print_keyboarddevice_full {
     my ($conf, $arch) = @_;
 
-    return if $arch ne 'aarch64';
+    return if $arch eq 'x86_64';
 
     return "usb-kbd,id=keyboard";
 }
@@ -3703,15 +3703,14 @@ sub config_to_command {
 
     if ($q35) { # tell QEMU to load q35 config early
 	# we use different pcie-port hardware for qemu >= 4.0 for passthrough
-	if ($arch eq 'x86_64'){
 		if (min_version($machine_version, 4, 0)) {
 			push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35-4.0.cfg';
 		} else {
 			push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35.cfg';
 		}
-    }else{
-		push @$devices, '-readconfig', '/usr/share/qemu-server/pve-port.cfg';
 	}
+	if ($arch ne 'x86_64'){
+	    push @$devices, '-readconfig', '/usr/share/qemu-server/pve-port.cfg';
 	}
 
     if (defined(my $fixups = qemu_created_version_fixups($conf, $forcemachine, $kvmver))) {
