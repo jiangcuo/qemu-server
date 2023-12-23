@@ -29,6 +29,7 @@
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
@@ -36,15 +37,19 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <time.h>
 
 #include "qmeventd.h"
 
+#define DEFAULT_KILL_TIMEOUT 60
+
 static int verbose = 0;
+static int kill_timeout = DEFAULT_KILL_TIMEOUT;
 static int epoll_fd = 0;
 static const char *progname;
 GHashTable *vm_clients; // key=vmid (freed on remove), value=*Client (free manually)
 GSList *forced_cleanups;
-volatile sig_atomic_t alarm_triggered = 0;
+static int needs_cleanup = 0;
 
 /*
  * Helper functions
@@ -56,6 +61,7 @@ usage()
     fprintf(stderr, "Usage: %s [-f] [-v] PATH\n", progname);
     fprintf(stderr, "  -f       run in foreground (default: false)\n");
     fprintf(stderr, "  -v       verbose (default: false)\n");
+    fprintf(stderr, "  -t <s>   kill timeout (default: %ds)\n", DEFAULT_KILL_TIMEOUT);
     fprintf(stderr, "  PATH     use PATH for socket\n");
 }
 
@@ -69,14 +75,13 @@ get_pid_from_fd(int fd)
 }
 
 /*
- * reads the vmid from /proc/<pid>/cmdline
- * after the '-id' argument
+ * parses the vmid from the qemu.slice entry of /proc/<pid>/cgroup
  */
 static unsigned long
 get_vmid_from_pid(pid_t pid)
 {
     char filename[32] = { 0 };
-    int len = snprintf(filename, sizeof(filename), "/proc/%d/cmdline", pid);
+    int len = snprintf(filename, sizeof(filename), "/proc/%d/cgroup", pid);
     if (len < 0) {
 	fprintf(stderr, "error during snprintf for %d: %s\n", pid,
 		strerror(errno));
@@ -93,43 +98,54 @@ get_vmid_from_pid(pid_t pid)
     }
 
     unsigned long vmid = 0;
-    ssize_t rc = 0;
     char *buf = NULL;
     size_t buflen = 0;
-    while ((rc = getdelim(&buf, &buflen, '\0', fp)) >= 0) {
-	if (!strcmp(buf, "-id")) {
-	    break;
+
+    while (getline(&buf, &buflen, fp) >= 0) {
+	char *cgroup_path = strrchr(buf, ':');
+	if (!cgroup_path) {
+	    fprintf(stderr, "unexpected cgroup entry %s\n", buf);
+	    continue;
 	}
-    }
+	cgroup_path++;
 
-    if (rc < 0) {
-	goto err;
-    }
+	if (strncmp(cgroup_path, "/qemu.slice/", 12)) {
+	    continue;
+	}
 
-    if (getdelim(&buf, &buflen, '\0', fp) >= 0) {
-	if (buf[0] == '-' || buf[0] == '\0') {
-	    fprintf(stderr, "invalid vmid %s\n", buf);
-	    goto ret;
+	char *vmid_start = strrchr(buf, '/');
+	if (!vmid_start) {
+	    fprintf(stderr, "unexpected cgroup entry %s\n", buf);
+	    continue;
+	}
+	vmid_start++;
+
+	if (vmid_start[0] == '-' || vmid_start[0] == '\0') {
+	    fprintf(stderr, "invalid vmid in cgroup entry %s\n", buf);
+	    continue;
 	}
 
 	errno = 0;
 	char *endptr = NULL;
-	vmid = strtoul(buf, &endptr, 10);
-	if (errno != 0) {
+	vmid = strtoul(vmid_start, &endptr, 10);
+	if (!endptr || strncmp(endptr, ".scope", 6)) {
+	    fprintf(stderr, "unexpected cgroup entry %s\n", buf);
 	    vmid = 0;
-	    goto err;
-	} else if (*endptr != '\0') {
-	    fprintf(stderr, "invalid vmid %s\n", buf);
+	    continue;
+	}
+	if (errno != 0) {
 	    vmid = 0;
 	}
 
-	goto ret;
+	break;
     }
 
-err:
-    fprintf(stderr, "error parsing vmid for %d: %s\n", pid, strerror(errno));
+    if (errno) {
+	fprintf(stderr, "error parsing vmid for %d: %s\n", pid, strerror(errno));
+    } else if (!vmid) {
+	fprintf(stderr, "error parsing vmid for %d: no matching qemu.slice cgroup entry\n", pid);
+    }
 
-ret:
     free(buf);
     fclose(fp);
     return vmid;
@@ -281,8 +297,10 @@ handle_qmp_return(struct Client *client, struct json_object *data, bool error)
 	    VERBOSE_PRINT("%s: QMP handshake complete\n", client->qemu.vmid);
 	    break;
 
-	case STATE_IDLE:
+	// we expect an empty return object after sending quit
 	case STATE_TERMINATING:
+	    break;
+	case STATE_IDLE:
 	    VERBOSE_PRINT("%s: spurious return value received\n",
 			  client->qemu.vmid);
 	    break;
@@ -436,6 +454,11 @@ cleanup_client(struct Client *client)
 	    break;
     }
 
+    if (client->pidfd > 0) {
+	(void)close(client->pidfd);
+    }
+    VERBOSE_PRINT("removing %s from forced cleanups\n", client->qemu.vmid);
+    forced_cleanups = g_slist_remove(forced_cleanups, client);
     free(client);
 }
 
@@ -466,19 +489,22 @@ terminate_client(struct Client *client)
 	}
     }
 
-    int err = kill(client->pid, SIGTERM);
-    log_neg(err, "kill");
+    // try to send a 'quit' command first, fallback to SIGTERM of the pid
+    static const char qmp_quit_command[] = "{\"execute\":\"quit\"}\n";
+    VERBOSE_PRINT("%s: sending 'quit' via QMP\n", client->qemu.vmid);
+    if (!must_write(client->fd, qmp_quit_command, sizeof(qmp_quit_command) - 1)) {
+	VERBOSE_PRINT("%s: sending 'SIGTERM' to pid %d\n", client->qemu.vmid, client->pid);
+	int err = kill(client->pid, SIGTERM);
+	log_neg(err, "kill");
+    }
 
-    struct CleanupData *data_ptr = malloc(sizeof(struct CleanupData));
-    struct CleanupData data = {
-	.pid = client->pid,
-	.pidfd = pidfd
-    };
-    *data_ptr = data;
-    forced_cleanups = g_slist_prepend(forced_cleanups, (void *)data_ptr);
+    time_t timeout = time(NULL) + kill_timeout;
 
-    // resets any other alarms, but will fire eventually and cleanup all
-    alarm(5);
+    client->pidfd = pidfd;
+    client->timeout = timeout;
+
+    forced_cleanups = g_slist_prepend(forced_cleanups, (void *)client);
+    needs_cleanup = 1;
 }
 
 void
@@ -551,57 +577,50 @@ handle_client(struct Client *client)
     json_tokener_free(tok);
 }
 
-
-/*
- * SIGALRM and cleanup handling
- *
- * terminate_client will set an alarm for 5 seconds and add its client's PID to
- * the forced_cleanups list - when the timer expires, we iterate the list and
- * attempt to issue SIGKILL to all processes which haven't yet stopped.
- */
-
 static void
-alarm_handler(__attribute__((unused)) int signum)
+sigkill(void *ptr, void *time_ptr)
 {
-    alarm_triggered = 1;
-}
-
-static void
-sigkill(void *ptr, __attribute__((unused)) void *unused)
-{
-    struct CleanupData data = *((struct CleanupData *)ptr);
+    struct Client *data = ptr;
     int err;
 
-    if (data.pidfd > 0) {
-	err = pidfd_send_signal(data.pidfd, SIGKILL, NULL, 0);
-	(void)close(data.pidfd);
+    if (data->timeout != 0 && data->timeout > *(time_t *)time_ptr) {
+	return;
+    }
+
+    if (data->pidfd > 0) {
+	err = pidfd_send_signal(data->pidfd, SIGKILL, NULL, 0);
+	(void)close(data->pidfd);
+	data->pidfd = -1;
     } else {
-	err = kill(data.pid, SIGKILL);
+	err = kill(data->pid, SIGKILL);
     }
 
     if (err < 0) {
 	if (errno != ESRCH) {
 	    fprintf(stderr, "SIGKILL cleanup of pid '%d' failed - %s\n",
-		    data.pid, strerror(errno));
+		    data->pid, strerror(errno));
 	}
     } else {
 	fprintf(stderr, "cleanup failed, terminating pid '%d' with SIGKILL\n",
-		data.pid);
+		data->pid);
     }
+
+    data->timeout = 0;
+
+    // remove ourselves from the list
+    forced_cleanups = g_slist_remove(forced_cleanups, ptr);
 }
 
 static void
 handle_forced_cleanup()
 {
-    if (alarm_triggered) {
+    if (g_slist_length(forced_cleanups) > 0) {
 	VERBOSE_PRINT("clearing forced cleanup backlog\n");
-	alarm_triggered = 0;
-	g_slist_foreach(forced_cleanups, sigkill, NULL);
-	g_slist_free_full(forced_cleanups, free);
-	forced_cleanups = NULL;
+	time_t cur_time = time(NULL);
+	g_slist_foreach(forced_cleanups, sigkill, &cur_time);
     }
+    needs_cleanup = g_slist_length(forced_cleanups) > 0;
 }
-
 
 int
 main(int argc, char *argv[])
@@ -611,13 +630,22 @@ main(int argc, char *argv[])
     char *socket_path = NULL;
     progname = argv[0];
 
-    while ((opt = getopt(argc, argv, "hfv")) != -1) {
+    while ((opt = getopt(argc, argv, "hfvt:")) != -1) {
 	switch (opt) {
 	    case 'f':
 		daemonize = 0;
 		break;
 	    case 'v':
 		verbose = 1;
+		break;
+	    case 't':
+		errno = 0;
+		char *endptr = NULL;
+		kill_timeout = strtoul(optarg, &endptr, 10);
+		if (errno != 0 || *endptr != '\0' || kill_timeout == 0) {
+		    usage();
+		    exit(EXIT_FAILURE);
+		}
 		break;
 	    case 'h':
 		usage();
@@ -635,7 +663,6 @@ main(int argc, char *argv[])
     }
 
     signal(SIGCHLD, SIG_IGN);
-    signal(SIGALRM, alarm_handler);
 
     socket_path = argv[optind];
 
@@ -669,9 +696,8 @@ main(int argc, char *argv[])
     int nevents;
 
     for(;;) {
-	nevents = epoll_wait(epoll_fd, events, 1, -1);
+	nevents = epoll_wait(epoll_fd, events, 1, needs_cleanup ? 10*1000 : -1);
 	if (nevents < 0 && errno == EINTR) {
-	    handle_forced_cleanup();
 	    continue;
 	}
 	bail_neg(nevents, "epoll_wait");
@@ -688,7 +714,6 @@ main(int argc, char *argv[])
 		handle_client((struct Client *)events[n].data.ptr);
 	    }
 	}
-
 	handle_forced_cleanup();
     }
 }

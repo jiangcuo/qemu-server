@@ -12,7 +12,7 @@ use Time::HiRes qw(usleep gettimeofday tv_interval);
 use PVE::IPCC;
 use PVE::QemuServer::Helpers;
 
-# Qemu Monitor Protocol (QMP) client.
+# QEMU Monitor Protocol (QMP) client.
 #
 # This implementation uses IO::Multiplex (libio-multiplex-perl) and
 # allows you to issue qmp and qga commands to different VMs in parallel.
@@ -113,25 +113,29 @@ sub cmd {
 	    # locked state with high probability, so use an generous timeout
 	    $timeout = 60*60; # 1 hour
 	} elsif ($cmd->{execute} eq 'guest-fsfreeze-thaw') {
-	    # thaw has no possible long blocking actions, either it returns
-	    # instantly or never (dead locked)
-	    $timeout = 10;
-	} elsif ($cmd->{execute} eq 'savevm-start' ||
-		 $cmd->{execute} eq 'savevm-end' ||
-		 $cmd->{execute} eq 'query-backup' ||
-		 $cmd->{execute} eq 'query-block-jobs' ||
-		 $cmd->{execute} eq 'block-job-cancel' ||
-		 $cmd->{execute} eq 'block-job-complete' ||
-		 $cmd->{execute} eq 'backup-cancel' ||
-		 $cmd->{execute} eq 'query-savevm' ||
-		 $cmd->{execute} eq 'delete-drive-snapshot' ||
-		 $cmd->{execute} eq 'guest-shutdown' ||
-		 $cmd->{execute} eq 'blockdev-snapshot-internal-sync' ||
-		 $cmd->{execute} eq 'blockdev-snapshot-delete-internal-sync' ||
-		 $cmd->{execute} eq 'snapshot-drive'  ) {
+	    # While it should return instantly or never (dead locked) for Linux guests,
+	    # the variance for Windows guests can be big. And there might be hook scripts
+	    # that are executed upon thaw, so use 3 minutes to be on the safe side.
+	    $timeout = 3 * 60;
+	} elsif (
+	    $cmd->{execute} eq 'savevm-start' ||
+	    $cmd->{execute} eq 'savevm-end' ||
+	    $cmd->{execute} eq 'query-backup' ||
+	    $cmd->{execute} eq 'query-block-jobs' ||
+	    $cmd->{execute} eq 'block-job-cancel' ||
+	    $cmd->{execute} eq 'block-job-complete' ||
+	    $cmd->{execute} eq 'backup-cancel' ||
+	    $cmd->{execute} eq 'query-savevm' ||
+	    $cmd->{execute} eq 'guest-fstrim' ||
+	    $cmd->{execute} eq 'guest-shutdown' ||
+	    $cmd->{execute} eq 'blockdev-snapshot-internal-sync' ||
+	    $cmd->{execute} eq 'blockdev-snapshot-delete-internal-sync'
+	 ) {
 	    $timeout = 10*60; # 10 mins ?
 	} else {
-	    $timeout = 3; # default
+	    #  NOTE: if you came here as user and want to change this, try using IO-Threads first
+	    # which move out quite some processing of the main thread, leaving more time for QMP
+	    $timeout = 5; # default
 	}
     }
 

@@ -1,16 +1,664 @@
-qemu-server (7.0-8+loong64) bullseye; urgency=medium
+qemu-server (8.0.10) bookworm; urgency=medium
 
-  * add loongarch64 kvm hardware accel support
+  * sdn: pass vmid and hostname to allow requesting a new mapping
 
- -- jiangcuo <jiangcuo@bingsin.com>  Sun, 26 Nov 2023 20:13:27 +0800
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 22 Nov 2023 14:12:46 +0100
 
-qemu-server (7.0-8) bullseye; urgency=medium
+qemu-server (8.0.9) bookworm; urgency=medium
 
-  * cpu weight: always clamp value to lower maximum for cgroup v2
+  * add clipboard option to to vga config entry
+
+  * api: add clipboard variable to return at status/current
+
+  * recommend libpve-network-perl for SDN support
+
+  * initial support for dhcp ip allocation in dhcp-enabled SDN zones
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 21 Nov 2023 15:40:27 +0100
+
+qemu-server (8.0.8) bookworm; urgency=medium
+
+  * fix #2816: restore: remove timeout when allocating disks
+
+  * start: increase maximal timeout if using PCI passthrough
+
+  * fix #4522: api: vncproxy: also set environment variable for the ticket
+    if the websocket option is not set
+
+  * backup, migrate: fix races with suspended VMs that can wake up
+
+  * cpu hotplug: cannot change feature online, so keep these as pending change
+
+  * nbd-stop: increase timeout to 25s
+
+  * start: add warning if a deprecated machine version is configured
+
+ -- Proxmox Support Team <support@proxmox.com>  Sun, 12 Nov 2023 18:54:37 +0100
+
+qemu-server (8.0.7) bookworm; urgency=medium
+
+  * fix #4822: vzdump: fix PBS encryption for guests without disks
+
+  * qmeventd: fix parsing of VMID in presence of legacy cgroup entries
+
+  * api: check access for already configured bridge when updating vNIC
+
+  * fix #4620: make 'ide1' and 'ide3' drive keys work for machine type q35
+
+  * cloudinit: fix two checks that were mistakenly restricted to root only,
+    one for setting the ciupgrade option and one for updating the cloudinit
+    drive
+
+  * migration: improve format hint when allocating live-migrated disk on the
+    target to make e.g. remote-migration with qcow2 and LVM-thin target work
+
+  * net: fix setting value for tx_queue_size
+
+  * fix #3963: allow backup of template VM with immutable TPM drive
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 21 Aug 2023 11:30:45 +0200
+
+qemu-server (8.0.6) bookworm; urgency=medium
+
+  * cloudinit: restore previous default for package upgrades
+
+  * migration: only migrate disks used by the guest, not also those that are
+    owned by them (VMID in name) but not referenced in the config
+
+  * migration: fail when aliased volume are detected, as referencing the same
+    volume multiple times can lead to unexpected behavior in a migration.
+
+  * migration: fix issue with qcow2 cloudinit disk live migration
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 21 Jun 2023 13:03:01 +0200
+
+qemu-server (8.0.5) bookworm; urgency=medium
+
+  * restore: extend permissions checks
+
+  * vm start: always reset any failed-state of the VM systemd scope to avoid
+    failing a re-start after, e.g., a OOM kill.
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 21 Jun 2023 09:17:41 +0200
+
+qemu-server (8.0.4) bookworm; urgency=medium
+
+  * vCPU config: add new x86-64-v2, x86-64-v3 and x86-64-v4 models
+
+  * fix #4784: helpers: cope with native versions in manager version check
+
+  * enable cluster mapped USB devices for guests
+
+  * enable cluster mapped PCI devices for guests
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 19 Jun 2023 07:24:11 +0200
+
+qemu-server (8.0.3) bookworm; urgency=medium
+
+  * qemu: fix permission check call
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 09 Jun 2023 12:20:40 +0200
+
+qemu-server (8.0.2) bookworm; urgency=medium
+
+  * cfg2cmd: use actual backend names instead of removed tty and paraport
+    aliases
+
+  * cfg2cmd: replace deprecated no-acpi option with acpi=off machine flag
+
+  * cfg2cmd: replace deprecated no-hpet option with hpet=off machine flag
+
+  * schema: avoid using deprecated -no-hpet in example for 'args' property,
+    instead pass thate via new machine option
+
+  * allow setting ipconfigX with VM.Config.Cloudinit
+
+  * fix #3428: cloudinit: add parameter for upgrade on boot
+
+  * cloudinit: fix 'pending' api endpoint
+
+  * fast plug options: add migrate_downtime and migrate_speed for convenience
+
+  * fix #517: api: allow resizing qcow2 disk with snapshots
+
+  * fix #2315: api: have resize endpoint spawn a worker task
+
+  * cloudinit: pass through hostname via fqdn field
+
+  * qmeventd: extract vmid from cgroup file instead of cmdline
+
+  * config: implement method to calculate derived properties from a config
+
+  * api: check bridge access for create, update, clone & restore
+
+  * qm: remote migration: improve error when storage cannot be found
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 09 Jun 2023 10:26:19 +0200
+
+qemu-server (8.0.1) bookworm; urgency=medium
+
+  * fix #4737: qmeventd: gracefully handle interrupted epoll_wait call
+
+  * handle and warn about VM network interfaces not attached to any bridges
+
+  * block resize: avoid passing zero size to QMP command
+
+  * qmrestore: improve description of bwlimit parameter
+
+  * api: switch agent api call to 'array' type
+
+  * tests: fix invoking migration tests with make
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 07 Jun 2023 13:50:09 +0200
+
+qemu-server (8.0.0) bookworm; urgency=medium
+
+  * never enable 'smm' flag for the 'virt' machine type (doesn't exist)
+
+  * test: mock calls that can fail in a chroot environment
+
+  * rebuild for Debian Bookworm based releases
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 19 May 2023 15:07:45 +0200
+
+qemu-server (7.4-3) bullseye; urgency=medium
+
+  * backup prepare: fix format detection for disks without storage ID
+
+  * backup prepare: improve error messages
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 27 Mar 2023 11:17:16 +0200
+
+qemu-server (7.4-2) bullseye; urgency=medium
+
+  * avoid list context for volume_size_info calls as otherwise we
+    unnecessarily take a slower code path
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 21 Mar 2023 16:51:01 +0100
+
+qemu-server (7.4-1) bullseye; urgency=medium
+
+  * fix #4553: nvidia vgpu: reuse smbios uuid for '-uuid' parameter
+
+  * pci: workaround nvidia driver issue on mdev cleanup
+
+  * memory: hotplug: sort by numerical ID rather than slot when unplugging
+
+  * memory: use the DIMM list info from QEMU for unplug
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 20 Mar 2023 17:24:45 +0100
+
+qemu-server (7.3-4) bullseye; urgency=medium
+
+  * fix #4378: standardized error for missing OVMF files
+
+  * schema: memory: be precise that unit is binary prefix
+
+  * close #2792: allow online migration with replicated snapshots
+
+  * schema: OS type: note that the l26 type is also compatible with Linux 6.x
+
+  * hotplug: disk: mark the 'aio' (async IO) as non-hotpluggable to avoid
+    suggesting that it already changed
+
+  * fix #4525: clone disk: disallow mirror if it might cause problems with
+    io_uring using the same heuristics as for start-up
+
+  * start: make not being able to set polling interval for ballooning
+    non-critical
+
+  * swtpm: enable logging to `/run/qemu-server/$vmid-swtpm.log`
+
+  * fix #4140: vzdump: transform the previous hardcoded behavior of issuing a
+    fs-freeze and fs-thaw if QGA is enabled  into an overrideable option named
+    'fs-freeze-on-backup'
+
+  * update network dev: MTU is not hot-pluggable, avoid suggesting so
+
+  * fix #4249: make image clone or conversion respect bandwidth limit
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 23 Feb 2023 17:12:42 +0100
+
+qemu-server (7.3-3) bullseye; urgency=medium
+
+  * rollback: ignore auto-start request if VM is already running
+
+  * memory hot-plug: check correct value for maximal memory check
+
+  * fix #4435: device list: avoid error for undefined value
+
+  * fix #4358: ignore any suspended lock when destroying a VM
+
+  * migration: log error from query-migrate, if any, upon migration failure
+
+  * cd rom handling: return a clearer error when there is no CD-ROM drive
+
+  * migration: nbd export: switch away from deprecated QMP command
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 16 Jan 2023 13:52:30 +0100
+
+qemu-server (7.3-2) bullseye; urgency=medium
+
+  * fix #4372: improve edge-case for config-loading on VM resume when
+    migrating
+
+  * ovmf cmd assembly: re-work and re-order arguments assembly
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 16 Dec 2022 12:54:53 +0100
+
+qemu-server (7.3-1) bullseye; urgency=medium
+
+  * vm resume: improve loading just recently moved config on nocheck/migrate
+    handling
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 21 Nov 2022 13:43:59 +0100
+
+qemu-server (7.2-12) bullseye; urgency=medium
+
+  * config: only save unique tags when updating them via the API
+
+  * api: create/update vm: fix clamping CPU units function calls
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 21 Nov 2022 08:36:06 +0100
+
+qemu-server (7.2-11) bullseye; urgency=medium
+
+  * fdb: only manage FDB entries for Linux bridges, ignore OVS for now
+
+ -- Proxmox Support Team <support@proxmox.com>  Sun, 20 Nov 2022 16:30:28 +0100
+
+qemu-server (7.2-10) bullseye; urgency=medium
+
+  * fix #4321: properly check cloud-init drive permissions, require both
+    VM.Config.CDROM and VM.Config.Cloudinit, and not VM.Config.Disk, for being
+    able to add a cloud init drive in the first place.
+
+  * api: config update: enforce new tag permission system when setting or
+    removing tags from a guest
+
+
+  * parse config: do not validate informative values in cloud init section
+
+  * fix edge-cases on new cloudinit pending/active recording
+
+  * mtunnel: add API endpoints
+
+  * migrate: add foundation for remote (external cluster) migration, add
+    respective endpoints and qm `remote-migrate` CLI command
+
+  * memory hotplug: make max-memory dynamically calculated from the physicall
+    address bits the VM will use, that is the actual one from the config, if
+    set, the one from the host for CPU type host and 40 bits as fallback for
+    everything else. Calculate the addressable memory (e.g., 40 bits = 1 TiB)
+    and half that for the possible max-memory a VM can use, using the previous
+    hard-coded 4 TiB as overall maximum for backward compat.
+    Admins with inhomogeneous CPUs and thus possible different bit-widths need
+    to take special care themselves to ensure that a VM with memory hot-plug
+    configured can run on other nodes, for example for live-migration.
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 17 Nov 2022 17:48:03 +0100
+
+qemu-server (7.2-8) bullseye; urgency=medium
+
+  * fix #4296: virtio-net: enable packed queues for qemu 7.1
+
+  * virtio-net: increase defaults rx- and tx-queue-size to 1024
+
+  * fix #4296: virtio-net: enable packed queues for QEMU machines using 7.1 or
+    newer
+
+  * net: increase max queues to 64
+
+  * fix #4284: add read-only to non-hotpluggable disk options
+
+  * delay cloudinit generation in hotplug
+
+  * record cloud-init changes in the cloudinit section
+
+  * rework cloudint config pending handling
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 16 Nov 2022 18:23:39 +0100
+
+qemu-server (7.2-7) bullseye; urgency=medium
+
+  * api: create/update vm: automatically clamp cpuunit value depending of
+    cgroup version
+
+  * improve cloud init support and add cloudinit hotplug
+
+  * vzdump: skip `special:cloudinit` section
+
+  * fix #3890 - GUI: warn for unlikely iothread config clashes
+
+  * fix #4228: add `start` parameter to snapshot rollback API so that one can
+    automatocally start the VM after rollback finished.
+
+  * vm start/stop: cleanup passed-through pci devices in more situations
+
+  * fix #3593: allow one to configure task set affinity for VMs
+
+  * fix #4324: USB: use qemu-xhci for machine versions >= 7.1
+
+  * usb: increase max USB devices from 5 to 14 for modern 7.1 machine
+    and OS versions (Linux 2.6+ annd Windows 8+)
+
+  * fix #4201: delete cloud-init disk on rollback
+
+  * net devs: register vNIC MAC-Address manually to FDB on start/resume if
+    bridge has learning disabled
+
+ -- Proxmox Support Team <support@proxmox.com>  Sun, 13 Nov 2022 15:46:18 +0100
+
+qemu-server (7.2-6) bullseye; urgency=medium
+
+  * schema: move 'pve-targetstorage' to pve-common
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 07 Nov 2022 16:22:50 +0100
+
+qemu-server (7.2-5) bullseye; urgency=medium
+
+  * qmp client: increase guest fstrim timeout to 10 minutes
+
+  * fix #3577: prevent suspension for VMs with pci passthrough
+
+  * cpu config: map deprecated IceLake-Client CPU type to IceLake-Server
+
+  * snapshot: save VM state: propagate error from QEMU
+
+  * api: create disks: avoid adding secondary cloud-init drives
+
+  * vzdump: TPM state: escape drive string
+
+  * qmp client: increase default fallback timeout to 5s
+
+  * fix regex matching network devices in qm cleanup so that vNICs with double
+    digit IDs are covered too
+
+  * qmeventd: rework 'forced_cleanup' handling and set timeout to 60s
+
+  * qmeventd: send QMP 'quit' command instead of SIGTERM
+
+  * vzdump: set max-workers QMP option when specified and supported
+
+  * fix #4099: disable io_uring for virtual disks on CIFS storages for now
+
+  * qm: move VM-disk related commands to own command group, keep old ones
+    around for backward compatibility
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 07 Nov 2022 16:15:16 +0100
+
+qemu-server (7.2-4) bullseye; urgency=medium
+
+  * fix #3754: encode JSON as utf8 for CLI
+
+  * cpuconfig: add amd epyc milan model
+
+  * fix #4115: enable option to name QEMU threads after their main purpose
+
+  * fix #4119: give namespace parameter to live-restore
+
+  * automatically add 'uuid' parameter when passing through NVIDIA vGPU
+
+  * vzdump/pbs: die with missing, but configured encryption key
+
+  * vzdump/pbs: die with missing, but configured master key
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 16 Aug 2022 13:59:20 +0200
+
+qemu-server (7.2-3) bullseye; urgency=medium
+
+  * support pbs namespaces
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 12 May 2022 15:14:39 +0200
+
+qemu-server (7.2-2) bullseye; urgency=medium
+
+  * api: reassign disk: drop moved disk from boot order
+
+  * explicitly check some prerequisites for virtio-gl display
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 02 May 2022 17:26:16 +0200
+
+qemu-server (7.2-1) bullseye; urgency=medium
+
+  * migrate: add log for guest fstrim and make a failure noticable
+
+  * migrate: resume initially running VM when failing after convergence
+
+  * parse vm config: remove "\s*" from multi-line comment regex
+
+  * memory: enable balloon free-page-reporting for auto-memory reclaim
+
+  * enable spice also for virtio-gl and virtio-gpu displays and report so in
+    status API
+
+  * api: create: allow overriding non-disk options during restore
+
+  * fix #3861: migrate: fix live migration when cloud-init changes storage
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 28 Apr 2022 18:35:22 +0200
+
+qemu-server (7.1-5) bullseye; urgency=medium
+
+  * avoid writing the config if there are no pending changes to apply
+
+  * fix #3792: cloudinit: use of uninitialized value
+
+  * pci: allow override of PCI vendor/device ids
+
+  * drive mirror monitor: warn when suspend/resume/freeze/thaw calls fail
+
+  * update config: allow setting boot-order and dev in one go
+
+  * migrate: move tunnel-helpers to pve-guest-common
+
+  * fix #3683: agent file-write: enable user to encode the content themselves
+
+  * cpu units: lower minimum for accessing full cgroupv2 range
+
+  * fix #3845: also clamp cpu units to cgroup dependent valid range on hotplug
+
+  * clone disk: force raw format for TPM state
+
+  * fix #3886: QEMU restore: verify storage allows images before writing
+
+  * fix #3733: bump the timeout used to wait that a for backup started VM is
+    fully stopped (i.e., it's "$vmid.scope vanished) to 20 seconds after the
+    backup has finished to
+
+  * qmp client: increase timeout for thaw to better accommodate the QGA running
+    in Windows VMs
+
+  * api: vm start: 'force-cpu' is for internal migration use only, mark as
+    such
+
+  * device unplug: verify that unplugging SCSI disk completed before
+    continuing with remaining unplug work.
+
+  * clone disk: remove ancient check for min QEMU version 2.7
+
+  * clone disk: pass in efi vars size rather than config
+
+  * clone disk: allow cloning from an unused or unreferenced disk
+
+  * parse ovf: untaint path when getting the file's size info
+
+  * image convert: allow block device as source
+
+  * fix #3424: api: snapshot delete: wait for active replication
+
+  * PCI: allow longer pci domains
+
+  * fix #3957: spell 'occurred' correctly
+
+  * clone disk: also clone EFI disk from snapshot
+
+  * api: add endpoint for parsing .ovf files
+
+  * api: support VM disk import
+
+  * migrate: keep VM paused after migration if it was before
+
+  * vga: add virtio-gl display type for VIRGL
+
+  * restore: cleanup oldconf: also clean up snapshots from kept volumes
+
+  * restore: also deactivate/destroy cloud-init disk upon error
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 25 Apr 2022 20:15:59 +0200
+
+qemu-server (7.1-4) bullseye; urgency=medium
+
+  * migrate: send updated TPM state volume ID to target node on local-storage
+    migration
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 22 Nov 2021 17:07:13 +0100
+
+qemu-server (7.1-3) bullseye; urgency=medium
+
+  * replication: do not setup NBD server on VM migrate for the TPM state,
+    QEMU cannot access it directly and we already migrate it via the non-QEMU
+    storage migration anyway.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 16 Nov 2021 14:04:45 +0100
+
+qemu-server (7.1-2) bullseye; urgency=medium
+
+  * cfg2cmd: disable SMM when display=none and SeaBIOS is both used
+
+  * pci: do not reserve pci-ids for mediated devices, already handled by sysfs
+    anyway
+
+  * exclude efidisk and tpmstate for boot disk selection heuristic
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 15 Nov 2021 16:59:23 +0100
+
+qemu-server (7.0-19) bullseye; urgency=medium
+
+  * rollback: improve interaction with snapshot replication
+
+  * cli: qm: rename 'move_disk' command to 'move-disk' with an alias for
+    backward compatibility
+
+  * pi: move-disk: add possibility to reassign a disk to another VM
+
+  * turn SMM off when SeaBIOS and a serial-display are used in combination to
+    avoid a possible boot loop
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 11 Nov 2021 12:49:10 +0100
+
+qemu-server (7.0-18) bullseye; urgency=medium
+
+  * use non SMM ovmf code file for i440fx machines
+
+  * fix hot-unplugging (removing) a cpulimit on a running VM
+
+  * vm start: only print tpm-related message if there is an actual instance
+
+  * vzdump: increase timeout for QMP 'cont' command after backup started
+
+  * drives: expose readonly flag for SCSI/VirtIO drives as 'ro' property
+
+  * qemu-agent: allow hotplug of the 'fstrim cloned disk' option
+
+  * fix #2429: allow to specify cloud-init vendor snippet via 'cicustom'
+
+  * config: add new meta property with the VM creation time
+
+  * config: meta: also save the QEMU version installed during creation
+
+  * cfg2cmd: switch off ACPI hotplug on bridges for q35 VMs with linux as
+    ostype to avoid changes in network interface naming due to systemd's
+    predicatble naming scheme
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 04 Nov 2021 15:29:55 +0100
+
+qemu-server (7.0-17) bullseye; urgency=medium
+
+  * fix #3258: block vm start when a PCI(e) device is already in use
+
+  * snapshot: fix TPM state with RBD
+
+  * swtpm: wait for PID file to appear before continuing with VM start
+
+  * OS type: add entry for Windows 11/Server 2022
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 21 Oct 2021 11:57:09 +0200
+
+qemu-server (7.0-16) bullseye; urgency=medium
+
+  * ovmf: support secure boot enabled code images
+
+  * ovmf: support provisioning an EFI vars template with secureboot by default
+    on and distribution + Microsofts secure-boot key pre-enrolled
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 05 Oct 2021 20:22:18 +0200
+
+qemu-server (7.0-15) bullseye; urgency=medium
+
+  * api: return task-worker UPID in create template endpoint
+
+  * api: destroy VM: remove pending volumes as well
+
+  * fix #3075: add TPM v1.2 and v2.0 support via swtpm~
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 05 Oct 2021 07:24:52 +0200
+
+qemu-server (7.0-14) bullseye; urgency=medium
+
+  * fix #3581: pass size via argument for memory-backend-ram QMP call
+
+  * fix #3608: improve removal of the underlying SCSI controller when removing
+    last drive on it
+
+  * migrate: do not suggest that we map shared storages to avoid that
+    subsequent checks could result in false negatives.
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 22 Sep 2021 09:31:06 +0200
+
+qemu-server (7.0-13) bullseye; urgency=medium
+
+  * fix bootorder regression with implicit default order
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 5 Aug 2021 14:03:14 +0200
+
+qemu-server (7.0-12) bullseye; urgency=medium
+
+  * fix #3371: import ovf: allow the use of dots in the VM name
+
+  * bootorder: fix double entry on cdrom edit
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 30 Jul 2021 16:53:44 +0200
+
+qemu-server (7.0-11) bullseye; urgency=medium
+
+  * nic: support the intel e1000e model
+
+  * lvm: avoid the use of io_uring for now
+
+  * live-restore: fail early if target storage doesn't exist
+
+  * api: always add new CD drives to bootorder
+
+  * fix #2563: allow live migration with local cloud-init disk
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 23 Jul 2021 11:08:48 +0200
+
+qemu-server (7.0-10) bullseye; urgency=medium
+
+  * avoid using io_uring for drives backed by LVM and configured for write-back
+    or write-through cache
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 07 Jul 2021 14:56:34 +0200
+
+qemu-server (7.0-9) bullseye; urgency=medium
+
+  * cpu weight: always clamp value to lower maximum for cgroup v2 and fix
+    defaults (v1 -> 1024, v2 -> 100)
 
   * api: improve error handling when applying pending config changes
 
- -- Proxmox Support Team <support@proxmox.com>  Wed, 07 Jul 2021 10:27:57 +0200
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 07 Jul 2021 12:02:13 +0200
 
 qemu-server (7.0-7) bullseye; urgency=medium
 

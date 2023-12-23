@@ -3,27 +3,169 @@ package PVE::QemuServer::Memory;
 use strict;
 use warnings;
 
+use PVE::JSONSchema qw(parse_property_string);
 use PVE::Tools qw(run_command lock_file lock_file_full file_read_firstline dir_glob_foreach);
 use PVE::Exception qw(raise raise_param_exc);
 
-use PVE::QemuServer;
+use PVE::QemuServer::Helpers qw(parse_number_sets);
 use PVE::QemuServer::Monitor qw(mon_cmd);
+use PVE::QemuServer::QMPHelpers qw(qemu_devicedel qemu_objectdel);
 
-my $MAX_NUMA = 8;
-my $MAX_MEM = 4194304;
+use base qw(Exporter);
+
+our @EXPORT_OK = qw(
+get_current_memory
+);
+
+our $MAX_NUMA = 8;
+
+my $numa_fmt = {
+    cpus => {
+	type => "string",
+	pattern => qr/\d+(?:-\d+)?(?:;\d+(?:-\d+)?)*/,
+	description => "CPUs accessing this NUMA node.",
+	format_description => "id[-id];...",
+    },
+    memory => {
+	type => "number",
+	description => "Amount of memory this NUMA node provides.",
+	optional => 1,
+    },
+    hostnodes => {
+	type => "string",
+	pattern => qr/\d+(?:-\d+)?(?:;\d+(?:-\d+)?)*/,
+	description => "Host NUMA nodes to use.",
+	format_description => "id[-id];...",
+	optional => 1,
+    },
+    policy => {
+	type => 'string',
+	enum => [qw(preferred bind interleave)],
+	description => "NUMA allocation policy.",
+	optional => 1,
+    },
+};
+PVE::JSONSchema::register_format('pve-qm-numanode', $numa_fmt);
+our $numadesc = {
+    optional => 1,
+    type => 'string', format => $numa_fmt,
+    description => "NUMA topology.",
+};
+PVE::JSONSchema::register_standard_option("pve-qm-numanode", $numadesc);
+
+sub parse_numa {
+    my ($data) = @_;
+
+    my $res = parse_property_string($numa_fmt, $data);
+    $res->{cpus} = parse_number_sets($res->{cpus}) if defined($res->{cpus});
+    $res->{hostnodes} = parse_number_sets($res->{hostnodes}) if defined($res->{hostnodes});
+    return $res;
+}
+
 my $STATICMEM = 1024;
+
+our $memory_fmt = {
+    current => {
+	description => "Current amount of online RAM for the VM in MiB. This is the maximum available memory when"
+	    ." you use the balloon device.",
+	type => 'integer',
+	default_key => 1,
+	minimum => 16,
+	default => 512,
+    },
+};
+
+sub print_memory {
+    my $memory = shift;
+
+    return PVE::JSONSchema::print_property_string($memory, $memory_fmt);
+}
+
+sub parse_memory {
+    my ($value) = @_;
+
+    return { current => $memory_fmt->{current}->{default} } if !defined($value);
+
+    my $res = PVE::JSONSchema::parse_property_string($memory_fmt, $value);
+
+    return $res;
+}
+
+my $_host_bits;
+sub get_host_phys_address_bits {
+    return $_host_bits if defined($_host_bits);
+
+    my $fh = IO::File->new ('/proc/cpuinfo', "r") or return;
+    while (defined(my $line = <$fh>)) {
+	# hopefully we never need to care about mixed (big.LITTLE) archs
+	if ($line =~ m/^address sizes\s*:\s*(\d+)\s*bits physical/i) {
+	    $_host_bits = int($1);
+	    $fh->close();
+	    return $_host_bits;
+	}
+    }
+    $fh->close();
+    return; # undef, cannot really do anything..
+}
+
+my sub get_max_mem {
+    my ($conf) = @_;
+
+    my $cpu = {};
+    if (my $cpu_prop_str = $conf->{cpu}) {
+	$cpu = PVE::JSONSchema::parse_property_string('pve-vm-cpu-conf', $cpu_prop_str)
+	    or die "Cannot parse cpu description: $cpu_prop_str\n";
+    }
+    my $bits;
+    if (my $phys_bits = $cpu->{'phys-bits'}) {
+	if ($phys_bits eq 'host') {
+	    $bits = get_host_phys_address_bits();
+	} elsif ($phys_bits =~ /^(\d+)$/) {
+	    $bits = int($phys_bits);
+	}
+    }
+
+    if (!defined($bits)) {
+	my $host_bits = get_host_phys_address_bits() // 36; # fixme: what fallback?
+	if ($cpu->{cputype} && $cpu->{cputype} =~ /^(host|max)$/) {
+	    $bits = $host_bits;
+	} else {
+	    $bits = $host_bits > 40 ? 40 : $host_bits; # take the smaller one
+	}
+    }
+
+    $bits = $bits & ~1; # round down to nearest even as limit is lower with odd bit sizes
+
+    # heuristic: remove 20 bits to get MB and half that as QEMU needs some overhead
+    my $bits_to_max_mem = int(1<<($bits - 21));
+
+    return $bits_to_max_mem > 4*1024*1024 ? 4*1024*1024 : $bits_to_max_mem;
+}
+
+sub get_current_memory {
+    my ($value) = @_;
+
+    my $memory = parse_memory($value);
+    return $memory->{current};
+}
 
 sub get_numa_node_list {
     my ($conf) = @_;
     my @numa_map;
     for (my $i = 0; $i < $MAX_NUMA; $i++) {
 	my $entry = $conf->{"numa$i"} or next;
-	my $numa = PVE::QemuServer::parse_numa($entry) or next;
+	my $numa = parse_numa($entry) or next;
 	push @numa_map, $i;
     }
     return @numa_map if @numa_map;
     my $sockets = $conf->{sockets} || 1;
     return (0..($sockets-1));
+}
+
+sub host_numanode_exists {
+    my ($id) = @_;
+
+    return -d "/sys/devices/system/node/node$id/";
 }
 
 # only valid when numa nodes map to a single host node
@@ -32,7 +174,7 @@ sub get_numa_guest_to_host_map {
     my $map = {};
     for (my $i = 0; $i < $MAX_NUMA; $i++) {
 	my $entry = $conf->{"numa$i"} or next;
-	my $numa = PVE::QemuServer::parse_numa($entry) or next;
+	my $numa = parse_numa($entry) or next;
 	$map->{$i} = print_numa_hostnodes($numa->{hostnodes});
     }
     return $map if %$map;
@@ -41,17 +183,15 @@ sub get_numa_guest_to_host_map {
 }
 
 sub foreach_dimm{
-    my ($conf, $vmid, $memory, $sockets, $func) = @_;
+    my ($conf, $vmid, $memory, $static_memory, $func) = @_;
 
     my $dimm_id = 0;
-    my $current_size = 0;
+    my $current_size = $static_memory;
     my $dimm_size = 0;
 
     if($conf->{hugepages} && $conf->{hugepages} == 1024) {
-	$current_size = 1024 * $sockets;
 	$dimm_size = 1024;
     } else {
-	$current_size = 1024;
 	$dimm_size = 512;
     }
 
@@ -72,64 +212,35 @@ sub foreach_dimm{
     }
 }
 
-sub foreach_reverse_dimm {
-    my ($conf, $vmid, $memory, $sockets, $func) = @_;
-
-    my $dimm_id = 253;
-    my $current_size = 0;
-    my $dimm_size = 0;
-
-    if($conf->{hugepages} && $conf->{hugepages} == 1024) {
-	$current_size = 8355840;
-	$dimm_size = 131072;
-    } else {
-	$current_size = 4177920;
-	$dimm_size = 65536;
-    }
-
-    return if $current_size == $memory;
-
-    my @numa_map = get_numa_node_list($conf);
-
-    for (my $j = 0; $j < 8; $j++) {
-	for (my $i = 0; $i < 32; $i++) {
-	    my $name = "dimm${dimm_id}";
-	    $dimm_id--;
-	    my $numanode = $numa_map[(31-$i) % @numa_map];
-	    $current_size -= $dimm_size;
-	    &$func($conf, $vmid, $name, $dimm_size, $numanode, $current_size, $memory);
-	    return  $current_size if $current_size <= $memory;
-	}
-	$dimm_size /= 2;
-    }
-}
-
 sub qemu_memory_hotplug {
-    my ($vmid, $conf, $defaults, $opt, $value) = @_;
+    my ($vmid, $conf, $value) = @_;
 
-    return $value if !PVE::QemuServer::check_running($vmid);
+    return $value if !PVE::QemuServer::Helpers::vm_running_locally($vmid);
 
-    my $sockets = 1;
-    $sockets = $conf->{sockets} if $conf->{sockets};
+    my $oldmem = parse_memory($conf->{memory});
+    my $newmem = parse_memory($value);
 
-    my $memory = $conf->{memory} || $defaults->{memory};
-    $value = $defaults->{memory} if !$value;
-    return $value if $value == $memory;
+    return $value if $newmem->{current} == $oldmem->{current};
 
+    my $memory = $oldmem->{current};
+    $value = $newmem->{current};
+
+    my $sockets = $conf->{sockets} || 1;
     my $static_memory = $STATICMEM;
     $static_memory = $static_memory * $sockets if ($conf->{hugepages} && $conf->{hugepages} == 1024);
 
     die "memory can't be lower than $static_memory MB" if $value < $static_memory;
-    die "you cannot add more memory than $MAX_MEM MB!\n" if $memory > $MAX_MEM;
+    my $MAX_MEM = get_max_mem($conf);
+    die "you cannot add more memory than max mem $MAX_MEM MB!\n" if $value > $MAX_MEM;
 
-    if($value > $memory) {
+    if ($value > $memory) {
 
 	my $numa_hostmap;
 
-	foreach_dimm($conf, $vmid, $value, $sockets, sub {
+	foreach_dimm($conf, $vmid, $value, $static_memory, sub {
 	    my ($conf, $vmid, $name, $dimm_size, $numanode, $current_size, $memory) = @_;
 
-		return if $current_size <= $conf->{memory};
+		return if $current_size <= get_current_memory($conf->{memory});
 
 		if ($conf->{hugepages}) {
 		    $numa_hostmap = get_numa_guest_to_host_map($conf) if !$numa_hostmap;
@@ -143,8 +254,7 @@ sub qemu_memory_hotplug {
 			my $hugepages_host_topology = hugepages_host_topology();
 			hugepages_allocate($hugepages_topology, $hugepages_host_topology);
 
-			eval { mon_cmd($vmid, "object-add", 'qom-type' => "memory-backend-file", id => "mem-$name", props => {
-					     size => int($dimm_size*1024*1024), 'mem-path' => $path, share => JSON::true, prealloc => JSON::true } ); };
+			eval { mon_cmd($vmid, "object-add", 'qom-type' => "memory-backend-file", id => "mem-$name", size => int($dimm_size*1024*1024), 'mem-path' => $path, share => JSON::true, prealloc => JSON::true ) };
 			if (my $err = $@) {
 			    hugepages_reset($hugepages_host_topology);
 			    die $err;
@@ -155,59 +265,67 @@ sub qemu_memory_hotplug {
 		    eval { hugepages_update_locked($code); };
 
 		} else {
-		    eval { mon_cmd($vmid, "object-add", 'qom-type' => "memory-backend-ram", id => "mem-$name", props => { size => int($dimm_size*1024*1024) } ) };
+		    eval { mon_cmd($vmid, "object-add", 'qom-type' => "memory-backend-ram", id => "mem-$name", size => int($dimm_size*1024*1024) ) };
 		}
 
 		if (my $err = $@) {
-		    eval { PVE::QemuServer::qemu_objectdel($vmid, "mem-$name"); };
+		    eval { qemu_objectdel($vmid, "mem-$name"); };
 		    die $err;
 		}
 
 		eval { mon_cmd($vmid, "device_add", driver => "pc-dimm", id => "$name", memdev => "mem-$name", node => $numanode) };
 		if (my $err = $@) {
-		    eval { PVE::QemuServer::qemu_objectdel($vmid, "mem-$name"); };
+		    eval { qemu_objectdel($vmid, "mem-$name"); };
 		    die $err;
 		}
 		#update conf after each succesful module hotplug
-		$conf->{memory} = $current_size;
+		$newmem->{current} = $current_size;
+		$conf->{memory} = print_memory($newmem);
 		PVE::QemuConfig->write_config($vmid, $conf);
 	});
 
     } else {
 
-	foreach_reverse_dimm($conf, $vmid, $value, $sockets, sub {
-	    my ($conf, $vmid, $name, $dimm_size, $numanode, $current_size, $memory) = @_;
+	my $dimms = qemu_memdevices_list($vmid, 'dimm');
 
-		return if $current_size >= $conf->{memory};
-		print "try to unplug memory dimm $name\n";
+	my $current_size = $memory;
+	for my $name (sort { ($b =~ /^dimm(\d+)$/)[0] <=> ($a =~ /^dimm(\d+)$/)[0] } keys %$dimms) {
 
-		my $retry = 0;
-		while (1) {
-		    eval { PVE::QemuServer::qemu_devicedel($vmid, $name) };
-		    sleep 3;
-		    my $dimm_list = qemu_dimm_list($vmid);
-		    last if !$dimm_list->{$name};
-		    raise_param_exc({ $name => "error unplug memory module" }) if $retry > 5;
-		    $retry++;
-		}
+	    my $dimm_size = $dimms->{$name}->{size} / 1024 / 1024;
 
-		#update conf after each succesful module unplug
-		$conf->{memory} = $current_size;
+	    last if $current_size <= $value;
 
-		eval { PVE::QemuServer::qemu_objectdel($vmid, "mem-$name"); };
-		PVE::QemuConfig->write_config($vmid, $conf);
-	});
+	    print "try to unplug memory dimm $name\n";
+
+	    my $retry = 0;
+	    while (1) {
+		eval { qemu_devicedel($vmid, $name) };
+		sleep 3;
+		my $dimm_list = qemu_memdevices_list($vmid, 'dimm');
+		last if !$dimm_list->{$name};
+		raise_param_exc({ $name => "error unplug memory module" }) if $retry > 5;
+		$retry++;
+	    }
+	    $current_size -= $dimm_size;
+	    #update conf after each succesful module unplug
+            $newmem->{current} = $current_size;
+            $conf->{memory} = print_memory($newmem);
+
+	    eval { qemu_objectdel($vmid, "mem-$name"); };
+	    PVE::QemuConfig->write_config($vmid, $conf);
+	}
     }
+    return $conf->{memory};
 }
 
-sub qemu_dimm_list {
-    my ($vmid) = @_;
+sub qemu_memdevices_list {
+    my ($vmid, $type) = @_;
 
     my $dimmarray = mon_cmd($vmid, "query-memory-devices");
     my $dimms = {};
 
     foreach my $dimm (@$dimmarray) {
-
+        next if $type && $dimm->{data}->{id} !~ /^$type(\d+)$/;
         $dimms->{$dimm->{data}->{id}}->{id} = $dimm->{data}->{id};
         $dimms->{$dimm->{data}->{id}}->{node} = $dimm->{data}->{node};
         $dimms->{$dimm->{data}->{id}}->{addr} = $dimm->{data}->{addr};
@@ -218,13 +336,14 @@ sub qemu_dimm_list {
 }
 
 sub config {
-    my ($conf, $vmid, $sockets, $cores, $defaults, $hotplug_features, $cmd) = @_;
+    my ($conf, $vmid, $sockets, $cores, $hotplug, $cmd) = @_;
 
-    my $memory = $conf->{memory} || $defaults->{memory};
+    my $memory = get_current_memory($conf->{memory});
     my $static_memory = 0;
 
-    if ($hotplug_features->{memory}) {
+    if ($hotplug) {
 	die "NUMA needs to be enabled for memory hotplug\n" if !$conf->{numa};
+	my $MAX_MEM = get_max_mem($conf);
 	die "Total memory is bigger than ${MAX_MEM}MB\n" if $memory > $MAX_MEM;
 
 	for (my $i = 0; $i < $MAX_NUMA; $i++) {
@@ -232,8 +351,7 @@ sub config {
 		if $conf->{"numa$i"};
 	}
 
-	my $sockets = 1;
-	$sockets = $conf->{sockets} if $conf->{sockets};
+	my $sockets = $conf->{sockets} || 1;
 
 	$static_memory = $STATICMEM;
 	$static_memory = $static_memory * $sockets if ($conf->{hugepages} && $conf->{hugepages} == 1024);
@@ -254,7 +372,7 @@ sub config {
 	my $numa_totalmemory = undef;
 	for (my $i = 0; $i < $MAX_NUMA; $i++) {
 	    next if !$conf->{"numa$i"};
-	    my $numa = PVE::QemuServer::parse_numa($conf->{"numa$i"});
+	    my $numa = parse_numa($conf->{"numa$i"});
 	    next if !$numa;
 	    # memory
 	    die "missing NUMA node$i memory value\n" if !$numa->{memory};
@@ -297,7 +415,8 @@ sub config {
 	    my $numa_memory = ($static_memory / $sockets);
 
 	    for (my $i = 0; $i < $sockets; $i++)  {
-		die "host NUMA node$i doesn't exist\n" if ! -d "/sys/devices/system/node/node$i/" && $conf->{hugepages};
+		die "host NUMA node$i doesn't exist\n"
+		    if !host_numanode_exists($i) && $conf->{hugepages};
 
 		my $mem_object = print_mem_object($conf, "ram-node$i", $numa_memory);
 		push @$cmd, '-object', $mem_object;
@@ -310,8 +429,8 @@ sub config {
 	}
     }
 
-    if ($hotplug_features->{memory}) {
-	foreach_dimm($conf, $vmid, $memory, $sockets, sub {
+    if ($hotplug) {
+	foreach_dimm($conf, $vmid, $memory, $static_memory, sub {
 	    my ($conf, $vmid, $name, $dimm_size, $numanode, $current_size, $memory) = @_;
 
 	    my $mem_object = print_mem_object($conf, "mem-$name", $dimm_size);
@@ -351,7 +470,7 @@ sub print_numa_hostnodes {
 	$hostnodes .= "-$end" if defined($end);
 	$end //= $start;
 	for (my $i = $start; $i <= $end; ++$i ) {
-	    die "host NUMA node$i doesn't exist\n" if ! -d "/sys/devices/system/node/node$i/";
+	    die "host NUMA node$i doesn't exist\n" if !host_numanode_exists($i);
 	}
     }
     return $hostnodes;
@@ -394,21 +513,27 @@ sub hugepages_nr {
   return $size / $hugepages_size;
 }
 
+sub hugepages_chunk_size_supported {
+    my ($size) = @_;
+
+    return -d "/sys/kernel/mm/hugepages/hugepages-". ($size * 1024) ."kB";
+}
+
 sub hugepages_size {
     my ($conf, $size) = @_;
     die "hugepages option is not enabled" if !$conf->{hugepages};
     die "memory size '$size' is not a positive even integer; cannot use for hugepages\n"
 	if $size <= 0 || $size & 1;
 
-    my $page_chunk = sub { -d  "/sys/kernel/mm/hugepages/hugepages-". ($_[0] * 1024) ."kB" };
-    die "your system doesn't support hugepages\n" if !$page_chunk->(2) && !$page_chunk->(1024);
+    die "your system doesn't support hugepages\n"
+	if !hugepages_chunk_size_supported(2) && !hugepages_chunk_size_supported(1024);
 
     if ($conf->{hugepages} eq 'any') {
 
 	# try to use 1GB if available && memory size is matching
-	if ($page_chunk->(1024) && ($size & 1023) == 0) {
+	if (hugepages_chunk_size_supported(1024) && ($size & 1023) == 0) {
 	    return 1024;
-	} elsif ($page_chunk->(2)) {
+	} elsif (hugepages_chunk_size_supported(2)) {
 	    return 2;
 	} else {
 	    die "host only supports 1024 GB hugepages, but requested size '$size' is not a multiple of 1024 MB\n"
@@ -417,7 +542,7 @@ sub hugepages_size {
 
 	my $hugepagesize = $conf->{hugepages};
 
-	if (!$page_chunk->($hugepagesize)) {
+	if (!hugepages_chunk_size_supported($hugepagesize)) {
 	    die "your system doesn't support hugepages of $hugepagesize MB\n";
 	} elsif (($size % $hugepagesize) != 0) {
 	    die "Memory size $size is not a multiple of the requested hugepages size $hugepagesize\n";
@@ -428,22 +553,18 @@ sub hugepages_size {
 }
 
 sub hugepages_topology {
-    my ($conf) = @_;
+    my ($conf, $hotplug) = @_;
 
     my $hugepages_topology = {};
 
     return if !$conf->{numa};
 
-    my $defaults = PVE::QemuServer::load_defaults();
-    my $memory = $conf->{memory} || $defaults->{memory};
+    my $memory = get_current_memory($conf->{memory});
     my $static_memory = 0;
-    my $sockets = 1;
-    $sockets = $conf->{smp} if $conf->{smp}; # old style - no longer iused
-    $sockets = $conf->{sockets} if $conf->{sockets};
+    my $sockets = $conf->{sockets} || 1;
     my $numa_custom_topology = undef;
-    my $hotplug_features = PVE::QemuServer::parse_hotplug_features(defined($conf->{hotplug}) ? $conf->{hotplug} : '1');
 
-    if ($hotplug_features->{memory}) {
+    if ($hotplug) {
 	$static_memory = $STATICMEM;
 	$static_memory = $static_memory * $sockets if ($conf->{hugepages} && $conf->{hugepages} == 1024);
     } else {
@@ -453,7 +574,7 @@ sub hugepages_topology {
     #custom numa topology
     for (my $i = 0; $i < $MAX_NUMA; $i++) {
 	next if !$conf->{"numa$i"};
-	my $numa = PVE::QemuServer::parse_numa($conf->{"numa$i"});
+	my $numa = parse_numa($conf->{"numa$i"});
 	next if !$numa;
 
 	$numa_custom_topology = 1;
@@ -479,10 +600,10 @@ sub hugepages_topology {
 	}
     }
 
-    if ($hotplug_features->{memory}) {
+    if ($hotplug) {
 	my $numa_hostmap = get_numa_guest_to_host_map($conf);
 
-	foreach_dimm($conf, undef, $memory, $sockets, sub {
+	foreach_dimm($conf, undef, $memory, $static_memory, sub {
 	    my ($conf, undef, $name, $dimm_size, $numanode, $current_size, $memory) = @_;
 
 	    $numanode = $numa_hostmap->{$numanode};

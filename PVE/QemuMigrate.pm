@@ -5,11 +5,10 @@ use warnings;
 
 use IO::File;
 use IPC::Open2;
-use POSIX qw( WNOHANG );
 use Time::HiRes qw( usleep );
 
-use PVE::Format qw(render_bytes);
 use PVE::Cluster;
+use PVE::Format qw(render_bytes);
 use PVE::GuestHelpers qw(safe_boolean_ne safe_string_ne);
 use PVE::INotify;
 use PVE::RPCEnvironment;
@@ -17,7 +16,9 @@ use PVE::Replication;
 use PVE::ReplicationConfig;
 use PVE::ReplicationState;
 use PVE::Storage;
+use PVE::StorageTunnel;
 use PVE::Tools;
+use PVE::Tunnel;
 
 use PVE::QemuConfig;
 use PVE::QemuServer::CPUConfig;
@@ -25,200 +26,74 @@ use PVE::QemuServer::Drive;
 use PVE::QemuServer::Helpers qw(min_version);
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Monitor qw(mon_cmd);
+use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::QemuServer;
 
 use PVE::AbstractMigrate;
 use base qw(PVE::AbstractMigrate);
 
-sub fork_command_pipe {
-    my ($self, $cmd) = @_;
-
-    my $reader = IO::File->new();
-    my $writer = IO::File->new();
-
-    my $orig_pid = $$;
-
-    my $cpid;
-
-    eval { $cpid = open2($reader, $writer, @$cmd); };
-
-    my $err = $@;
-
-    # catch exec errors
-    if ($orig_pid != $$) {
-	$self->log('err', "can't fork command pipe\n");
-	POSIX::_exit(1);
-	kill('KILL', $$);
-    }
-
-    die $err if $err;
-
-    return { writer => $writer, reader => $reader, pid => $cpid };
-}
-
-sub finish_command_pipe {
-    my ($self, $cmdpipe, $timeout) = @_;
-
-    my $cpid = $cmdpipe->{pid};
-    return if !defined($cpid);
-
-    my $writer = $cmdpipe->{writer};
-    my $reader = $cmdpipe->{reader};
-
-    $writer->close();
-    $reader->close();
-
-    my $collect_child_process = sub {
-	my $res = waitpid($cpid, WNOHANG);
-	if (defined($res) && ($res == $cpid)) {
-	    delete $cmdpipe->{cpid};
-	    return 1;
-	} else {
-	    return 0;
-	}
-     };
-
-    if ($timeout) {
-	for (my $i = 0; $i < $timeout; $i++) {
-	    return if &$collect_child_process();
-	    sleep(1);
-	}
-    }
-
-    $self->log('info', "ssh tunnel still running - terminating now with SIGTERM\n");
-    kill(15, $cpid);
-
-    # wait again
-    for (my $i = 0; $i < 10; $i++) {
-	return if &$collect_child_process();
-	sleep(1);
-    }
-
-    $self->log('info', "ssh tunnel still running - terminating now with SIGKILL\n");
-    kill 9, $cpid;
-    sleep 1;
-
-    $self->log('err', "ssh tunnel child process (PID $cpid) couldn't be collected\n")
-	if !&$collect_child_process();
-}
-
-sub read_tunnel {
-    my ($self, $tunnel, $timeout) = @_;
-
-    $timeout = 60 if !defined($timeout);
-
-    my $reader = $tunnel->{reader};
-
-    my $output;
-    eval {
-	PVE::Tools::run_with_timeout($timeout, sub { $output = <$reader>; });
-    };
-    die "reading from tunnel failed: $@\n" if $@;
-
-    chomp $output;
-
-    return $output;
-}
-
-sub write_tunnel {
-    my ($self, $tunnel, $timeout, $command) = @_;
-
-    $timeout = 60 if !defined($timeout);
-
-    my $writer = $tunnel->{writer};
-
-    eval {
-	PVE::Tools::run_with_timeout($timeout, sub {
-	    print $writer "$command\n";
-	    $writer->flush();
-	});
-    };
-    die "writing to tunnel failed: $@\n" if $@;
-
-    if ($tunnel->{version} && $tunnel->{version} >= 1) {
-	my $res = eval { $self->read_tunnel($tunnel, 10); };
-	die "no reply to command '$command': $@\n" if $@;
-
-	if ($res eq 'OK') {
-	    return;
-	} else {
-	    die "tunnel replied '$res' to command '$command'\n";
-	}
-    }
-}
+# compared against remote end's minimum version
+our $WS_TUNNEL_VERSION = 2;
 
 sub fork_tunnel {
     my ($self, $ssh_forward_info) = @_;
 
-    my @localtunnelinfo = ();
-    foreach my $addr (@$ssh_forward_info) {
-	push @localtunnelinfo, '-L', $addr;
-    }
-
-    my $cmd = [@{$self->{rem_ssh}}, '-o ExitOnForwardFailure=yes', @localtunnelinfo, '/usr/sbin/qm', 'mtunnel' ];
-
-    my $tunnel = $self->fork_command_pipe($cmd);
-
-    eval {
-	my $helo = $self->read_tunnel($tunnel, 60);
-	die "no reply\n" if !$helo;
-	die "no quorum on target node\n" if $helo =~ m/^no quorum$/;
-	die "got strange reply from mtunnel ('$helo')\n"
-	    if $helo !~ m/^tunnel online$/;
-    };
-    my $err = $@;
-
-    eval {
-	my $ver = $self->read_tunnel($tunnel, 10);
-	if ($ver =~ /^ver (\d+)$/) {
-	    $tunnel->{version} = $1;
-	    $self->log('info', "ssh tunnel $ver\n");
-	} else {
-	    $err = "received invalid tunnel version string '$ver'\n" if !$err;
-	}
+    my $cmd = ['/usr/sbin/qm', 'mtunnel'];
+    my $log = sub {
+	my ($level, $msg) = @_;
+	$self->log($level, $msg);
     };
 
-    if ($err) {
-	$self->finish_command_pipe($tunnel);
-	die "can't open migration tunnel - $err";
-    }
-    return $tunnel;
+    return PVE::Tunnel::fork_ssh_tunnel($self->{rem_ssh}, $cmd, $ssh_forward_info, $log);
 }
 
-sub finish_tunnel {
-    my ($self, $tunnel) = @_;
+sub fork_websocket_tunnel {
+    my ($self, $storages, $bridges) = @_;
 
-    eval { $self->write_tunnel($tunnel, 30, 'quit'); };
-    my $err = $@;
+    my $remote = $self->{opts}->{remote};
+    my $conn = $remote->{conn};
 
-    $self->finish_command_pipe($tunnel, 30);
+    my $log = sub {
+	my ($level, $msg) = @_;
+	$self->log($level, $msg);
+    };
 
-    if (my $unix_sockets = $tunnel->{unix_sockets}) {
-	# ssh does not clean up on local host
-	my $cmd = ['rm', '-f', @$unix_sockets];
-	PVE::Tools::run_command($cmd);
+    my $websocket_url = "https://$conn->{host}:$conn->{port}/api2/json/nodes/$self->{node}/qemu/$remote->{vmid}/mtunnelwebsocket";
+    my $url = "/nodes/$self->{node}/qemu/$remote->{vmid}/mtunnel";
 
-	# .. and just to be sure check on remote side
-	unshift @{$cmd}, @{$self->{rem_ssh}};
-	PVE::Tools::run_command($cmd);
-    }
+    my $tunnel_params = {
+	url => $websocket_url,
+    };
 
-    die $err if $err;
+    my $storage_list = join(',', keys %$storages);
+    my $bridge_list = join(',', keys %$bridges);
+
+    my $req_params = {
+	storages => $storage_list,
+	bridges => $bridge_list,
+    };
+
+    return PVE::Tunnel::fork_websocket_tunnel($conn, $url, $req_params, $tunnel_params, $log);
 }
 
+# tunnel_info:
+#   proto: unix (secure) or tcp (insecure/legacy compat)
+#   addr: IP or UNIX socket path
+#   port: optional TCP port
+#   unix_sockets: additional UNIX socket paths to forward
 sub start_remote_tunnel {
-    my ($self, $raddr, $rport, $ruri, $unix_socket_info) = @_;
+    my ($self, $tunnel_info) = @_;
 
     my $nodename = PVE::INotify::nodename();
     my $migration_type = $self->{opts}->{migration_type};
 
     if ($migration_type eq 'secure') {
 
-	if ($ruri =~ /^unix:/) {
-	    my $ssh_forward_info = ["$raddr:$raddr"];
-	    $unix_socket_info->{$raddr} = 1;
+	if ($tunnel_info->{proto} eq 'unix') {
+	    my $ssh_forward_info = [];
 
-	    my $unix_sockets = [ keys %$unix_socket_info ];
+	    my $unix_sockets = [ keys %{$tunnel_info->{unix_sockets}} ];
+	    push @$unix_sockets, $tunnel_info->{addr};
 	    for my $sock (@$unix_sockets) {
 		push @$ssh_forward_info, "$sock:$sock";
 		unlink $sock;
@@ -244,24 +119,24 @@ sub start_remote_tunnel {
 	    }
 	    if ($unix_socket_try > 100) {
 		$self->{errors} = 1;
-		$self->finish_tunnel($self->{tunnel});
-		die "Timeout, migration socket $ruri did not get ready";
+		PVE::Tunnel::finish_tunnel($self->{tunnel});
+		die "Timeout, migration socket $tunnel_info->{addr} did not get ready";
 	    }
 	    $self->{tunnel}->{unix_sockets} = $unix_sockets if (@$unix_sockets);
 
-	} elsif ($ruri =~ /^tcp:/) {
+	} elsif ($tunnel_info->{proto} eq 'tcp') {
 	    my $ssh_forward_info = [];
-	    if ($raddr eq "localhost") {
+	    if ($tunnel_info->{addr} eq "localhost") {
 		# for backwards compatibility with older qemu-server versions
 		my $pfamily = PVE::Tools::get_host_address_family($nodename);
 		my $lport = PVE::Tools::next_migrate_port($pfamily);
-		push @$ssh_forward_info, "$lport:localhost:$rport";
+		push @$ssh_forward_info, "$lport:localhost:$tunnel_info->{port}";
 	    }
 
 	    $self->{tunnel} = $self->fork_tunnel($ssh_forward_info);
 
 	} else {
-	    die "unsupported protocol in migration URI: $ruri\n";
+	    die "unsupported protocol in migration URI: $tunnel_info->{proto}\n";
 	}
     } else {
 	#fork tunnel for insecure migration, to send faster commands like resume
@@ -275,6 +150,22 @@ sub lock_vm {
     return PVE::QemuConfig->lock_config($vmid, $code, @param);
 }
 
+sub target_storage_check_available {
+    my ($self, $storecfg, $targetsid, $volid) = @_;
+
+    if (!$self->{opts}->{remote}) {
+	# check if storage is available on target node
+	my $target_scfg = PVE::Storage::storage_check_enabled(
+	    $storecfg,
+	    $targetsid,
+	    $self->{node},
+	);
+	my ($vtype) = PVE::Storage::parse_volname($storecfg, $volid);
+	die "$volid: content type '$vtype' is not available on storage '$targetsid'\n"
+	    if !$target_scfg->{content}->{$vtype};
+    }
+}
+
 sub prepare {
     my ($self, $vmid) = @_;
 
@@ -284,6 +175,17 @@ sub prepare {
 
     # test if VM exists
     my $conf = $self->{vmconf} = PVE::QemuConfig->load_config($vmid);
+
+    my $version = PVE::QemuServer::Helpers::get_node_pvecfg_version($self->{node});
+    my $cloudinit_config = $conf->{cloudinit};
+
+    if (
+	PVE::QemuConfig->has_cloudinit($conf) && defined($cloudinit_config)
+	&& scalar(keys %$cloudinit_config) > 0
+	&& !PVE::QemuServer::Helpers::pvecfg_min_version($version, 7, 2, 13)
+    ) {
+	die "target node is too old (manager <= 7.2-13) and doesn't support new cloudinit section\n";
+    }
 
     my $repl_conf = PVE::ReplicationConfig->new();
     $self->{replication_jobcfg} = $repl_conf->find_local_replication_job($vmid, $self->{node});
@@ -321,34 +223,61 @@ sub prepare {
 		$self->{forcecpu} = PVE::QemuServer::CPUConfig::get_cpu_from_running_vm($pid);
 	    }
 	}
+
+	# Do not treat a suspended VM as paused, as it might wake up
+	# during migration and remain paused after migration finishes.
+	$self->{vm_was_paused} = 1 if PVE::QemuServer::vm_is_paused($vmid, 0);
     }
 
-    my $loc_res = PVE::QemuServer::check_local_resources($conf, 1);
-    if (scalar @$loc_res) {
+    my ($loc_res, $mapped_res, $missing_mappings_by_node) = PVE::QemuServer::check_local_resources($conf, 1);
+    my $blocking_resources = [];
+    for my $res ($loc_res->@*) {
+	if (!grep($res, $mapped_res->@*)) {
+	    push $blocking_resources->@*, $res;
+	}
+    }
+    if (scalar($blocking_resources->@*)) {
 	if ($self->{running} || !$self->{opts}->{force}) {
-	    die "can't migrate VM which uses local devices: " . join(", ", @$loc_res) . "\n";
+	    die "can't migrate VM which uses local devices: " . join(", ", $blocking_resources->@*) . "\n";
 	} else {
 	    $self->log('info', "migrating VM which uses local devices");
 	}
     }
 
+    if (scalar($mapped_res->@*)) {
+	my $missing_mappings = $missing_mappings_by_node->{$self->{node}};
+	if ($running) {
+	    die "can't migrate running VM which uses mapped devices: " . join(", ", $mapped_res->@*) . "\n";
+	} elsif (scalar($missing_mappings->@*)) {
+	    die "can't migrate to '$self->{node}': missing mapped devices " . join(", ", $missing_mappings->@*) . "\n";
+	} else {
+	    $self->log('info', "migrating VM which uses mapped local devices");
+	}
+    }
+
+    my $vga = PVE::QemuServer::parse_vga($conf->{vga});
+    if ($running && $vga->{'clipboard'} && $vga->{'clipboard'} eq 'vnc') {
+	die "VMs with 'clipboard' set to 'vnc' are not live migratable!\n";
+    }
+
     my $vollist = PVE::QemuServer::get_vm_volumes($conf);
+
+    my $storages = {};
     foreach my $volid (@$vollist) {
 	my ($sid, $volname) = PVE::Storage::parse_volume_id($volid, 1);
 
-	# check if storage is available on both nodes
-	my $targetsid = PVE::QemuServer::map_storage($self->{opts}->{storagemap}, $sid);
-
+	# check if storage is available on source node
 	my $scfg = PVE::Storage::storage_check_enabled($storecfg, $sid);
-	my $target_scfg = PVE::Storage::storage_check_enabled(
-	    $storecfg,
-	    $targetsid,
-	    $self->{node},
-	);
-	my ($vtype) = PVE::Storage::parse_volname($storecfg, $volid);
 
-	die "$volid: content type '$vtype' is not available on storage '$targetsid'\n"
-	    if !$target_scfg->{content}->{$vtype};
+	my $targetsid = $sid;
+	# NOTE: local ignores shared mappings, remote maps them
+	if (!$scfg->{shared} || $self->{opts}->{remote}) {
+	    $targetsid = PVE::JSONSchema::map_id($self->{opts}->{storagemap}, $sid);
+	}
+
+	$storages->{$targetsid} = 1;
+
+	$self->target_storage_check_available($storecfg, $targetsid, $volid);
 
 	if ($scfg->{shared}) {
 	    # PVE::Storage::activate_storage checks this for non-shared storages
@@ -358,10 +287,27 @@ sub prepare {
 	}
     }
 
-    # test ssh connection
-    my $cmd = [ @{$self->{rem_ssh}}, '/bin/true' ];
-    eval { $self->cmd_quiet($cmd); };
-    die "Can't connect to destination address using public key\n" if $@;
+    if ($self->{opts}->{remote}) {
+	# test & establish websocket connection
+	my $bridges = map_bridges($conf, $self->{opts}->{bridgemap}, 1);
+	my $tunnel = $self->fork_websocket_tunnel($storages, $bridges);
+	my $min_version = $tunnel->{version} - $tunnel->{age};
+	$self->log('info', "local WS tunnel version: $WS_TUNNEL_VERSION");
+	$self->log('info', "remote WS tunnel version: $tunnel->{version}");
+	$self->log('info', "minimum required WS tunnel version: $min_version");
+	die "Remote tunnel endpoint not compatible, upgrade required\n"
+	    if $WS_TUNNEL_VERSION < $min_version;
+	 die "Remote tunnel endpoint too old, upgrade required\n"
+	    if $WS_TUNNEL_VERSION > $tunnel->{version};
+
+	print "websocket tunnel started\n";
+	$self->{tunnel} = $tunnel;
+    } else {
+	# test ssh connection
+	my $cmd = [ @{$self->{rem_ssh}}, '/bin/true' ];
+	eval { $self->cmd_quiet($cmd); };
+	die "Can't connect to destination address using public key\n" if $@;
+    }
 
     return $running;
 }
@@ -378,12 +324,12 @@ sub scan_local_volumes {
 
     my $storecfg = $self->{storecfg};
     eval {
-
 	# found local volumes and their origin
 	my $local_volumes = $self->{local_volumes};
 	my $local_volumes_errors = {};
 	my $other_errors = [];
 	my $abort = 0;
+	my $path_to_volid = {};
 
 	my $log_error = sub {
 	    my ($msg, $volid) = @_;
@@ -395,50 +341,6 @@ sub scan_local_volumes {
 	    }
 	    $abort = 1;
 	};
-
-	my @sids = PVE::Storage::storage_ids($storecfg);
-	foreach my $storeid (@sids) {
-	    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
-	    next if $scfg->{shared};
-	    next if !PVE::Storage::storage_check_enabled($storecfg, $storeid, undef, 1);
-
-	    # get list from PVE::Storage (for unused volumes)
-	    my $dl = PVE::Storage::vdisk_list($storecfg, $storeid, $vmid, undef, 'images');
-
-	    next if @{$dl->{$storeid}} == 0;
-
-	    my $targetsid = PVE::QemuServer::map_storage($self->{opts}->{storagemap}, $storeid);
-	    # check if storage is available on target node
-	    my $target_scfg = PVE::Storage::storage_check_enabled(
-		$storecfg,
-		$targetsid,
-		$self->{node},
-	    );
-
-	    die "content type 'images' is not available on storage '$targetsid'\n"
-		if !$target_scfg->{content}->{images};
-
-	    my $bwlimit = PVE::Storage::get_bandwidth_limit(
-		'migration',
-		[$targetsid, $storeid],
-		$self->{opts}->{bwlimit},
-	    );
-
-	    PVE::Storage::foreach_volid($dl, sub {
-		my ($volid, $sid, $volinfo) = @_;
-
-		$local_volumes->{$volid}->{ref} = 'storage';
-		$local_volumes->{$volid}->{size} = $volinfo->{size};
-		$local_volumes->{$volid}->{targetsid} = $targetsid;
-		$local_volumes->{$volid}->{bwlimit} = $bwlimit;
-
-		# If with_snapshots is not set for storage migrate, it tries to use
-		# a raw+size stream, but on-the-fly conversion from qcow2 to raw+size
-		# back to qcow2 is currently not possible.
-		$local_volumes->{$volid}->{snapshots} = ($volinfo->{format} =~ /^(?:qcow2|vmdk)$/);
-		$local_volumes->{$volid}->{format} = $volinfo->{format};
-	    });
-	}
 
 	my $replicatable_volumes = !$self->{replication_jobcfg} ? {}
 	    : PVE::QemuConfig->get_replicatable_volumes($storecfg, $vmid, $conf, 0, 1);
@@ -460,7 +362,7 @@ sub scan_local_volumes {
 	    if ($attr->{cdrom}) {
 		if ($volid eq 'cdrom') {
 		    my $msg = "can't migrate local cdrom drive";
-		    if (defined($snaprefs) && !$attr->{referenced_in_config}) {
+		    if (defined($snaprefs) && !$attr->{is_attached}) {
 			my $snapnames = join(', ', sort keys %$snaprefs);
 			$msg .= " (referenced in snapshot - $snapnames)";
 		    }
@@ -472,20 +374,38 @@ sub scan_local_volumes {
 
 	    my ($sid, $volname) = PVE::Storage::parse_volume_id($volid);
 
-	    my $targetsid = PVE::QemuServer::map_storage($self->{opts}->{storagemap}, $sid);
 	    # check if storage is available on both nodes
 	    my $scfg = PVE::Storage::storage_check_enabled($storecfg, $sid);
-	    PVE::Storage::storage_check_enabled($storecfg, $targetsid, $self->{node});
 
-	    return if $scfg->{shared};
+	    my $targetsid = $sid;
+	    # NOTE: local ignores shared mappings, remote maps them
+	    if (!$scfg->{shared} || $self->{opts}->{remote}) {
+		$targetsid = PVE::JSONSchema::map_id($self->{opts}->{storagemap}, $sid);
+	    }
 
-	    $local_volumes->{$volid}->{ref} = $attr->{referenced_in_config} ? 'config' : 'snapshot';
-	    $local_volumes->{$volid}->{ref} = 'storage' if $attr->{is_unused};
+	    $self->target_storage_check_available($storecfg, $targetsid, $volid);
+	    return if $scfg->{shared} && !$self->{opts}->{remote};
+
+	    $local_volumes->{$volid}->{ref} = 'pending' if $attr->{referenced_in_pending};
+	    $local_volumes->{$volid}->{ref} = 'snapshot' if $attr->{referenced_in_snapshot};
+	    $local_volumes->{$volid}->{ref} = 'unused' if $attr->{is_unused};
+	    $local_volumes->{$volid}->{ref} = 'attached' if $attr->{is_attached};
+	    $local_volumes->{$volid}->{ref} = 'generated' if $attr->{is_tpmstate};
+
+	    $local_volumes->{$volid}->{bwlimit} = $self->get_bwlimit($sid, $targetsid);
+	    $local_volumes->{$volid}->{targetsid} = $targetsid;
+
+	    $local_volumes->{$volid}->@{qw(size format)} = PVE::Storage::volume_size_info($storecfg, $volid);
 
 	    $local_volumes->{$volid}->{is_vmstate} = $attr->{is_vmstate} ? 1 : 0;
 
 	    $local_volumes->{$volid}->{drivename} = $attr->{drivename}
 		if $attr->{drivename};
+
+	    # If with_snapshots is not set for storage migrate, it tries to use
+	    # a raw+size stream, but on-the-fly conversion from qcow2 to raw+size
+	    # back to qcow2 is currently not possible.
+	    $local_volumes->{$volid}->{snapshots} = ($local_volumes->{$volid}->{format} =~ /^(?:qcow2|vmdk)$/);
 
 	    if ($attr->{cdrom}) {
 		if ($volid =~ /vm-\d+-cloudinit/) {
@@ -500,6 +420,8 @@ sub scan_local_volumes {
 	    die "owned by other VM (owner = VM $owner)\n"
 		if !$owner || ($owner != $vmid);
 
+	    $path_to_volid->{$path}->{$volid} = 1;
+
 	    return if $attr->{is_vmstate};
 
 	    if (defined($snaprefs)) {
@@ -508,7 +430,11 @@ sub scan_local_volumes {
 		# we cannot migrate shapshots on local storage
 		# exceptions: 'zfspool' or 'qcow2' files (on directory storage)
 
-		die "online storage migration not possible if snapshot exists\n" if $self->{running};
+		die "online storage migration not possible if non-replicated snapshot exists\n"
+		    if $self->{running} && !$local_volumes->{$volid}->{replicated};
+
+		die "remote migration with snapshots not supported yet\n" if $self->{opts}->{remote};
+
 		if (!($scfg->{type} eq 'zfspool'
 		    || ($scfg->{type} eq 'btrfs' && $local_volumes->{$volid}->{format} eq 'raw')
 		    || $local_volumes->{$volid}->{format} eq 'qcow2'
@@ -529,17 +455,25 @@ sub scan_local_volumes {
 	    }
         });
 
+	for my $path (keys %$path_to_volid) {
+	    my @volids = keys $path_to_volid->{$path}->%*;
+	    die "detected not supported aliased volumes: '" . join("', '", @volids) . "'\n"
+		if (scalar(@volids) > 1);
+	}
+
 	foreach my $vol (sort keys %$local_volumes) {
 	    my $type = $replicatable_volumes->{$vol} ? 'local, replicated' : 'local';
 	    my $ref = $local_volumes->{$vol}->{ref};
-	    if ($ref eq 'storage') {
-		$self->log('info', "found $type disk '$vol' (via storage)\n");
-	    } elsif ($ref eq 'config') {
+	    if ($ref eq 'attached') {
 		&$log_error("can't live migrate attached local disks without with-local-disks option\n", $vol)
 		    if $self->{running} && !$self->{opts}->{"with-local-disks"};
-		$self->log('info', "found $type disk '$vol' (in current VM config)\n");
+		$self->log('info', "found $type disk '$vol' (attached)\n");
+	    } elsif ($ref eq 'unused') {
+		$self->log('info', "found $type disk '$vol' (unused)\n");
 	    } elsif ($ref eq 'snapshot') {
 		$self->log('info', "found $type disk '$vol' (referenced by snapshot(s))\n");
+	    } elsif ($ref eq 'pending') {
+		$self->log('info', "found $type disk '$vol' (pending change)\n");
 	    } elsif ($ref eq 'generated') {
 		$self->log('info', "found generated disk '$vol' (in current VM config)\n");
 	    } else {
@@ -565,6 +499,9 @@ sub scan_local_volumes {
 
 	    my $migratable = $scfg->{type} =~ /^(?:dir|btrfs|zfspool|lvmthin|lvm)$/;
 
+	    # TODO: what is this even here for?
+	    $migratable = 1 if $self->{opts}->{remote};
+
 	    die "can't migrate '$volid' - storage type '$scfg->{type}' not supported\n"
 		if !$migratable;
 
@@ -576,10 +513,14 @@ sub scan_local_volumes {
 
 	foreach my $volid (sort keys %$local_volumes) {
 	    my $ref = $local_volumes->{$volid}->{ref};
-	    if ($self->{running} && $ref eq 'config') {
+	    if ($self->{running} && $ref eq 'attached') {
 		$local_volumes->{$volid}->{migration_mode} = 'online';
 	    } elsif ($self->{running} && $ref eq 'generated') {
-		die "can't live migrate VM with local cloudinit disk. use a shared storage instead\n";
+		# offline migrate the cloud-init ISO and don't regenerate on VM start
+		#
+		# tpmstate will also be offline migrated first, and in case of
+		# live migration then updated by QEMU/swtpm if necessary
+		$local_volumes->{$volid}->{migration_mode} = 'offline';
 	    } else {
 		$local_volumes->{$volid}->{migration_mode} = 'offline';
 	    }
@@ -595,6 +536,10 @@ sub handle_replication {
     my $local_volumes = $self->{local_volumes};
 
     return if !$self->{replication_jobcfg};
+
+    die "can't migrate VM with replicated volumes to remote cluster/node\n"
+	if $self->{opts}->{remote};
+
     if ($self->{running}) {
 
 	my $version = PVE::QemuServer::kvm_user_version();
@@ -640,7 +585,9 @@ sub config_update_local_disksizes {
 
     PVE::QemuConfig->foreach_volume($conf, sub {
 	my ($key, $drive) = @_;
-	return if $key eq 'efidisk0'; # skip efidisk, will be handled later
+	# skip special disks, will be handled later
+	return if $key eq 'efidisk0';
+	return if $key eq 'tpmstate0';
 
 	my $volid = $drive->{file};
 	return if !defined($local_volumes->{$volid}); # only update sizes for local volumes
@@ -656,6 +603,12 @@ sub config_update_local_disksizes {
     # real OVMF_VARS.fd image, else we can create a too big image, which does not work
     if (defined($conf->{efidisk0})) {
 	PVE::QemuServer::update_efidisk_size($conf);
+    }
+
+    # TPM state might have an irregular filesize, to avoid problems on transfer
+    # we always assume the static size of 4M to allocate on the target
+    if (defined($conf->{tpmstate0})) {
+	PVE::QemuServer::update_tpmstate_size($conf);
     }
 }
 
@@ -686,24 +639,51 @@ sub sync_offline_local_volumes {
     $self->log('info', "copying local disk images") if scalar(@volids);
 
     foreach my $volid (@volids) {
-	my $targetsid = $local_volumes->{$volid}->{targetsid};
-	my $bwlimit = $local_volumes->{$volid}->{bwlimit};
-	$bwlimit = $bwlimit * 1024 if defined($bwlimit); # storage_migrate uses bps
+	my $new_volid;
 
-	my $storage_migrate_opts = {
-	    'ratelimit_bps' => $bwlimit,
-	    'insecure' => $opts->{migration_type} eq 'insecure',
-	    'with_snapshots' => $local_volumes->{$volid}->{snapshots},
-	    'allow_rename' => !$local_volumes->{$volid}->{is_vmstate},
-	};
+	my $opts = $self->{opts};
+	if ($opts->{remote}) {
+	    my $log = sub {
+		my ($level, $msg) = @_;
+		$self->log($level, $msg);
+	    };
 
-	my $logfunc = sub { $self->log('info', $_[0]); };
-	my $new_volid = eval {
-	    PVE::Storage::storage_migrate($storecfg, $volid, $self->{ssh_info},
-					  $targetsid, $storage_migrate_opts, $logfunc);
-	};
-	if (my $err = $@) {
-	    die "storage migration for '$volid' to storage '$targetsid' failed - $err\n";
+	    $new_volid = PVE::StorageTunnel::storage_migrate(
+		$self->{tunnel},
+		$storecfg,
+		$volid,
+		$self->{vmid},
+		$opts->{remote}->{vmid},
+		$local_volumes->{$volid},
+		$log,
+	    );
+	} else {
+	    my $targetsid = $local_volumes->{$volid}->{targetsid};
+
+	    my $bwlimit = $local_volumes->{$volid}->{bwlimit};
+	    $bwlimit = $bwlimit * 1024 if defined($bwlimit); # storage_migrate uses bps
+
+	    my $storage_migrate_opts = {
+		'ratelimit_bps' => $bwlimit,
+		'insecure' => $opts->{migration_type} eq 'insecure',
+		'with_snapshots' => $local_volumes->{$volid}->{snapshots},
+		'allow_rename' => !$local_volumes->{$volid}->{is_vmstate},
+	    };
+
+	    my $logfunc = sub { $self->log('info', $_[0]); };
+	    $new_volid = eval {
+		PVE::Storage::storage_migrate(
+		    $storecfg,
+		    $volid,
+		    $self->{ssh_info},
+		    $targetsid,
+		    $storage_migrate_opts,
+		    $logfunc,
+		);
+	    };
+	    if (my $err = $@) {
+		die "storage migration for '$volid' to storage '$targetsid' failed - $err\n";
+	    }
 	}
 
 	$self->{volume_map}->{$volid} = $new_volid;
@@ -718,6 +698,12 @@ sub sync_offline_local_volumes {
 
 sub cleanup_remotedisks {
     my ($self) = @_;
+
+    if ($self->{opts}->{remote}) {
+	PVE::Tunnel::finish_tunnel($self->{tunnel}, 1);
+	delete $self->{tunnel};
+	return;
+    }
 
     my $local_volumes = $self->{local_volumes};
 
@@ -768,7 +754,99 @@ sub phase1 {
     $self->handle_replication($vmid);
 
     $self->sync_offline_local_volumes();
+    $self->phase1_remote($vmid) if $self->{opts}->{remote};
 };
+
+sub map_bridges {
+    my ($conf, $map, $scan_only) = @_;
+
+    my $bridges = {};
+
+    foreach my $opt (keys %$conf) {
+	next if $opt !~ m/^net\d+$/;
+
+	next if !$conf->{$opt};
+	my $d = PVE::QemuServer::parse_net($conf->{$opt});
+	next if !$d || !$d->{bridge};
+
+	my $target_bridge = PVE::JSONSchema::map_id($map, $d->{bridge});
+	$bridges->{$target_bridge}->{$opt} = $d->{bridge};
+
+	next if $scan_only;
+
+	$d->{bridge} = $target_bridge;
+	$conf->{$opt} = PVE::QemuServer::print_net($d);
+    }
+
+    return $bridges;
+}
+
+sub phase1_remote {
+    my ($self, $vmid) = @_;
+
+    my $remote_conf = PVE::QemuConfig->load_config($vmid);
+    PVE::QemuConfig->update_volume_ids($remote_conf, $self->{volume_map});
+
+    my $bridges = map_bridges($remote_conf, $self->{opts}->{bridgemap});
+    for my $target (keys $bridges->%*) {
+	for my $nic (keys $bridges->{$target}->%*) {
+	    $self->log('info', "mapped: $nic from $bridges->{$target}->{$nic} to $target");
+	}
+    }
+
+    my @online_local_volumes = $self->filter_local_volumes('online');
+
+    my $storage_map = $self->{opts}->{storagemap};
+    $self->{nbd} = {};
+    PVE::QemuConfig->foreach_volume($remote_conf, sub {
+	my ($ds, $drive) = @_;
+
+	# TODO eject CDROM?
+	return if PVE::QemuServer::drive_is_cdrom($drive);
+
+	my $volid = $drive->{file};
+	return if !$volid;
+
+	return if !grep { $_ eq $volid} @online_local_volumes;
+
+	my ($storeid, $volname) = PVE::Storage::parse_volume_id($volid);
+	my $scfg = PVE::Storage::storage_config($self->{storecfg}, $storeid);
+	my $source_format = PVE::QemuServer::qemu_img_format($scfg, $volname);
+
+	# set by target cluster
+	my $oldvolid = delete $drive->{file};
+	delete $drive->{format};
+
+	my $targetsid = PVE::JSONSchema::map_id($storage_map, $storeid);
+
+	my $params = {
+	    format => $source_format,
+	    storage => $targetsid,
+	    drive => $drive,
+	};
+
+	$self->log('info', "Allocating volume for drive '$ds' on remote storage '$targetsid'..");
+	my $res = PVE::Tunnel::write_tunnel($self->{tunnel}, 600, 'disk', $params);
+
+	$self->log('info', "volume '$oldvolid' is '$res->{volid}' on the target\n");
+	$remote_conf->{$ds} = $res->{drivestr};
+	$self->{nbd}->{$ds} = $res;
+    });
+
+    my $conf_str = PVE::QemuServer::write_vm_config("remote", $remote_conf);
+
+    # TODO expose in PVE::Firewall?
+    my $vm_fw_conf_path = "/etc/pve/firewall/$vmid.fw";
+    my $fw_conf_str;
+    $fw_conf_str = PVE::Tools::file_get_contents($vm_fw_conf_path)
+	if -e $vm_fw_conf_path;
+    my $params = {
+	conf => $conf_str,
+	'firewall-config' => $fw_conf_str,
+    };
+
+    PVE::Tunnel::write_tunnel($self->{tunnel}, 10, 'config', $params);
+}
 
 sub phase1_cleanup {
     my ($self, $vmid, $err) = @_;
@@ -793,52 +871,44 @@ sub phase1_cleanup {
     }
 }
 
-sub phase2 {
-    my ($self, $vmid) = @_;
+sub phase2_start_local_cluster {
+    my ($self, $vmid, $params) = @_;
 
     my $conf = $self->{vmconf};
     my $local_volumes = $self->{local_volumes};
     my @online_local_volumes = $self->filter_local_volumes('online');
 
-    $self->{storage_migration} = 1 if scalar(@online_local_volumes);
+    my $start = $params->{start_params};
+    my $migrate = $params->{migrate_opts};
 
     $self->log('info', "starting VM $vmid on remote node '$self->{node}'");
 
-    my $raddr;
-    my $rport;
-    my $ruri; # the whole migration dst. URI (protocol:address[:port])
-    my $nodename = PVE::INotify::nodename();
+    my $tunnel_info = {};
 
     ## start on remote node
     my $cmd = [@{$self->{rem_ssh}}];
 
-    my $spice_ticket;
-    if (PVE::QemuServer::vga_conf_has_spice($conf->{vga})) {
-	my $res = mon_cmd($vmid, 'query-spice');
-	$spice_ticket = $res->{ticket};
+    push @$cmd, 'qm', 'start', $vmid;
+
+    if ($start->{skiplock}) {
+	push @$cmd, '--skiplock';
     }
 
-    push @$cmd , 'qm', 'start', $vmid, '--skiplock', '--migratedfrom', $nodename;
+    push @$cmd, '--migratedfrom', $migrate->{migratedfrom};
 
-    my $migration_type = $self->{opts}->{migration_type};
+    push @$cmd, '--migration_type', $migrate->{type};
 
-    push @$cmd, '--migration_type', $migration_type;
+    push @$cmd, '--migration_network', $migrate->{network}
+      if $migrate->{network};
 
-    push @$cmd, '--migration_network', $self->{opts}->{migration_network}
-      if $self->{opts}->{migration_network};
+    push @$cmd, '--stateuri', $start->{statefile};
 
-    if ($migration_type eq 'insecure') {
-	push @$cmd, '--stateuri', 'tcp';
-    } else {
-	push @$cmd, '--stateuri', 'unix';
+    if ($start->{forcemachine}) {
+	push @$cmd, '--machine', $start->{forcemachine};
     }
 
-    if ($self->{forcemachine}) {
-	push @$cmd, '--machine', $self->{forcemachine};
-    }
-
-    if ($self->{forcecpu}) {
-	push @$cmd, '--force-cpu', $self->{forcecpu};
+    if ($start->{forcecpu}) {
+	push @$cmd, '--force-cpu', $start->{forcecpu};
     }
 
     if ($self->{storage_migration}) {
@@ -846,11 +916,25 @@ sub phase2 {
     }
 
     my $spice_port;
-    my $unix_socket_info = {};
-    # version > 0 for unix socket support
-    my $nbd_protocol_version = 1;
-    my $input = "nbd_protocol_version: $nbd_protocol_version\n";
-    $input .= "spice_ticket: $spice_ticket\n" if $spice_ticket;
+    my $input = "nbd_protocol_version: $migrate->{nbd_proto_version}\n";
+
+    my @offline_local_volumes = $self->filter_local_volumes('offline');
+    for my $volid (@offline_local_volumes) {
+	my $drivename = $local_volumes->{$volid}->{drivename};
+	next if !$drivename || !$conf->{$drivename};
+
+	my $new_volid = $self->{volume_map}->{$volid};
+	next if !$new_volid || $volid eq $new_volid;
+
+	# FIXME PVE 8.x only use offline_volume variant once all targets can handle it
+	if ($drivename eq 'tpmstate0') {
+	    $input .= "$drivename: $new_volid\n"
+	} else {
+	    $input .= "offline_volume: $drivename: $new_volid\n"
+	}
+    }
+
+    $input .= "spice_ticket: $migrate->{spice_ticket}\n" if $migrate->{spice_ticket};
 
     my @online_replicated_volumes = $self->filter_local_volumes('online', 1);
     foreach my $volid (@online_replicated_volumes) {
@@ -880,20 +964,20 @@ sub phase2 {
     my $exitcode = PVE::Tools::run_command($cmd, input => $input, outfunc => sub {
 	my $line = shift;
 
-	if ($line =~ m/^migration listens on tcp:(localhost|[\d\.]+|\[[\d\.:a-fA-F]+\]):(\d+)$/) {
-	    $raddr = $1;
-	    $rport = int($2);
-	    $ruri = "tcp:$raddr:$rport";
+	if ($line =~ m/^migration listens on (tcp):(localhost|[\d\.]+|\[[\d\.:a-fA-F]+\]):(\d+)$/) {
+	    $tunnel_info->{addr} = $2;
+	    $tunnel_info->{port} = int($3);
+	    $tunnel_info->{proto} = $1;
 	}
-	elsif ($line =~ m!^migration listens on unix:(/run/qemu-server/(\d+)\.migrate)$!) {
-	    $raddr = $1;
-	    die "Destination UNIX sockets VMID does not match source VMID" if $vmid ne $2;
-	    $ruri = "unix:$raddr";
+	elsif ($line =~ m!^migration listens on (unix):(/run/qemu-server/(\d+)\.migrate)$!) {
+	    $tunnel_info->{addr} = $2;
+	    die "Destination UNIX sockets VMID does not match source VMID" if $vmid ne $3;
+	    $tunnel_info->{proto} = $1;
 	}
 	elsif ($line =~ m/^migration listens on port (\d+)$/) {
-	    $raddr = "localhost";
-	    $rport = int($1);
-	    $ruri = "tcp:$raddr:$rport";
+	    $tunnel_info->{addr} = "localhost";
+	    $tunnel_info->{port} = int($1);
+	    $tunnel_info->{proto} = "tcp";
 	}
 	elsif ($line =~ m/^spice listens on port (\d+)$/) {
 	    $spice_port = int($1);
@@ -914,7 +998,7 @@ sub phase2 {
 	    $targetdrive =~ s/drive-//g;
 
 	    $handle_storage_migration_listens->($targetdrive, $drivestr, $nbd_uri);
-	    $unix_socket_info->{$nbd_unix_addr} = 1;
+	    $tunnel_info->{unix_sockets}->{$nbd_unix_addr} = 1;
 	} elsif ($line =~ m/^re-using replicated volume: (\S+) - (.*)$/) {
 	    my $drive = $1;
 	    my $volid = $2;
@@ -929,14 +1013,115 @@ sub phase2 {
 
     die "remote command failed with exit code $exitcode\n" if $exitcode;
 
-    die "unable to detect remote migration address\n" if !$raddr;
+    die "unable to detect remote migration address\n" if !$tunnel_info->{addr} || !$tunnel_info->{proto};
 
     if (scalar(keys %$target_replicated_volumes) != scalar(@online_replicated_volumes)) {
 	die "number of replicated disks on source and target node do not match - target node too old?\n"
     }
 
-    $self->log('info', "start remote tunnel");
-    $self->start_remote_tunnel($raddr, $rport, $ruri, $unix_socket_info);
+    return ($tunnel_info, $spice_port);
+}
+
+sub phase2_start_remote_cluster {
+    my ($self, $vmid, $params) = @_;
+
+    die "insecure migration to remote cluster not implemented\n"
+	if $params->{migrate_opts}->{type} ne 'websocket';
+
+    my $remote_vmid = $self->{opts}->{remote}->{vmid};
+
+    # like regular start but with some overhead accounted for
+    my $memory = get_current_memory($self->{vmconf}->{memory});
+    my $timeout = PVE::QemuServer::Helpers::config_aware_timeout($self->{vmconf}, $memory) + 10;
+
+    my $res = PVE::Tunnel::write_tunnel($self->{tunnel}, $timeout, "start", $params);
+
+    foreach my $drive (keys %{$res->{drives}}) {
+	$self->{stopnbd} = 1;
+	$self->{target_drive}->{$drive}->{drivestr} = $res->{drives}->{$drive}->{drivestr};
+	my $nbd_uri = $res->{drives}->{$drive}->{nbd_uri};
+	die "unexpected NBD uri for '$drive': $nbd_uri\n"
+	    if $nbd_uri !~ s!/run/qemu-server/$remote_vmid\_!/run/qemu-server/$vmid\_!;
+
+	$self->{target_drive}->{$drive}->{nbd_uri} = $nbd_uri;
+    }
+
+    return ($res->{migrate}, $res->{spice_port});
+}
+
+sub phase2 {
+    my ($self, $vmid) = @_;
+
+    my $conf = $self->{vmconf};
+    my $local_volumes = $self->{local_volumes};
+
+    # version > 0 for unix socket support
+    my $nbd_protocol_version = 1;
+
+    my $spice_ticket;
+    if (PVE::QemuServer::vga_conf_has_spice($conf->{vga})) {
+	my $res = mon_cmd($vmid, 'query-spice');
+	$spice_ticket = $res->{ticket};
+    }
+
+    my $migration_type = $self->{opts}->{migration_type};
+    my $state_uri = $migration_type eq 'insecure' ? 'tcp' : 'unix';
+
+    my $params = {
+	start_params => {
+	    statefile => $state_uri,
+	    forcemachine => $self->{forcemachine},
+	    forcecpu => $self->{forcecpu},
+	    skiplock => 1,
+	},
+	migrate_opts => {
+	    spice_ticket => $spice_ticket,
+	    type => $migration_type,
+	    network => $self->{opts}->{migration_network},
+	    storagemap => $self->{opts}->{storagemap},
+	    migratedfrom => PVE::INotify::nodename(),
+	    nbd_proto_version => $nbd_protocol_version,
+	    nbd => $self->{nbd},
+	},
+    };
+
+    my ($tunnel_info, $spice_port);
+
+    my @online_local_volumes = $self->filter_local_volumes('online');
+    $self->{storage_migration} = 1 if scalar(@online_local_volumes);
+
+    if (my $remote = $self->{opts}->{remote}) {
+	my $remote_vmid = $remote->{vmid};
+	$params->{migrate_opts}->{remote_node} = $self->{node};
+	($tunnel_info, $spice_port) = $self->phase2_start_remote_cluster($vmid, $params);
+	die "only UNIX sockets are supported for remote migration\n"
+	    if $tunnel_info->{proto} ne 'unix';
+
+	my $remote_socket = $tunnel_info->{addr};
+	my $local_socket = $remote_socket;
+	$local_socket =~ s/$remote_vmid/$vmid/g;
+	$tunnel_info->{addr} = $local_socket;
+
+	$self->log('info', "Setting up tunnel for '$local_socket'");
+	PVE::Tunnel::forward_unix_socket($self->{tunnel}, $local_socket, $remote_socket);
+
+	foreach my $remote_socket (@{$tunnel_info->{unix_sockets}}) {
+	    my $local_socket = $remote_socket;
+	    $local_socket =~ s/$remote_vmid/$vmid/g;
+	    next if $self->{tunnel}->{forwarded}->{$local_socket};
+	    $self->log('info', "Setting up tunnel for '$local_socket'");
+	    PVE::Tunnel::forward_unix_socket($self->{tunnel}, $local_socket, $remote_socket);
+	}
+    } else {
+	($tunnel_info, $spice_port) = $self->phase2_start_local_cluster($vmid, $params);
+
+	$self->log('info', "start remote tunnel");
+	$self->start_remote_tunnel($tunnel_info);
+    }
+
+    my $migrate_uri = "$tunnel_info->{proto}:$tunnel_info->{addr}";
+    $migrate_uri .= ":$tunnel_info->{port}"
+	if defined($tunnel_info->{port});
 
     if ($self->{storage_migration}) {
 	$self->{storage_migration_jobs} = {};
@@ -951,7 +1136,7 @@ sub phase2 {
 	    my $source_drive = PVE::QemuServer::parse_drive($drive, $conf->{$drive});
 	    my $source_volid = $source_drive->{file};
 
-	    my $bwlimit = $local_volumes->{$source_volid}->{bwlimit};
+	    my $bwlimit = $self->{local_volumes}->{$source_volid}->{bwlimit};
 	    my $bitmap = $target->{bitmap};
 
 	    $self->log('info', "$drive: start migration to $nbd_uri");
@@ -959,7 +1144,7 @@ sub phase2 {
 	}
     }
 
-    $self->log('info', "starting online/live migration on $ruri");
+    $self->log('info', "starting online/live migration on $migrate_uri");
     $self->{livemigration} = 1;
 
     # load_defaults
@@ -973,7 +1158,8 @@ sub phase2 {
 
     # migrate speed can be set via bwlimit (datacenter.cfg and API) and via the
     # migrate_speed parameter in qm.conf - take the lower of the two.
-    my $bwlimit = PVE::Storage::get_bandwidth_limit('migration', undef, $self->{opts}->{bwlimit}) // 0;
+    my $bwlimit = $self->get_bwlimit();
+
     my $migrate_speed = $conf->{migrate_speed} // 0;
     $migrate_speed *= 1024; # migrate_speed is in MB/s, bwlimit in KB/s
 
@@ -1001,7 +1187,7 @@ sub phase2 {
     $qemu_migrate_params->{'downtime-limit'} = int($migrate_downtime);
 
     # set cachesize to 10% of the total memory
-    my $memory =  $conf->{memory} || $defaults->{memory};
+    my $memory = get_current_memory($conf->{memory});
     my $cachesize = int($memory * 1048576 / 10);
     $cachesize = round_powerof2($cachesize);
 
@@ -1014,7 +1200,7 @@ sub phase2 {
     };
     $self->log('info', "migrate-set-parameters error: $@") if $@;
 
-    if (PVE::QemuServer::vga_conf_has_spice($conf->{vga})) {
+    if (PVE::QemuServer::vga_conf_has_spice($conf->{vga}) && !$self->{opts}->{remote}) {
 	my $rpcenv = PVE::RPCEnvironment::get();
 	my $authuser = $rpcenv->get_user();
 
@@ -1036,12 +1222,12 @@ sub phase2 {
 
     my $start = time();
 
-    $self->log('info', "start migrate command to $ruri");
+    $self->log('info', "start migrate command to $migrate_uri");
     eval {
-	mon_cmd($vmid, "migrate", uri => $ruri);
+	mon_cmd($vmid, "migrate", uri => $migrate_uri);
     };
     my $merr = $@;
-    $self->log('info', "migrate uri => $ruri failed: $merr") if $merr;
+    $self->log('info', "migrate uri => $migrate_uri failed: $merr") if $merr;
 
     my $last_mem_transferred = 0;
     my $usleep = 1000000;
@@ -1093,7 +1279,8 @@ sub phase2 {
 	}
 
 	if ($status eq 'failed' || $status eq 'cancelled') {
-	    $self->log('info', "migration status error: $status");
+	    my $message = $stat->{'error-desc'} ? "$status - $stat->{'error-desc'}" : $status;
+	    $self->log('info', "migration status error: $message");
 	    die "aborting\n"
 	}
 
@@ -1189,6 +1376,22 @@ sub phase2_cleanup {
     };
     $self->log('info', "migrate_cancel error: $@") if $@;
 
+    my $vm_status = eval {
+	mon_cmd($vmid, 'query-status')->{status} or die "no 'status' in result\n";
+    };
+    $self->log('err', "query-status error: $@") if $@;
+
+    # Can end up in POSTMIGRATE state if failure occurred after convergence. Try going back to
+    # original state. Unfortunately, direct transition from POSTMIGRATE to PAUSED is not possible.
+    if ($vm_status && $vm_status eq 'postmigrate') {
+	if (!$self->{vm_was_paused}) {
+	    eval { mon_cmd($vmid, 'cont'); };
+	    $self->log('err', "resuming VM failed: $@") if $@;
+	} else {
+	    $self->log('err', "VM was paused, but ended in postmigrate state");
+	}
+    }
+
     my $conf = $self->{vmconf};
     delete $conf->{lock};
     eval { PVE::QemuConfig->write_config($vmid, $conf) };
@@ -1211,11 +1414,15 @@ sub phase2_cleanup {
 
     my $nodename = PVE::INotify::nodename();
 
-    my $cmd = [@{$self->{rem_ssh}}, 'qm', 'stop', $vmid, '--skiplock', '--migratedfrom', $nodename];
-    eval{ PVE::Tools::run_command($cmd, outfunc => sub {}, errfunc => sub {}) };
-    if (my $err = $@) {
-        $self->log('err', $err);
-        $self->{errors} = 1;
+    if ($self->{tunnel} && $self->{tunnel}->{version} >= 2) {
+	PVE::Tunnel::write_tunnel($self->{tunnel}, 10, 'stop');
+    } else {
+	my $cmd = [@{$self->{rem_ssh}}, 'qm', 'stop', $vmid, '--skiplock', '--migratedfrom', $nodename];
+	eval{ PVE::Tools::run_command($cmd, outfunc => sub {}, errfunc => sub {}) };
+	if (my $err = $@) {
+	    $self->log('err', $err);
+	    $self->{errors} = 1;
+	}
     }
 
     # cleanup after stopping, otherwise disks might be in-use by target VM!
@@ -1226,7 +1433,7 @@ sub phase2_cleanup {
 
 
     if ($self->{tunnel}) {
-	eval { finish_tunnel($self, $self->{tunnel});  };
+	eval { PVE::Tunnel::finish_tunnel($self->{tunnel});  };
 	if (my $err = $@) {
 	    $self->log('err', $err);
 	    $self->{errors} = 1;
@@ -1248,7 +1455,7 @@ sub phase3_cleanup {
 
     my $tunnel = $self->{tunnel};
 
-    if ($self->{volume_map}) {
+    if ($self->{volume_map} && !$self->{opts}->{remote}) {
 	my $target_drives = $self->{target_drive};
 
 	# FIXME: for NBD storage migration we now only update the volid, and
@@ -1264,58 +1471,96 @@ sub phase3_cleanup {
     }
 
     # transfer replication state before move config
-    $self->transfer_replication_state() if $self->{is_replicated};
-    PVE::QemuConfig->move_config_to_node($vmid, $self->{node});
-    $self->switch_replication_job_target() if $self->{is_replicated};
+    if (!$self->{opts}->{remote}) {
+	$self->transfer_replication_state() if $self->{is_replicated};
+	PVE::QemuConfig->move_config_to_node($vmid, $self->{node});
+	$self->switch_replication_job_target() if $self->{is_replicated};
+    }
 
     if ($self->{livemigration}) {
 	if ($self->{stopnbd}) {
 	    $self->log('info', "stopping NBD storage migration server on target.");
 	    # stop nbd server on remote vm - requirement for resume since 2.9
-	    my $cmd = [@{$self->{rem_ssh}}, 'qm', 'nbdstop', $vmid];
+	    if ($tunnel && $tunnel->{version} && $tunnel->{version} >= 2) {
+		eval {
+		    PVE::Tunnel::write_tunnel($tunnel, 30, 'nbdstop');
+		};
+		if (my $err = $@) {
+		    $self->log('err', $err);
+		    $self->{errors} = 1;
+		}
+	    } else {
+		my $cmd = [@{$self->{rem_ssh}}, 'qm', 'nbdstop', $vmid];
 
-	    eval{ PVE::Tools::run_command($cmd, outfunc => sub {}, errfunc => sub {}) };
-	    if (my $err = $@) {
-		$self->log('err', $err);
-		$self->{errors} = 1;
+		eval{ PVE::Tools::run_command($cmd, outfunc => sub {}, errfunc => sub {}) };
+		if (my $err = $@) {
+		    $self->log('err', $err);
+		    $self->{errors} = 1;
+		}
 	    }
 	}
 
-	# config moved and nbd server stopped - now we can resume vm on target
-	if ($tunnel && $tunnel->{version} && $tunnel->{version} >= 1) {
-	    eval {
-		$self->write_tunnel($tunnel, 30, "resume $vmid");
-	    };
-	    if (my $err = $@) {
-		$self->log('err', $err);
-		$self->{errors} = 1;
-	    }
-	} else {
-	    my $cmd = [@{$self->{rem_ssh}}, 'qm', 'resume', $vmid, '--skiplock', '--nocheck'];
-	    my $logf = sub {
-		my $line = shift;
-		$self->log('err', $line);
-	    };
-	    eval { PVE::Tools::run_command($cmd, outfunc => sub {}, errfunc => $logf); };
-	    if (my $err = $@) {
-		$self->log('err', $err);
-		$self->{errors} = 1;
+	# deletes local FDB entries if learning is disabled, they'll be re-added on target on resume
+	PVE::QemuServer::del_nets_bridge_fdb($conf, $vmid);
+
+	if (!$self->{vm_was_paused}) {
+	    # config moved and nbd server stopped - now we can resume vm on target
+	    if ($tunnel && $tunnel->{version} && $tunnel->{version} >= 1) {
+		my $cmd = $tunnel->{version} == 1 ? "resume $vmid" : "resume";
+		eval {
+		    PVE::Tunnel::write_tunnel($tunnel, 30, $cmd);
+		};
+		if (my $err = $@) {
+		    $self->log('err', $err);
+		    $self->{errors} = 1;
+		}
+	    } else {
+		# nocheck in case target node hasn't processed the config move/rename yet
+		my $cmd = [@{$self->{rem_ssh}}, 'qm', 'resume', $vmid, '--skiplock', '--nocheck'];
+		my $logf = sub {
+		    my $line = shift;
+		    $self->log('err', $line);
+		};
+		eval { PVE::Tools::run_command($cmd, outfunc => sub {}, errfunc => $logf); };
+		if (my $err = $@) {
+		    $self->log('err', $err);
+		    $self->{errors} = 1;
+		}
 	    }
 	}
 
-	if ($self->{storage_migration} && PVE::QemuServer::parse_guest_agent($conf)->{fstrim_cloned_disks} && $self->{running}) {
-	    my $cmd = [@{$self->{rem_ssh}}, 'qm', 'guest', 'cmd', $vmid, 'fstrim'];
-	    eval{ PVE::Tools::run_command($cmd, outfunc => sub {}, errfunc => sub {}) };
+	if (
+	    $self->{storage_migration}
+	    && PVE::QemuServer::parse_guest_agent($conf)->{fstrim_cloned_disks}
+	    && $self->{running}
+	) {
+	    if (!$self->{vm_was_paused}) {
+		$self->log('info', "issuing guest fstrim");
+		if ($self->{opts}->{remote}) {
+		    PVE::Tunnel::write_tunnel($self->{tunnel}, 600, 'fstrim');
+		} else {
+		    my $cmd = [@{$self->{rem_ssh}}, 'qm', 'guest', 'cmd', $vmid, 'fstrim'];
+		    eval{ PVE::Tools::run_command($cmd, outfunc => sub {}, errfunc => sub {}) };
+		    if (my $err = $@) {
+			$self->log('err', "fstrim failed - $err");
+			$self->{errors} = 1;
+		    }
+		}
+	    } else {
+		$self->log('info', "skipping guest fstrim, because VM is paused");
+	    }
 	}
     }
 
     # close tunnel on successful migration, on error phase2_cleanup closed it
-    if ($tunnel) {
-	eval { finish_tunnel($self, $tunnel);  };
+    if ($tunnel && $tunnel->{version} == 1) {
+	eval { PVE::Tunnel::finish_tunnel($tunnel); };
 	if (my $err = $@) {
 	    $self->log('err', $err);
 	    $self->{errors} = 1;
 	}
+	$tunnel = undef;
+	delete $self->{tunnel};
     }
 
     eval {
@@ -1332,7 +1577,7 @@ sub phase3_cleanup {
 	}
     };
 
-    # always stop local VM
+    # always stop local VM with nocheck, since config is moved already
     eval { PVE::QemuServer::vm_stop($self->{storecfg}, $vmid, 1, 1); };
     if (my $err = $@) {
 	$self->log('err', "stopping vm failed - $err");
@@ -1353,6 +1598,9 @@ sub phase3_cleanup {
 
     # destroy local copies
     foreach my $volid (@not_replicated_volumes) {
+	# remote is cleaned up below
+	next if $self->{opts}->{remote};
+
 	eval { PVE::Storage::vdisk_free($self->{storecfg}, $volid); };
 	if (my $err = $@) {
 	    $self->log('err', "removing local copy of '$volid' failed - $err");
@@ -1362,8 +1610,19 @@ sub phase3_cleanup {
     }
 
     # clear migrate lock
-    my $cmd = [ @{$self->{rem_ssh}}, 'qm', 'unlock', $vmid ];
-    $self->cmd_logerr($cmd, errmsg => "failed to clear migrate lock");
+    if ($tunnel && $tunnel->{version} >= 2) {
+	PVE::Tunnel::write_tunnel($tunnel, 10, "unlock");
+
+	PVE::Tunnel::finish_tunnel($tunnel);
+    } else {
+	my $cmd = [ @{$self->{rem_ssh}}, 'qm', 'unlock', $vmid ];
+	$self->cmd_logerr($cmd, errmsg => "failed to clear migrate lock");
+    }
+
+    if ($self->{opts}->{remote} && $self->{opts}->{delete}) {
+	eval { PVE::QemuServer::destroy_vm($self->{storecfg}, $vmid, 1, undef, 0) };
+	warn "Failed to remove source VM - $@\n" if $@;
+    }
 }
 
 sub final_cleanup {

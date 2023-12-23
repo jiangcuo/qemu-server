@@ -15,6 +15,7 @@ use POSIX qw(strftime);
 use Term::ReadLine;
 use URI::Escape;
 
+use PVE::APIClient::LWP;
 use PVE::Cluster;
 use PVE::Exception qw(raise_param_exc);
 use PVE::GuestHelpers;
@@ -46,6 +47,7 @@ my $upid_exit = sub {
 };
 
 my $nodename = PVE::INotify::nodename();
+my %node = (node => $nodename);
 
 sub setup_environment {
     PVE::RPCEnvironment->setup_default_cli_env();
@@ -156,6 +158,117 @@ __PACKAGE__->register_method ({
 	print "$cmdline\n";
 
 	return;
+    }});
+
+
+__PACKAGE__->register_method({
+    name => 'remote_migrate_vm',
+    path => 'remote_migrate_vm',
+    method => 'POST',
+    description => "Migrate virtual machine to a remote cluster. Creates a new migration task. EXPERIMENTAL feature!",
+    permissions => {
+	check => ['perm', '/vms/{vmid}', [ 'VM.Migrate' ]],
+    },
+    parameters => {
+	additionalProperties => 0,
+	properties => {
+	    node => get_standard_option('pve-node'),
+	    vmid => get_standard_option('pve-vmid', { completion => \&PVE::QemuServer::complete_vmid }),
+	    'target-vmid' => get_standard_option('pve-vmid', { optional => 1 }),
+	    'target-endpoint' => get_standard_option('proxmox-remote', {
+		description => "Remote target endpoint",
+	    }),
+	    online => {
+		type => 'boolean',
+		description => "Use online/live migration if VM is running. Ignored if VM is stopped.",
+		optional => 1,
+	    },
+	    delete => {
+		type => 'boolean',
+		description => "Delete the original VM and related data after successful migration. By default the original VM is kept on the source cluster in a stopped state.",
+		optional => 1,
+		default => 0,
+	    },
+	    'target-storage' => get_standard_option('pve-targetstorage', {
+		completion => \&PVE::QemuServer::complete_migration_storage,
+		optional => 0,
+	    }),
+	    'target-bridge' => {
+		type => 'string',
+		description => "Mapping from source to target bridges. Providing only a single bridge ID maps all source bridges to that bridge. Providing the special value '1' will map each source bridge to itself.",
+		format => 'bridge-pair-list',
+	    },
+	    bwlimit => {
+		description => "Override I/O bandwidth limit (in KiB/s).",
+		optional => 1,
+		type => 'integer',
+		minimum => '0',
+		default => 'migrate limit from datacenter or storage config',
+	    },
+	},
+    },
+    returns => {
+	type => 'string',
+	description => "the task ID.",
+    },
+    code => sub {
+	my ($param) = @_;
+
+	my $rpcenv = PVE::RPCEnvironment::get();
+	my $authuser = $rpcenv->get_user();
+
+	my $source_vmid = $param->{vmid};
+	my $target_endpoint = $param->{'target-endpoint'};
+	my $target_vmid = $param->{'target-vmid'} // $source_vmid;
+
+	my $remote = PVE::JSONSchema::parse_property_string('proxmox-remote', $target_endpoint);
+
+	# TODO: move this as helper somewhere appropriate?
+	my $conn_args = {
+	    protocol => 'https',
+	    host => $remote->{host},
+	    port => $remote->{port} // 8006,
+	    apitoken => $remote->{apitoken},
+	};
+
+	$conn_args->{cached_fingerprints} = { uc($remote->{fingerprint}) => 1 }
+	    if defined($remote->{fingerprint});
+
+	my $api_client = PVE::APIClient::LWP->new(%$conn_args);
+	my $resources = $api_client->get("/cluster/resources", { type => 'vm' });
+	if (grep { defined($_->{vmid}) && $_->{vmid} eq $target_vmid } @$resources) {
+	    raise_param_exc({ target_vmid => "Guest with ID '$target_vmid' already exists on remote cluster" });
+	}
+
+	my $storages = $api_client->get("/nodes/localhost/storage", { enabled => 1 });
+
+	my $storecfg = PVE::Storage::config();
+	my $target_storage = $param->{'target-storage'};
+	my $storagemap = eval { PVE::JSONSchema::parse_idmap($target_storage, 'pve-storage-id') };
+	raise_param_exc({ 'target-storage' => "failed to parse storage map: $@" })
+	    if $@;
+
+	my $check_remote_storage = sub {
+	    my ($storage) = @_;
+	    my $found = [ grep { $_->{storage} eq $storage } @$storages ];
+	    die "remote: storage '$storage' does not exist (or missing permission)!\n"
+		if !@$found;
+
+	    $found = @$found[0];
+
+	    my $content_types = [ PVE::Tools::split_list($found->{content}) ];
+	    die "remote: storage '$storage' cannot store images\n"
+		if !grep { $_ eq 'images' } @$content_types;
+	};
+
+	foreach my $target_sid (values %{$storagemap->{entries}}) {
+	    $check_remote_storage->($target_sid);
+	}
+
+	$check_remote_storage->($storagemap->{default})
+	    if $storagemap->{default};
+
+	return PVE::API2::Qemu->remote_migrate_vm($param);
     }});
 
 __PACKAGE__->register_method ({
@@ -313,6 +426,8 @@ __PACKAGE__->register_method ({
 		last;
 	    } elsif ($line =~ /^resume (\d+)$/) {
 		my $vmid = $1;
+		# check_running and vm_resume with nocheck, since local node
+		# might not have processed config move/rename yet
 		if (PVE::QemuServer::check_running($vmid, 1)) {
 		    eval { PVE::QemuServer::vm_resume($vmid, 1, 1); };
 		    if ($@) {
@@ -373,7 +488,7 @@ __PACKAGE__->register_method ({
     name => 'monitor',
     path => 'monitor',
     method => 'POST',
-    description => "Enter Qemu Monitor interface.",
+    description => "Enter QEMU Monitor interface.",
     parameters => {
 	additionalProperties => 0,
 	properties => {
@@ -388,7 +503,7 @@ __PACKAGE__->register_method ({
 
 	my $conf = PVE::QemuConfig->load_config ($vmid); # check if VM exists
 
-	print "Entering Qemu Monitor for VM $vmid - type 'help' for help\n";
+	print "Entering QEMU Monitor for VM $vmid - type 'help' for help\n";
 
 	my $term = Term::ReadLine->new('qm');
 
@@ -809,7 +924,7 @@ __PACKAGE__->register_method({
 		# we have to cleanup the tap devices after a crash
 
 		foreach my $opt (keys %$conf) {
-		    next if $opt !~  m/^net(\d)+$/;
+		    next if $opt !~  m/^net(\d+)$/;
 		    my $interface = $1;
 		    PVE::Network::tap_unplug("tap${vmid}i${interface}");
 		}
@@ -831,7 +946,7 @@ __PACKAGE__->register_method({
 	    warn "Restarting VM $vmid\n";
 	    PVE::API2::Qemu->vm_start({
 		vmid => $vmid,
-		node => $nodename,
+		%node,
 	    });
 	}
 
@@ -857,7 +972,7 @@ my $print_agent_result = sub {
 	return;
     }
 
-    print to_json($result, { pretty => 1, canonical => 1});
+    print to_json($result, { pretty => 1, canonical => 1, utf8 => 1});
 };
 
 sub param_mapping {
@@ -878,85 +993,66 @@ sub param_mapping {
 }
 
 our $cmddef = {
-    list => [ "PVE::API2::Qemu", 'vmlist', [],
-	     { node => $nodename }, sub {
-		 my $vmlist = shift;
+    list=> [ "PVE::API2::Qemu", 'vmlist', [], { %node }, sub {
+	my $vmlist = shift;
+	exit 0 if (!scalar(@$vmlist));
 
-		 exit 0 if (!scalar(@$vmlist));
+	printf "%10s %-20s %-10s %-10s %12s %-10s\n",
+	qw(VMID NAME STATUS MEM(MB) BOOTDISK(GB) PID);
 
-		 printf "%10s %-20s %-10s %-10s %12s %-10s\n",
-		 qw(VMID NAME STATUS MEM(MB) BOOTDISK(GB) PID);
+	foreach my $rec (sort { $a->{vmid} <=> $b->{vmid} } @$vmlist) {
+	    printf "%10s %-20s %-10s %-10s %12.2f %-10s\n", $rec->{vmid}, $rec->{name},
+	        $rec->{qmpstatus} || $rec->{status},
+	        ($rec->{maxmem} || 0)/(1024*1024),
+	        ($rec->{maxdisk} || 0)/(1024*1024*1024),
+	        $rec->{pid} || 0;
+	}
+    }],
 
-		 foreach my $rec (sort { $a->{vmid} <=> $b->{vmid} } @$vmlist) {
-		     printf "%10s %-20s %-10s %-10s %12.2f %-10s\n", $rec->{vmid}, $rec->{name},
-		     $rec->{qmpstatus} || $rec->{status},
-		     ($rec->{maxmem} || 0)/(1024*1024),
-		     ($rec->{maxdisk} || 0)/(1024*1024*1024),
-		     $rec->{pid}||0;
-		 }
+    create => [ "PVE::API2::Qemu", 'create_vm', ['vmid'], { %node }, $upid_exit ],
+    destroy => [ "PVE::API2::Qemu", 'destroy_vm', ['vmid'], { %node }, $upid_exit ],
+    clone => [ "PVE::API2::Qemu", 'clone_vm', ['vmid', 'newid'], { %node }, $upid_exit ],
 
+    migrate => [ "PVE::API2::Qemu", 'migrate_vm', ['vmid', 'target'], { %node }, $upid_exit ],
+    'remote-migrate' => [ __PACKAGE__, 'remote_migrate_vm', ['vmid', 'target-vmid', 'target-endpoint'], { %node }, $upid_exit ],
 
-	      } ],
+    set => [ "PVE::API2::Qemu", 'update_vm', ['vmid'], { %node } ],
 
-    create => [ "PVE::API2::Qemu", 'create_vm', ['vmid'], { node => $nodename }, $upid_exit ],
+    config => [ "PVE::API2::Qemu", 'vm_config', ['vmid'], { %node }, sub {
+	my $config = shift;
+	foreach my $k (sort (keys %$config)) {
+	    next if $k eq 'digest';
+	    my $v = $config->{$k};
+	    if ($k eq 'description') {
+		$v = PVE::Tools::encode_text($v);
+	    }
+	    print "$k: $v\n";
+	}
+    }],
 
-    destroy => [ "PVE::API2::Qemu", 'destroy_vm', ['vmid'], { node => $nodename }, $upid_exit ],
-
-    clone => [ "PVE::API2::Qemu", 'clone_vm', ['vmid', 'newid'], { node => $nodename }, $upid_exit ],
-
-    migrate => [ "PVE::API2::Qemu", 'migrate_vm', ['vmid', 'target'], { node => $nodename }, $upid_exit ],
-
-    set => [ "PVE::API2::Qemu", 'update_vm', ['vmid'], { node => $nodename } ],
-
-    resize => [ "PVE::API2::Qemu", 'resize_vm', ['vmid', 'disk', 'size'], { node => $nodename } ],
-
-    move_disk => [ "PVE::API2::Qemu", 'move_vm_disk', ['vmid', 'disk', 'storage'], { node => $nodename }, $upid_exit ],
-
-    unlink => [ "PVE::API2::Qemu", 'unlink', ['vmid'], { node => $nodename } ],
-
-    config => [ "PVE::API2::Qemu", 'vm_config', ['vmid'],
-		{ node => $nodename }, sub {
-		    my $config = shift;
-		    foreach my $k (sort (keys %$config)) {
-			next if $k eq 'digest';
-			my $v = $config->{$k};
-			if ($k eq 'description') {
-			    $v = PVE::Tools::encode_text($v);
-			}
-			print "$k: $v\n";
-		    }
-		}],
-
-    pending => [ "PVE::API2::Qemu", 'vm_pending', ['vmid'], { node => $nodename }, \&PVE::GuestHelpers::format_pending ],
+    pending => [ "PVE::API2::Qemu", 'vm_pending', ['vmid'], { %node }, \&PVE::GuestHelpers::format_pending ],
     showcmd => [ __PACKAGE__, 'showcmd', ['vmid']],
 
     status => [ __PACKAGE__, 'status', ['vmid']],
 
-    snapshot => [ "PVE::API2::Qemu", 'snapshot', ['vmid', 'snapname'], { node => $nodename } , $upid_exit ],
+    # FIXME: for 8.0 move to command group snapshot { create, list, destroy, rollback }
+    snapshot => [ "PVE::API2::Qemu", 'snapshot', ['vmid', 'snapname'], { %node } , $upid_exit ],
+    delsnapshot => [ "PVE::API2::Qemu", 'delsnapshot', ['vmid', 'snapname'], { %node } , $upid_exit ],
+    listsnapshot => [ "PVE::API2::Qemu", 'snapshot_list', ['vmid'], { %node }, \&PVE::GuestHelpers::print_snapshot_tree],
+    rollback => [ "PVE::API2::Qemu", 'rollback', ['vmid', 'snapname'], { %node } , $upid_exit ],
 
-    delsnapshot => [ "PVE::API2::Qemu", 'delsnapshot', ['vmid', 'snapname'], { node => $nodename } , $upid_exit ],
+    template => [ "PVE::API2::Qemu", 'template', ['vmid'], { %node }],
 
-    listsnapshot => [ "PVE::API2::Qemu", 'snapshot_list', ['vmid'], { node => $nodename }, \&PVE::GuestHelpers::print_snapshot_tree],
+    # FIXME: should be in a power command group?
+    start => [ "PVE::API2::Qemu", 'vm_start', ['vmid'], { %node } , $upid_exit ],
+    stop => [ "PVE::API2::Qemu", 'vm_stop', ['vmid'], { %node }, $upid_exit ],
+    reset => [ "PVE::API2::Qemu", 'vm_reset', ['vmid'], { %node }, $upid_exit ],
+    shutdown => [ "PVE::API2::Qemu", 'vm_shutdown', ['vmid'], { %node }, $upid_exit ],
+    reboot => [ "PVE::API2::Qemu", 'vm_reboot', ['vmid'], { %node }, $upid_exit ],
+    suspend => [ "PVE::API2::Qemu", 'vm_suspend', ['vmid'], { %node }, $upid_exit ],
+    resume => [ "PVE::API2::Qemu", 'vm_resume', ['vmid'], { %node }, $upid_exit ],
 
-    rollback => [ "PVE::API2::Qemu", 'rollback', ['vmid', 'snapname'], { node => $nodename } , $upid_exit ],
-
-    template => [ "PVE::API2::Qemu", 'template', ['vmid'], { node => $nodename }],
-
-    start => [ "PVE::API2::Qemu", 'vm_start', ['vmid'], { node => $nodename } , $upid_exit ],
-
-    stop => [ "PVE::API2::Qemu", 'vm_stop', ['vmid'], { node => $nodename }, $upid_exit ],
-
-    reset => [ "PVE::API2::Qemu", 'vm_reset', ['vmid'], { node => $nodename }, $upid_exit ],
-
-    shutdown => [ "PVE::API2::Qemu", 'vm_shutdown', ['vmid'], { node => $nodename }, $upid_exit ],
-
-    reboot => [ "PVE::API2::Qemu", 'vm_reboot', ['vmid'], { node => $nodename }, $upid_exit ],
-
-    suspend => [ "PVE::API2::Qemu", 'vm_suspend', ['vmid'], { node => $nodename }, $upid_exit ],
-
-    resume => [ "PVE::API2::Qemu", 'vm_resume', ['vmid'], { node => $nodename }, $upid_exit ],
-
-    sendkey => [ "PVE::API2::Qemu", 'vm_sendkey', ['vmid', 'key'], { node => $nodename } ],
+    sendkey => [ "PVE::API2::Qemu", 'vm_sendkey', ['vmid', 'key'], { %node } ],
 
     vncproxy => [ __PACKAGE__, 'vncproxy', ['vmid']],
 
@@ -964,17 +1060,31 @@ our $cmddef = {
 
     unlock => [ __PACKAGE__, 'unlock', ['vmid']],
 
-    rescan  => [ __PACKAGE__, 'rescan', []],
+    # TODO: evluate dropping below aliases for 8.0, if no usage is left
+    importdisk => { alias => 'disk import' },
+    'move-disk' => { alias => 'disk move' },
+    move_disk => { alias => 'disk move' },
+    rescan => { alias => 'disk rescan' },
+    resize => { alias => 'disk resize' },
+    unlink => { alias => 'disk unlink' },
+
+    disk => {
+	import => [ __PACKAGE__, 'importdisk', ['vmid', 'source', 'storage']],
+	'move' => [ "PVE::API2::Qemu", 'move_vm_disk', ['vmid', 'disk', 'storage'], { %node }, $upid_exit ],
+	rescan => [ __PACKAGE__, 'rescan', []],
+	resize => [ "PVE::API2::Qemu", 'resize_vm', ['vmid', 'disk', 'size'], { %node } ],
+	unlink => [ "PVE::API2::Qemu", 'unlink', ['vmid'], { %node } ],
+    },
 
     monitor  => [ __PACKAGE__, 'monitor', ['vmid']],
 
-    agent  => { alias => 'guest cmd' },
+    agent  => { alias => 'guest cmd' }, # FIXME: remove with PVE 8.0
 
     guest => {
-	cmd  => [ "PVE::API2::Qemu::Agent", 'agent', ['vmid', 'command'], { node => $nodename }, $print_agent_result ],
-	passwd => [ "PVE::API2::Qemu::Agent", 'set-user-password', [ 'vmid', 'username' ], { node => $nodename }],
-	exec => [ __PACKAGE__, 'exec', [ 'vmid', 'extra-args' ], { node => $nodename }, $print_agent_result],
-	'exec-status' => [ "PVE::API2::Qemu::Agent", 'exec-status', [ 'vmid', 'pid' ], { node => $nodename }, $print_agent_result],
+	cmd  => [ "PVE::API2::Qemu::Agent", 'agent', ['vmid', 'command'], { %node }, $print_agent_result ],
+	passwd => [ "PVE::API2::Qemu::Agent", 'set-user-password', [ 'vmid', 'username' ], { %node }],
+	exec => [ __PACKAGE__, 'exec', [ 'vmid', 'extra-args' ], { %node }, $print_agent_result],
+	'exec-status' => [ "PVE::API2::Qemu::Agent", 'exec-status', [ 'vmid', 'pid' ], { %node }, $print_agent_result],
     },
 
     mtunnel => [ __PACKAGE__, 'mtunnel', []],
@@ -983,17 +1093,14 @@ our $cmddef = {
 
     terminal => [ __PACKAGE__, 'terminal', ['vmid']],
 
-    importdisk => [ __PACKAGE__, 'importdisk', ['vmid', 'source', 'storage']],
-
     importovf => [ __PACKAGE__, 'importovf', ['vmid', 'manifest', 'storage']],
 
-    cleanup => [ __PACKAGE__, 'cleanup', ['vmid', 'clean-shutdown', 'guest-requested'], { node => $nodename }],
+    cleanup => [ __PACKAGE__, 'cleanup', ['vmid', 'clean-shutdown', 'guest-requested'], { %node }],
 
     cloudinit => {
-	dump => [ "PVE::API2::Qemu", 'cloudinit_generated_config_dump', ['vmid', 'type'], { node => $nodename }, sub {
-		my $data = shift;
-		print "$data\n";
-	    }],
+	dump => [ "PVE::API2::Qemu", 'cloudinit_generated_config_dump', ['vmid', 'type'], { %node }, sub { print "$_[0]\n"; }],
+	pending => [ "PVE::API2::Qemu", 'cloudinit_pending', ['vmid'], { %node }, \&PVE::GuestHelpers::format_pending ],
+	update => [ "PVE::API2::Qemu", 'cloudinit_update', ['vmid'], { node => $nodename }],
     },
 
 };

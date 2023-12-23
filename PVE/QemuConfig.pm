@@ -12,6 +12,7 @@ use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer;
 use PVE::QemuServer::Machine;
+use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::Storage;
 use PVE::Tools;
 use PVE::Format qw(render_bytes render_duration);
@@ -208,8 +209,7 @@ sub __snapshot_save_vmstate {
 	$target = PVE::QemuServer::find_vmstate_storage($conf, $storecfg);
     }
 
-    my $defaults = PVE::QemuServer::load_defaults();
-    my $mem_size = $conf->{memory} // $defaults->{memory};
+    my $mem_size = get_current_memory($conf->{memory});
     my $driver_state_size = 500; # assume 500MB is enough to safe all driver state;
     # our savevm-start does live-save of the memory until the space left in the
     # volume is just enough for the remaining memory content + internal state
@@ -239,6 +239,25 @@ sub __snapshot_save_vmstate {
     $conf->{runningcpu} = $runningcpu;
 
     return $statefile;
+}
+
+sub __snapshot_activate_storages {
+    my ($class, $conf, $include_vmstate) = @_;
+
+    my $storecfg = PVE::Storage::config();
+    my $opts = $include_vmstate ? { 'extra_keys' => ['vmstate'] } : {};
+    my $storage_hash = {};
+
+    $class->foreach_volume_full($conf, $opts, sub {
+	my ($key, $drive) = @_;
+
+	return if PVE::QemuServer::drive_is_cdrom($drive);
+
+	my ($storeid) = PVE::Storage::parse_volume_id($drive->{file});
+	$storage_hash->{$storeid} = 1;
+    });
+
+    PVE::Storage::activate_storage_list($storecfg, [ sort keys $storage_hash->%* ]);
 }
 
 sub __snapshot_check_running {
@@ -308,6 +327,9 @@ sub __snapshot_create_vol_snapshots_hook {
 			my ($b, $t) = $render_state->($stat);
 			print "completed saving the VM state in $t, saved $b\n";
 			last;
+		    } elsif ($stat->{status} eq 'failed') {
+			my $err = $stat->{error} || 'unknown error';
+			die "unable to save VM state and RAM - $err\n";
 		    } else {
 			die "query-savevm returned unexpected status '$stat->{status}'\n";
 		    }
@@ -430,14 +452,14 @@ sub __snapshot_rollback_hook {
 }
 
 sub __snapshot_rollback_vol_possible {
-    my ($class, $drive, $snapname) = @_;
+    my ($class, $drive, $snapname, $blockers) = @_;
 
     return if PVE::QemuServer::drive_is_cdrom($drive);
 
     my $storecfg = PVE::Storage::config();
     my $volid = $drive->{file};
 
-    PVE::Storage::volume_rollback_is_possible($storecfg, $volid, $snapname);
+    PVE::Storage::volume_rollback_is_possible($storecfg, $volid, $snapname, $blockers);
 }
 
 sub __snapshot_rollback_vol_rollback {
@@ -476,7 +498,7 @@ sub __snapshot_rollback_get_unused {
     $class->foreach_volume($conf, sub {
 	my ($vs, $volume) = @_;
 
-	return if PVE::QemuServer::drive_is_cdrom($volume);
+	return if PVE::QemuServer::drive_is_cdrom($volume, 1);
 
 	my $found = 0;
 	my $volid = $volume->{file};
@@ -485,7 +507,7 @@ sub __snapshot_rollback_get_unused {
 	    my ($ds, $drive) = @_;
 
 	    return if $found;
-	    return if PVE::QemuServer::drive_is_cdrom($drive);
+	    return if PVE::QemuServer::drive_is_cdrom($drive, 1);
 
 	    $found = 1
 		if ($drive->{file} && $drive->{file} eq $volid);
@@ -497,6 +519,58 @@ sub __snapshot_rollback_get_unused {
     return $unused;
 }
 
+sub add_unused_volume {
+    my ($class, $config, $volid) = @_;
+
+    if ($volid =~ m/vm-\d+-cloudinit/) {
+	print "found unused cloudinit disk '$volid', removing it\n";
+	my $storecfg = PVE::Storage::config();
+	PVE::Storage::vdisk_free($storecfg, $volid);
+	return undef;
+    } else {
+        return $class->SUPER::add_unused_volume($config, $volid);
+    }
+}
+
+sub load_current_config {
+    my ($class, $vmid, $current) = @_;
+
+    my $conf = $class->SUPER::load_current_config($vmid, $current);
+    delete $conf->{cloudinit};
+    return $conf;
+}
+
+sub get_derived_property {
+    my ($class, $conf, $name) = @_;
+
+    my $defaults = PVE::QemuServer::load_defaults();
+
+    if ($name eq 'max-cpu') {
+	my $cpus =
+	    ($conf->{sockets} || $defaults->{sockets}) * ($conf->{cores} || $defaults->{cores});
+	return $conf->{vcpus} || $cpus;
+    } elsif ($name eq 'max-memory') { # current usage maximum, not maximum hotpluggable
+	return get_current_memory($conf->{memory}) * 1024 * 1024;
+    } else {
+	die "unknown derived property - $name\n";
+    }
+}
+
 # END implemented abstract methods from PVE::AbstractConfig
+
+sub has_cloudinit {
+    my ($class, $conf, $skip) = @_;
+
+    my $found;
+
+    $class->foreach_volume($conf, sub {
+	my ($key, $volume) = @_;
+
+	return if ($skip && $skip eq $key) || $found;
+	$found = $key if PVE::QemuServer::Drive::drive_is_cloudinit($volume);
+    });
+
+    return $found;
+}
 
 1;

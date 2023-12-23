@@ -51,12 +51,26 @@ $MigrationTest::Shared::qemu_config_module->mock(
     },
 );
 
-my $qemu_migrate_module = Test::MockModule->new("PVE::QemuMigrate");
-$qemu_migrate_module->mock(
+my $tunnel_module = Test::MockModule->new("PVE::Tunnel");
+$tunnel_module->mock(
     finish_tunnel => sub {
 	delete $expected_calls->{'finish_tunnel'};
 	return;
     },
+    write_tunnel => sub {
+	my ($tunnel, $timeout, $command) = @_;
+
+	if ($command =~ m/^resume (\d+)$/) {
+	    my $vmid = $1;
+	    die "resuming wrong VM '$vmid'\n" if $vmid ne $test_vmid;
+	    return;
+	}
+	die "write_tunnel (mocked) - implement me: $command\n";
+    },
+);
+
+my $qemu_migrate_module = Test::MockModule->new("PVE::QemuMigrate");
+$qemu_migrate_module->mock(
     fork_tunnel => sub {
 	die "fork_tunnel (mocked) - implement me\n"; # currently no call should lead here
     },
@@ -72,16 +86,6 @@ $qemu_migrate_module->mock(
 	    pid => 123456,
 	    version => 1,
 	};
-    },
-    write_tunnel => sub {
-	my ($self, $tunnel, $timeout, $command) = @_;
-
-	if ($command =~ m/^resume (\d+)$/) {
-	    my $vmid = $1;
-	    die "resuming wrong VM '$vmid'\n" if $vmid ne $test_vmid;
-	    return;
-	}
-	die "write_tunnel (mocked) - implement me: $command\n";
     },
     log => sub {
 	my ($self, $level, $message) = @_;
@@ -129,8 +133,8 @@ $MigrationTest::Shared::qemu_server_module->mock(
 	my ($vmid, $drive, $dst_volid, $vmiddst, $is_zero_initialized, $jobs, $completion, $qga, $bwlimit, $src_bitmap) = @_;
 
 	die "drive_mirror with wrong vmid: '$vmid'\n" if $vmid ne $test_vmid;
-	die "qemu_drive_mirror '$drive' error\n" if $fail_config->{qemu_drive_mirror}
-						 && $fail_config->{qemu_drive_mirror} eq $drive;
+	die "qemu_drive_mirror '$drive' error\n"
+	    if $fail_config->{qemu_drive_mirror} && $fail_config->{qemu_drive_mirror} eq $drive;
 
 	my $nbd_info = decode_json(file_get_contents("${RUN_DIR_PATH}/nbd_info"));
 	die "target does not expect drive mirror for '$drive'\n"
@@ -141,8 +145,9 @@ $MigrationTest::Shared::qemu_server_module->mock(
     qemu_drive_mirror_monitor => sub {
 	my ($vmid, $vmiddst, $jobs, $completion, $qga) = @_;
 
-	if ($fail_config->{qemu_drive_mirror_monitor} &&
-	    $fail_config->{qemu_drive_mirror_monitor} eq $completion) {
+	if ($fail_config->{qemu_drive_mirror_monitor}
+	    && $fail_config->{qemu_drive_mirror_monitor} eq $completion
+	) {
 	    die "qemu_drive_mirror_monitor '$completion' error\n";
 	}
 	return;
@@ -154,6 +159,7 @@ $MigrationTest::Shared::qemu_server_module->mock(
 	$vm_stop_executed = 1;
 	delete $expected_calls->{'vm_stop'};
     },
+    del_nets_bridge_fdb => sub { return; },
 );
 
 my $qemu_server_cpuconfig_module = Test::MockModule->new("PVE::QemuServer::CPUConfig");
@@ -197,8 +203,8 @@ $MigrationTest::Shared::storage_module->mock(
     storage_migrate => sub {
 	my ($cfg, $volid, $target_sshinfo, $target_storeid, $opts, $logfunc) = @_;
 
-	die "storage_migrate '$volid' error\n" if $fail_config->{storage_migrate}
-					       && $fail_config->{storage_migrate} eq $volid;
+	die "storage_migrate '$volid' error\n"
+	    if $fail_config->{storage_migrate} && $fail_config->{storage_migrate} eq $volid;
 
 	my ($storeid, $volname) = PVE::Storage::parse_volume_id($volid);
 
@@ -229,10 +235,20 @@ $MigrationTest::Shared::storage_module->mock(
 
 	PVE::Storage::parse_volume_id($volid);
 
-	die "vdisk_free '$volid' error\n" if defined($fail_config->{vdisk_free})
-					  && $fail_config->{vdisk_free} eq $volid;
+	die "vdisk_free '$volid' error\n"
+	    if defined($fail_config->{vdisk_free}) && $fail_config->{vdisk_free} eq $volid;
 
 	delete $source_volids->{$volid};
+    },
+    volume_size_info => sub {
+	my ($scfg, $volid) = @_;
+	my ($storeid, $volname) = PVE::Storage::parse_volume_id($volid);
+
+	for my $v ($source_vdisks->{$storeid}->@*) {
+	    return wantarray ? ($v->{size}, $v->{format}, $v->{used}, $v->{parent}) : $v->{size}
+		if $v->{volid} eq $volid;
+	}
+	die "could not find '$volid' in mock 'source_vdisks'\n";
     },
 );
 
@@ -250,7 +266,7 @@ $MigrationTest::Shared::tools_module->mock(
 
 	my $cmd = shift @{$cmd_tail};
 
-	if ($cmd eq '/usr/bin/ssh') {
+	if ($cmd =~ m@^(?:/usr/bin/)?ssh$@) {
 	    while (scalar(@{$cmd_tail})) {
 		$cmd = shift @{$cmd_tail};
 		if ($cmd eq '/bin/true') {
@@ -273,14 +289,17 @@ $MigrationTest::Shared::tools_module->mock(
 			    }
 			}
 
-			return $MigrationTest::Shared::tools_module->original('run_command')->([
-			    '/usr/bin/perl',
-			    "-I${QM_LIB_PATH}",
-			    "-I${QM_LIB_PATH}/test",
-			    "${QM_LIB_PATH}/test/MigrationTest/QmMock.pm",
-			    'start',
-			    @{$cmd_tail},
-			    ], %param);
+			return $MigrationTest::Shared::tools_module->original('run_command')->(
+			    [
+			        '/usr/bin/perl',
+			        "-I${QM_LIB_PATH}",
+			        "-I${QM_LIB_PATH}/test",
+			        "${QM_LIB_PATH}/test/MigrationTest/QmMock.pm",
+			        'start',
+			        @{$cmd_tail},
+			    ],
+			    %param,
+			);
 
 		    } elsif ($cmd eq 'nbdstop') {
 			delete $expected_calls->{ssh_nbdstop};
@@ -301,8 +320,8 @@ $MigrationTest::Shared::tools_module->mock(
 		    if ($cmd eq 'free') {
 			my $volid = shift @{$cmd_tail};
 			PVE::Storage::parse_volume_id($volid);
-			return 1 if $fail_config->{ssh_pvesm_free}
-				 && $fail_config->{ssh_pvesm_free} eq $volid;
+			return 1
+			    if $fail_config->{ssh_pvesm_free} && $fail_config->{ssh_pvesm_free} eq $volid;
 			MigrationTest::Shared::remove_target_volid($volid);
 			return 0;
 		    }

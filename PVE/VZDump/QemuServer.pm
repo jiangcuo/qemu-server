@@ -15,6 +15,7 @@ use PVE::INotify;
 use PVE::IPCC;
 use PVE::JSONSchema;
 use PVE::PBSClient;
+use PVE::RESTEnvironment qw(log_warn);
 use PVE::QMPClient;
 use PVE::Storage::Plugin;
 use PVE::Storage::PBSPlugin;
@@ -66,7 +67,9 @@ sub prepare {
     $self->{vm_was_paused} = 0;
     if (!PVE::QemuServer::check_running($vmid)) {
 	$self->{vm_was_running} = 0;
-    } elsif (PVE::QemuServer::vm_is_paused($vmid)) {
+    } elsif (PVE::QemuServer::vm_is_paused($vmid, 0)) {
+	# Do not treat a suspended VM as paused, as it would cause us to skip
+	# fs-freeze even if the VM wakes up before we reach qga_fs_freeze.
 	$self->{vm_was_paused} = 1;
     }
 
@@ -86,11 +89,10 @@ sub prepare {
 	if (!$volume->{included}) {
 	    $self->loginfo("exclude disk '$name' '$volid' ($volume->{reason})");
 	    next;
-	} elsif ($self->{vm_was_running} && $volume_config->{iothread}) {
-	    if (!PVE::QemuServer::Machine::runs_at_least_qemu_version($vmid, 4, 0, 1)) {
-		die "disk '$name' '$volid' (iothread=on) can't use backup feature with running QEMU " .
-		    "version < 4.0.1! Either set backup=no for this drive or upgrade QEMU and restart VM\n";
-	    }
+	} elsif ($self->{vm_was_running} && $volume_config->{iothread} &&
+		 !PVE::QemuServer::Machine::runs_at_least_qemu_version($vmid, 4, 0, 1)) {
+	    die "disk '$name' '$volid' (iothread=on) can't use backup feature with running QEMU " .
+		"version < 4.0.1! Either set backup=no for this drive or upgrade QEMU and restart VM\n";
 	} else {
 	    my $log = "include disk '$name' '$volid'";
 	    if (defined(my $size = $volume_config->{size})) {
@@ -119,8 +121,20 @@ sub prepare {
 	}
 	next if !$path;
 
-	my ($size, $format) = eval { PVE::Storage::volume_size_info($self->{storecfg}, $volid, 5) };
-	die "no such volume '$volid'\n" if $@;
+	my ($size, $format);
+	if ($storeid) {
+	    # The call in list context can be expensive for certain plugins like RBD, just get size
+	    $size = eval { PVE::Storage::volume_size_info($self->{storecfg}, $volid, 5) };
+	    die "cannot determine size of volume '$volid' - $@\n" if $@;
+
+	    my $scfg = PVE::Storage::storage_config($self->{storecfg}, $storeid);
+	    $format = PVE::QemuServer::qemu_img_format($scfg, $volname);
+	} else {
+	    ($size, $format) = eval {
+		PVE::Storage::volume_size_info($self->{storecfg}, $volid, 5);
+	    };
+	    die "cannot determine size and format of volume '$volid' - $@\n" if $@;
+	}
 
 	my $diskinfo = {
 	    path => $path,
@@ -130,6 +144,12 @@ sub prepare {
 	    virtdev => $ds,
 	    qmdevice => "drive-$ds",
 	};
+
+	if ($ds eq 'tpmstate0') {
+	    # TPM drive only exists for backup, which is reflected in the name
+	    $diskinfo->{qmdevice} = 'drive-tpmstate0-backup';
+	    $task->{tpmpath} = $path;
+	}
 
 	if (-b $path) {
 	    $diskinfo->{type} = 'block';
@@ -202,24 +222,25 @@ sub assemble {
     my $firewall_src = "/etc/pve/firewall/$vmid.fw";
     my $firewall_dest = "$task->{tmpdir}/qemu-server.fw";
 
-    my $outfd = IO::File->new (">$outfile") ||
-	die "unable to open '$outfile'";
-    my $conffd = IO::File->new ($conffile, 'r') ||
-	die "unable open '$conffile'";
+    my $outfd = IO::File->new(">$outfile") or die "unable to open '$outfile' - $!\n";
+    my $conffd = IO::File->new($conffile, 'r') or die "unable to open '$conffile' - $!\n";
 
     my $found_snapshot;
     my $found_pending;
+    my $found_cloudinit;
     while (defined (my $line = <$conffd>)) {
 	next if $line =~ m/^\#vzdump\#/; # just to be sure
 	next if $line =~ m/^\#qmdump\#/; # just to be sure
 	if ($line =~ m/^\[(.*)\]\s*$/) {
 	    if ($1 =~ m/PENDING/i) {
 		$found_pending = 1;
+	    } elsif ($1 =~ m/special:cloudinit/) {
+		$found_cloudinit = 1;
 	    } else {
 		$found_snapshot = 1;
 	    }
 	}
-	next if $found_snapshot || $found_pending; # skip all snapshots and pending changes config data
+	next if $found_snapshot || $found_pending || $found_cloudinit; # skip all snapshots,pending changes and cloudinit config data
 
 	if ($line =~ m/^unused\d+:\s*(\S+)\s*/) {
 	    $self->loginfo("skip unused drive '$1' (not included into backup)");
@@ -425,6 +446,84 @@ my $query_backup_status_loop = sub {
     };
 };
 
+my $attach_tpmstate_drive = sub {
+    my ($self, $task, $vmid) = @_;
+
+    return if !$task->{tpmpath};
+
+    # unconditionally try to remove the tpmstate-named drive - it only exists
+    # for backing up, and avoids errors if left over from some previous event
+    eval { PVE::QemuServer::qemu_drivedel($vmid, "tpmstate0-backup"); };
+
+    $self->loginfo('attaching TPM drive to QEMU for backup');
+
+    my $drive = "file=$task->{tpmpath},if=none,read-only=on,id=drive-tpmstate0-backup";
+    $drive =~ s/\\/\\\\/g;
+    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"");
+    die "attaching TPM drive failed - $ret\n" if $ret !~ m/OK/s;
+};
+
+my $detach_tpmstate_drive = sub {
+    my ($task, $vmid) = @_;
+    return if !$task->{tpmpath} || !PVE::QemuServer::check_running($vmid);
+    eval { PVE::QemuServer::qemu_drivedel($vmid, "tpmstate0-backup"); };
+};
+
+my sub add_backup_performance_options {
+    my ($qmp_param, $perf, $qemu_support) = @_;
+
+    return if !$perf || scalar(keys $perf->%*) == 0;
+
+    if (!$qemu_support) {
+	my $settings_string = join(', ', sort keys $perf->%*);
+	log_warn("ignoring setting(s): $settings_string - issue checking if supported");
+	return;
+    }
+
+    if (defined($perf->{'max-workers'})) {
+	if ($qemu_support->{'backup-max-workers'}) {
+	    $qmp_param->{'max-workers'} = int($perf->{'max-workers'});
+	} else {
+	    log_warn("ignoring 'max-workers' setting - not supported by running QEMU");
+	}
+    }
+}
+
+sub get_and_check_pbs_encryption_config {
+    my ($self) = @_;
+
+    my $opts = $self->{vzdump}->{opts};
+    my $scfg = $opts->{scfg};
+
+    my $keyfile = PVE::Storage::PBSPlugin::pbs_encryption_key_file_name($scfg, $opts->{storage});
+    my $master_keyfile = PVE::Storage::PBSPlugin::pbs_master_pubkey_file_name($scfg, $opts->{storage});
+
+    if (-e $keyfile) {
+	if (-e $master_keyfile) {
+	    $self->loginfo("enabling encryption with master key feature");
+	    return ($keyfile, $master_keyfile);
+	} elsif ($scfg->{'master-pubkey'}) {
+	    die "master public key configured but no key file found\n";
+	} else {
+	    $self->loginfo("enabling encryption");
+	    return ($keyfile, undef);
+	}
+    } else {
+	my $encryption_fp = $scfg->{'encryption-key'};
+	die "encryption configured ('$encryption_fp') but no encryption key file found!\n"
+	    if $encryption_fp;
+	if (-e $master_keyfile) {
+	    $self->log(
+		'warn',
+		"backup target storage is configured with master-key, but no encryption key set!"
+		." Ignoring master key settings and creating unencrypted backup."
+	    );
+	}
+	return (undef, undef);
+    }
+    die "internal error - unhandled case for getting & checking PBS encryption ($keyfile, $master_keyfile)!";
+}
+
 sub archive_pbs {
     my ($self, $task, $vmid) = @_;
 
@@ -439,14 +538,12 @@ sub archive_pbs {
     my $fingerprint = $scfg->{fingerprint};
     my $repo = PVE::PBSClient::get_repository($scfg);
     my $password = PVE::Storage::PBSPlugin::pbs_get_password($scfg, $opts->{storage});
-    my $keyfile = PVE::Storage::PBSPlugin::pbs_encryption_key_file_name($scfg, $opts->{storage});
-    my $master_keyfile = PVE::Storage::PBSPlugin::pbs_master_pubkey_file_name($scfg, $opts->{storage});
+    my ($keyfile, $master_keyfile) = $self->get_and_check_pbs_encryption_config();
 
     my $diskcount = scalar(@{$task->{disks}});
-    # proxmox-backup-client can only handle raw files and block devs
-    # only use it (directly) for disk-less VMs
+    # proxmox-backup-client can only handle raw files and block devs, so only use it (directly) for
+    # disk-less VMs
     if (!$diskcount) {
-	my @pathlist;
 	$self->loginfo("backup contains no disks");
 
 	local $ENV{PBS_PASSWORD} = $password;
@@ -459,6 +556,13 @@ sub archive_pbs {
 	    '--backup-id', "$vmid",
 	    '--backup-time', $task->{backup_time},
 	];
+	if (defined(my $ns = $scfg->{namespace})) {
+	    push @$cmd, '--ns', $ns;
+	}
+	if (defined($keyfile)) {
+	    push @$cmd, '--keyfile', $keyfile;
+	    push @$cmd, '--master-pubkey-file', $master_keyfile if defined($master_keyfile);
+	}
 
 	push @$cmd, "qemu-server.conf:$conffile";
 	push @$cmd, "fw.conf:$firewall" if -e $firewall;
@@ -495,11 +599,11 @@ sub archive_pbs {
 	    }
 	}
 
-	if (!defined($qemu_support->{"pbs-masterkey"}) && -e $master_keyfile) {
-	    $self->loginfo("WARNING: backup target is configured with master key, but running QEMU version does not support master keys.");
-	    $self->loginfo("Please make sure you've installed the latest version and the VM has been restarted to use master key feature.");
-	    $master_keyfile = undef; # skip rest of master key handling below
-	}
+	# pve-qemu supports it since 5.2.0-1 (PVE 6.4), so safe to die since PVE 8
+	die "master key configured but running QEMU version does not support master keys\n"
+	    if !defined($qemu_support->{'pbs-masterkey'}) && defined($master_keyfile);
+
+	$attach_tpmstate_drive->($self, $task, $vmid);
 
 	my $fs_frozen = $self->qga_fs_freeze($task, $vmid);
 
@@ -512,21 +616,20 @@ sub archive_pbs {
 	    devlist => $devlist,
 	    'config-file' => $conffile,
 	};
+	if (defined(my $ns = $scfg->{namespace})) {
+	    $params->{'backup-ns'} = $ns;
+	}
+
 	$params->{speed} = $opts->{bwlimit}*1024 if $opts->{bwlimit};
+	add_backup_performance_options($params, $opts->{performance}, $qemu_support);
+
 	$params->{fingerprint} = $fingerprint if defined($fingerprint);
 	$params->{'firewall-file'} = $firewall if -e $firewall;
-	if (-e $keyfile) {
-	    $self->loginfo("enabling encryption");
+
+	$params->{encrypt} = defined($keyfile) ? JSON::true : JSON::false;
+	if (defined($keyfile)) {
 	    $params->{keyfile} = $keyfile;
-	    $params->{encrypt} = JSON::true;
-	    if (defined($master_keyfile) && -e $master_keyfile) {
-		$self->loginfo("enabling master key feature");
-		$params->{"master-keyfile"} = $master_keyfile;
-	    }
-	} else {
-	    $self->loginfo("WARNING: backup target is configured with master key, but this backup is not encrypted - master key settings will be ignored!")
-		if defined($master_keyfile) && -e $master_keyfile;
-	    $params->{encrypt} = JSON::false;
+	    $params->{"master-keyfile"} = $master_keyfile if defined($master_keyfile);
 	}
 
 	my $is_template = PVE::QemuConfig->is_template($self->{vmlist}->{$vmid});
@@ -673,6 +776,13 @@ sub archive_vma {
 	    die "interrupted by signal\n";
 	};
 
+	# Currently, failing to determine Proxmox support is not critical here, because it's only
+	# used for performance settings like 'max-workers'.
+	my $qemu_support = eval { mon_cmd($vmid, "query-proxmox-support") };
+	log_warn($@) if $@;
+
+	$attach_tpmstate_drive->($self, $task, $vmid);
+
 	my $outfh;
 	if ($opts->{stdout}) {
 	    $outfh = $opts->{stdout};
@@ -701,6 +811,7 @@ sub archive_vma {
 		devlist => $devlist
 	    };
 	    $params->{'firewall-file'} = $firewall if -e $firewall;
+	    add_backup_performance_options($params, $opts->{performance}, $qemu_support);
 
 	    $qmpclient->queue_cmd($vmid, $backup_cb, 'backup', %$params);
 	};
@@ -784,6 +895,12 @@ sub qga_fs_freeze {
 	return;
     }
 
+    my $freeze = PVE::QemuServer::get_qga_key($self->{vmlist}->{$vmid}, 'freeze-fs-on-backup') // 1;
+    if (!$freeze) {
+	$self->loginfo("skipping guest-agent 'fs-freeze', disabled in VM options");
+	return;
+    }
+
     $self->loginfo("issuing guest-agent 'fs-freeze' command");
     eval { mon_cmd($vmid, "guest-fsfreeze-freeze") };
     $self->logerr($@) if $@;
@@ -836,7 +953,7 @@ sub resume_vm_after_job_start {
     } else {
 	$self->loginfo("resuming VM again");
     }
-    mon_cmd($vmid, 'cont');
+    mon_cmd($vmid, 'cont', timeout => 45);
 }
 
 # stop again if VM was not running before
@@ -875,6 +992,8 @@ sub snapshot {
 
 sub cleanup {
     my ($self, $task, $vmid) = @_;
+
+    $detach_tpmstate_drive->($task, $vmid);
 
     if ($self->{qmeventd_fh}) {
 	close($self->{qmeventd_fh});

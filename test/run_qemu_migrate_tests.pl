@@ -65,6 +65,7 @@ my $storage_config = {
 	},
 	"rbd-store" => {
 	    monhost => "127.0.0.42,127.0.0.21,::1",
+	    fsid => 'fc4181a6-56eb-4f68-b452-8ba1f381ca2a',
 	    content => {
 		images => 1,
 	    },
@@ -86,6 +87,24 @@ my $storage_config = {
 	    },
 	    path => "/some/other/dir/",
 	    type => "dir",
+	},
+	"zfs-alias-1" => {
+	    content => {
+		images => 1,
+		rootdir => 1,
+	    },
+	    pool => "aliaspool",
+	    sparse => 1,
+	    type => "zfspool",
+	},
+	"zfs-alias-2" => {
+	    content => {
+		images => 1,
+		rootdir => 1,
+	    },
+	    pool => "aliaspool",
+	    sparse => 1,
+	    type => "zfspool",
 	},
     },
 };
@@ -128,6 +147,43 @@ my $vm_configs = {
 	'sockets' => 1,
 	'startup' => 'order=2',
 	'vmgenid' => '4eb1d535-9381-4ddc-a8aa-af50c4d9177b',
+    },
+    111 => {
+	'bootdisk' => 'scsi0',
+	'cores' => 1,
+	'ide0' => 'local-lvm:vm-111-disk-0,size=4096M',
+	'ide2' => 'none,media=cdrom',
+	'memory' => 512,
+	'name' => 'pending-test',
+	'net0' => 'virtio=4A:A3:E4:4C:CF:F0,bridge=vmbr0,firewall=1',
+	'numa' => 0,
+	'ostype' => 'l26',
+	'pending' => {
+		'scsi0' => 'local-zfs:vm-111-disk-0,size=103M',
+	},
+	'scsihw' => 'virtio-scsi-pci',
+	'snapshots' => {},
+	'smbios1' => 'uuid=5ad71d4d-8f73-4377-853e-2d22c10c96a5',
+	'sockets' => 1,
+	'vmgenid' => '2c00c030-0b5b-4988-a371-6ab259893f22',
+    },
+    123 => {
+	'bootdisk' => 'scsi0',
+	'cores' => 1,
+	'scsi0' => 'zfs-alias-1:vm-123-disk-0,size=4096M',
+	'scsi1' => 'zfs-alias-2:vm-123-disk-0,size=4096M',
+	'ide2' => 'none,media=cdrom',
+	'memory' => 512,
+	'name' => 'alias-test',
+	'net0' => 'virtio=4A:A3:E4:4C:CF:F0,bridge=vmbr0,firewall=1',
+	'numa' => 0,
+	'ostype' => 'l26',
+	'pending' => {},
+	'scsihw' => 'virtio-scsi-pci',
+	'snapshots' => {},
+	'smbios1' => 'uuid=5ad71d4d-8f73-4377-853e-2d22c10c96a5',
+	'sockets' => 1,
+	'vmgenid' => '2c00c030-0b5b-4988-a371-6ab259893f22',
     },
     149 => {
 	'agent' => '0',
@@ -305,6 +361,13 @@ my $source_vdisks = {
 	    'vmid' => '341',
 	    'volid' => 'local-lvm:vm-341-disk-0',
 	},
+	{
+	    'ctime' => '1589277334',
+	    'format' => 'raw',
+	    'size' =>  4294967296,
+	    'vmid' => '111',
+	    'volid' => 'local-lvm:vm-111-disk-0',
+	},
     ],
     'local-zfs' => [
 	{
@@ -320,6 +383,13 @@ my $source_vdisks = {
 	    'size' => 108003328,
 	    'vmid' => '105',
 	    'volid' => 'local-zfs:vm-105-disk-1',
+	},
+	{
+	    'ctime' => '1589277334',
+	    'format' => 'raw',
+	    'size' => 108003328,
+	    'vmid' => '111',
+	    'volid' => 'local-zfs:vm-111-disk-0',
 	},
 	{
 	    'format' => 'raw',
@@ -344,6 +414,24 @@ my $source_vdisks = {
 	    'size' => 1073741824,
 	    'vmid' => '1033',
 	    'volid' => 'rbd-store:vm-1033-cloudinit',
+	},
+    ],
+    'zfs-alias-1' => [
+	{
+	    'ctime' => '1589277334',
+	    'format' => 'raw',
+	    'size' => 4294967296,
+	    'vmid' => '123',
+	    'volid' => 'zfs-alias-1:vm-123-disk-0',
+	},
+    ],
+    'zfs-alias-2' => [
+	{
+	    'ctime' => '1589277334',
+	    'format' => 'raw',
+	    'size' => 4294967296,
+	    'vmid' => '123',
+	    'volid' => 'zfs-alias-2:vm-123-disk-0',
 	},
     ],
 };
@@ -417,8 +505,9 @@ sub local_volids_for_vm {
 
 my $tests = [
 # each test consists of the following:
-# name           - unique name for the test which also serves as a dir name and
-#                  gets passed to make, so don't use whitespace or slash
+# name           - unique name for the test which also serves as a dir name.
+#                  NOTE: gets passed to make, so don't use whitespace or slash
+#                        and adapt buildsys (regex) on code structure changes
 # target         - hostname of target node
 # vmid           - ID of the VM to migrate
 # opts           - options for the migrate() call
@@ -677,7 +766,7 @@ my $tests = [
 	    'with-local-disks' => 1,
 	},
 	expected_calls => {},
-	expect_die => 'online storage migration not possible if snapshot exists',
+	expect_die => 'online storage migration not possible if non-replicated snapshot exists',
 	expected => {
 	    source_volids => local_volids_for_vm(4567),
 	    target_volids => {},
@@ -706,7 +795,6 @@ my $tests = [
 	},
     },
     {
-	# FIXME: Maybe add orphaned drives as unused?
 	name => '149_running_orphaned_disk_targetstorage_zfs',
 	target => 'pve1',
 	vmid => 149,
@@ -727,10 +815,11 @@ my $tests = [
 	},
 	expected_calls => $default_expected_calls_online,
 	expected => {
-	    source_volids => {},
+	    source_volids => {
+		'local-dir:149/vm-149-disk-0.qcow2' => 1,
+	    },
 	    target_volids => {
 		'local-zfs:vm-149-disk-10' => 1,
-		'local-zfs:vm-149-disk-0' => 1,
 	    },
 	    vm_config => get_patched_config(149, {
 		scsi0 => 'local-zfs:vm-149-disk-10,format=raw,size=4G',
@@ -743,7 +832,6 @@ my $tests = [
 	},
     },
     {
-	# FIXME: Maybe add orphaned drives as unused?
 	name => '149_running_orphaned_disk',
 	target => 'pve1',
 	vmid => 149,
@@ -763,10 +851,11 @@ my $tests = [
 	},
 	expected_calls => $default_expected_calls_online,
 	expected => {
-	    source_volids => {},
+	    source_volids => {
+		'local-dir:149/vm-149-disk-0.qcow2' => 1,
+	    },
 	    target_volids => {
 		'local-lvm:vm-149-disk-10' => 1,
-		'local-dir:149/vm-149-disk-0.qcow2' => 1,
 	    },
 	    vm_config => get_patched_config(149, {
 		scsi0 => 'local-lvm:vm-149-disk-10,format=raw,size=4G',
@@ -1236,8 +1325,11 @@ my $tests = [
 	    'with-local-disks' => 1,
 	},
 	target_volids => local_volids_for_vm(105),
-	expected_calls => {},
-	expect_die => "online storage migration not possible if snapshot exists",
+	expected_calls => {
+	    %{$replicated_expected_calls_online},
+	    'block-dirty-bitmap-add-drive-scsi0' => 1,
+	    'block-dirty-bitmap-add-drive-ide0' => 1,
+	},
 	expected => {
 	    source_volids => local_volids_for_vm(105),
 	    target_volids => local_volids_for_vm(105),
@@ -1523,18 +1615,61 @@ my $tests = [
 	    },
 	},
     },
+    {
+	name => '111_running_pending',
+	target => 'pve1',
+	vmid => 111,
+	vm_status => {
+	    running => 1,
+	    runningmachine => 'pc-q35-5.0+pve0',
+	},
+	opts => {
+	    online => 1,
+	    'with-local-disks' => 1,
+	},
+	expected_calls => $default_expected_calls_online,
+	expected => {
+	    source_volids => {},
+	    target_volids => {
+		'local-zfs:vm-111-disk-0' => 1,
+		'local-lvm:vm-111-disk-10' => 1,
+	    },
+	    vm_config => get_patched_config(111, {
+		ide0 => 'local-lvm:vm-111-disk-10,format=raw,size=4G',
+		pending => {
+		    scsi0 => 'local-zfs:vm-111-disk-0,size=103M',
+		},
+	    }),
+	    vm_status => {
+		running => 1,
+		runningmachine => 'pc-q35-5.0+pve0',
+	    },
+	},
+    },
+    {
+	name => '123_alias_fail',
+	target => 'pve1',
+	vmid => 123,
+	vm_status => {
+	    running => 0,
+	},
+	opts => {
+	    'with-local-disks' => 1,
+	},
+	expected_calls => {},
+	expect_die => "detected not supported aliased volumes",
+	expected => {
+	    source_volids => local_volids_for_vm(123),
+	    target_volids => {},
+	    vm_config => $vm_configs->{123},
+	    vm_status => {
+		running => 0,
+	    },
+	},
+    },
 ];
 
 my $single_test_name = shift;
-
-if (defined($single_test_name) && $single_test_name eq 'DUMP_NAMES') {
-    my $output = '';
-    foreach my $test (@{$tests}) {
-	$output .= $test->{name} . ' ';
-    }
-    print "$output\n";
-    exit 0;
-}
 
 mkdir $RUN_DIR_PATH;
 

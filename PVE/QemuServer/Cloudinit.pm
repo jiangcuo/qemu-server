@@ -7,10 +7,12 @@ use File::Path;
 use Digest::SHA;
 use URI::Escape;
 use MIME::Base64 qw(encode_base64);
+use Storable qw(dclone);
 
 use PVE::Tools qw(run_command file_set_contents);
 use PVE::Storage;
 use PVE::QemuServer;
+use PVE::QemuServer::Helpers;
 
 use constant CLOUDINIT_DISK_SIZE => 4 * 1024 * 1024; # 4MiB in bytes
 
@@ -70,7 +72,7 @@ sub get_cloudinit_format {
     # the new predicatble network device naming scheme.
     if (defined(my $ostype = $conf->{ostype})) {
 	return 'configdrive2'
-	    if PVE::QemuServer::windows_version($ostype);
+	    if PVE::QemuServer::Helpers::windows_version($ostype);
     }
 
     return 'nocloud';
@@ -85,6 +87,8 @@ sub get_hostname_fqdn {
 	$hostname =~ s/\..*$//;
     } elsif (my $search = $conf->{searchdomain}) {
 	$fqdn = "$hostname.$search";
+    } else {
+	$fqdn = $hostname;
     }
     return ($hostname, $fqdn);
 }
@@ -118,7 +122,7 @@ sub cloudinit_userdata {
 
     $content .= "hostname: $hostname\n";
     $content .= "manage_etc_hosts: true\n";
-    $content .= "fqdn: $fqdn\n" if defined($fqdn);
+    $content .= "fqdn: $fqdn\n";
 
     my $username = $conf->{ciuser};
     my $password = $conf->{cipassword};
@@ -144,7 +148,7 @@ sub cloudinit_userdata {
 	$content .= "  - default\n";
     }
 
-    $content .= "package_upgrade: true\n";
+    $content .= "package_upgrade: true\n" if !defined($conf->{ciupgrade}) || $conf->{ciupgrade};
 
     return $content;
 }
@@ -227,17 +231,25 @@ EOF
 sub generate_configdrive2 {
     my ($conf, $vmid, $drive, $volname, $storeid) = @_;
 
-    my ($user_data, $network_data, $meta_data) = get_custom_cloudinit_files($conf);
+    my ($user_data, $network_data, $meta_data, $vendor_data) = get_custom_cloudinit_files($conf);
     $user_data = cloudinit_userdata($conf, $vmid) if !defined($user_data);
     $network_data = configdrive2_network($conf) if !defined($network_data);
+    $vendor_data = '' if !defined($vendor_data);
 
     if (!defined($meta_data)) {
 	$meta_data = configdrive2_gen_metadata($user_data, $network_data);
     }
+
+    # we always allocate a 4MiB disk for cloudinit and with the overhead of the ISO
+    # make sure we always stay below it by keeping the sum of all files below 3 MiB
+    my $sum = length($user_data) + length($network_data) + length($meta_data) + length($vendor_data);
+    die "Cloud-Init sum of snippets too big (> 3 MiB)\n" if $sum > (3 * 1024 * 1024);
+
     my $files = {
 	'/openstack/latest/user_data' => $user_data,
 	'/openstack/content/0000' => $network_data,
-	'/openstack/latest/meta_data.json' => $meta_data
+	'/openstack/latest/meta_data.json' => $meta_data,
+	'/openstack/latest/vendor_data.json' => $vendor_data
     };
     commit_cloudinit_disk($conf, $vmid, $drive, $volname, $storeid, $files, 'config-2');
 }
@@ -245,41 +257,26 @@ sub generate_configdrive2 {
 sub generate_opennebula {
     my ($conf, $vmid, $drive, $volname, $storeid) = @_;
 
-    my ($hostname, $fqdn) = get_hostname_fqdn($conf, $vmid);
-
     my $content = "";
 
     my $username = $conf->{ciuser} || "root";
-    my $password = encode_base64($conf->{cipassword}) if defined($conf->{cipassword});
-
     $content .= "USERNAME=$username\n" if defined($username);
-    $content .= "CRYPTED_PASSWORD_BASE64=$password\n" if defined($password);
 
-    if (defined(my $keys = $conf->{sshkeys})) {
-        $keys = URI::Escape::uri_unescape($keys);
-        $keys = [map { my $key = $_; chomp $key; $key } split(/\n/, $keys)];
-        $keys = [grep { /\S/ } @$keys];
-        $content .= "SSH_PUBLIC_KEY=\"";
-
-        foreach my $k (@$keys) {
-	     $content .= "$k\n";
-        }
-        $content .= "\"\n";
-
+    if (defined(my $password = $conf->{cipassword})) {
+	$content .= "CRYPTED_PASSWORD_BASE64=". encode_base64($password) ."\n";
     }
 
-    my ($searchdomains, $nameservers) = get_dns_conf($conf);
-    if ($nameservers && @$nameservers) {
-        $nameservers = join(' ', @$nameservers);
-        $content .= "DNS=\"$nameservers\"\n";
+    if (defined($conf->{sshkeys})) {
+	my $keys = [ split(/\s*\n\s*/, URI::Escape::uri_unescape($conf->{sshkeys})) ];
+	$content .= "SSH_PUBLIC_KEY=\"". join("\n", $keys->@*) ."\"\n";
     }
 
+    my ($hostname, $fqdn) = get_hostname_fqdn($conf, $vmid);
     $content .= "SET_HOSTNAME=$hostname\n";
 
-    if ($searchdomains && @$searchdomains) {
-        $searchdomains = join(' ', @$searchdomains);
-        $content .= "SEARCH_DOMAIN=\"$searchdomains\"\n";
-    }
+    my ($searchdomains, $nameservers) = get_dns_conf($conf);
+    $content .= 'DNS="' . join(' ', @$nameservers) ."\"\n" if $nameservers && @$nameservers;
+    $content .= 'SEARCH_DOMAIN="'. join(' ', @$searchdomains) ."\"\n" if $searchdomains && @$searchdomains;
 
     my $networkenabled = undef;
     my @ifaces = grep { /^net(\d+)$/ } keys %$conf;
@@ -296,39 +293,37 @@ sub generate_opennebula {
 	    $networkenabled = 1;
 
 	    if ($ipconfig->{ip} eq 'dhcp') {
-		$content .= $ethid."_DHCP=YES\n";
+		$content .= "${ethid}_DHCP=YES\n";
 	    } else {
 		my ($addr, $mask) = split_ip4($ipconfig->{ip});
-		$content .= $ethid."_IP=$addr\n";
-		$content .= $ethid."_MASK=$mask\n";
-		$content .= $ethid."_MAC=$mac\n";
-		$content .= $ethid."_GATEWAY=$ipconfig->{gw}\n" if $ipconfig->{gw};
+		$content .= "${ethid}_IP=$addr\n";
+		$content .= "${ethid}_MASK=$mask\n";
+		$content .= "${ethid}_MAC=$mac\n";
+		$content .= "${ethid}_GATEWAY=$ipconfig->{gw}\n" if $ipconfig->{gw};
 	    }
-	    $content .= $ethid."_MTU=$net->{mtu}\n" if $net->{mtu};
+	    $content .= "${ethid}_MTU=$net->{mtu}\n" if $net->{mtu};
 	}
 
 	if ($ipconfig->{ip6}) {
 	    $networkenabled = 1;
 	    if ($ipconfig->{ip6} eq 'dhcp') {
-		$content .= $ethid."_DHCP6=YES\n";
+		$content .= "${ethid}_DHCP6=YES\n";
 	    } elsif ($ipconfig->{ip6} eq 'auto') {
-		$content .= $ethid."_AUTO6=YES\n";
+		$content .= "${ethid}_AUTO6=YES\n";
 	    } else {
 		my ($addr, $mask) = split('/', $ipconfig->{ip6});
-		$content .= $ethid."_IP6=$addr\n";
-		$content .= $ethid."_MASK6=$mask\n";
-		$content .= $ethid."_MAC6=$mac\n";
-		$content .= $ethid."_GATEWAY6=$ipconfig->{gw6}\n" if $ipconfig->{gw6};
+		$content .= "${ethid}_IP6=$addr\n";
+		$content .= "${ethid}_MASK6=$mask\n";
+		$content .= "${ethid}_MAC6=$mac\n";
+		$content .= "${ethid}_GATEWAY6=$ipconfig->{gw6}\n" if $ipconfig->{gw6};
 	    }
-	    $content .= $ethid."_MTU=$net->{mtu}\n" if $net->{mtu};
+	    $content .= "${ethid}_MTU=$net->{mtu}\n" if $net->{mtu};
 	}
     }
 
     $content .= "NETWORK=YES\n" if $networkenabled;
 
-    my $files = {
-	'/context.sh' => $content,
-    };
+    my $files = { '/context.sh' => $content };
     commit_cloudinit_disk($conf, $vmid, $drive, $volname, $storeid, $files, 'CONTEXT');
 }
 
@@ -493,18 +488,25 @@ sub nocloud_gen_metadata {
 sub generate_nocloud {
     my ($conf, $vmid, $drive, $volname, $storeid) = @_;
 
-    my ($user_data, $network_data, $meta_data) = get_custom_cloudinit_files($conf);
+    my ($user_data, $network_data, $meta_data, $vendor_data) = get_custom_cloudinit_files($conf);
     $user_data = cloudinit_userdata($conf, $vmid) if !defined($user_data);
     $network_data = nocloud_network($conf) if !defined($network_data);
+    $vendor_data = '' if !defined($vendor_data);
 
     if (!defined($meta_data)) {
 	$meta_data = nocloud_gen_metadata($user_data, $network_data);
     }
 
+    # we always allocate a 4MiB disk for cloudinit and with the overhead of the ISO
+    # make sure we always stay below it by keeping the sum of all files below 3 MiB
+    my $sum = length($user_data) + length($network_data) + length($meta_data) + length($vendor_data);
+    die "Cloud-Init sum of snippets too big (> 3 MiB)\n" if $sum > (3 * 1024 * 1024);
+
     my $files = {
 	'/user-data' => $user_data,
 	'/network-config' => $network_data,
-	'/meta-data' => $meta_data
+	'/meta-data' => $meta_data,
+	'/vendor-data' => $vendor_data
     };
     commit_cloudinit_disk($conf, $vmid, $drive, $volname, $storeid, $files, 'cidata');
 }
@@ -518,6 +520,7 @@ sub get_custom_cloudinit_files {
     my $network_volid = $files->{network};
     my $user_volid = $files->{user};
     my $meta_volid = $files->{meta};
+    my $vendor_volid = $files->{vendor};
 
     my $storage_conf = PVE::Storage::config();
 
@@ -536,7 +539,12 @@ sub get_custom_cloudinit_files {
 	$meta_data = read_cloudinit_snippets_file($storage_conf, $meta_volid);
     }
 
-    return ($user_data, $network_data, $meta_data);
+    my $vendor_data;
+    if ($vendor_volid) {
+	$vendor_data = read_cloudinit_snippets_file($storage_conf, $vendor_volid);
+    }
+
+    return ($user_data, $network_data, $meta_data, $vendor_data);
 }
 
 sub read_cloudinit_snippets_file {
@@ -553,10 +561,18 @@ my $cloudinit_methods = {
     opennebula => \&generate_opennebula,
 };
 
-sub generate_cloudinitconfig {
+sub has_changes {
+    my ($conf) = @_;
+
+    return !!$conf->{cloudinit}->%*;
+}
+
+sub generate_cloudinit_config {
     my ($conf, $vmid) = @_;
 
     my $format = get_cloudinit_format($conf);
+
+    my $has_changes = has_changes($conf);
 
     PVE::QemuConfig->foreach_volume($conf, sub {
         my ($ds, $drive) = @_;
@@ -570,6 +586,22 @@ sub generate_cloudinitconfig {
 
 	$generator->($conf, $vmid, $drive, $volname, $storeid);
     });
+
+    return $has_changes;
+}
+
+sub apply_cloudinit_config {
+    my ($conf, $vmid) = @_;
+
+    my $has_changes = generate_cloudinit_config($conf, $vmid);
+
+    if ($has_changes) {
+	delete $conf->{cloudinit};
+	PVE::QemuConfig->write_config($vmid, $conf);
+	return 1;
+    }
+
+    return $has_changes;
 }
 
 sub dump_cloudinit_config {

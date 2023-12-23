@@ -111,7 +111,8 @@ sub parse_ovf {
     my $ovf_name = $xpc->findvalue($xpath_find_name);
 
     if ($ovf_name) {
-	($qm->{name} = $ovf_name) =~ s/[^a-zA-Z0-9\-]//g; # PVE::QemuServer::confdesc requires a valid DNS name
+	# PVE::QemuServer::confdesc requires a valid DNS name
+	($qm->{name} = $ovf_name) =~ s/[^a-zA-Z0-9\-\.]//g;
     } else {
 	warn "warning: unable to parse the VM name in this OVF manifest, generating a default value\n";
     }
@@ -220,10 +221,11 @@ ovf:Item[rasd:InstanceID='%s']/rasd:ResourceType", $controller_id);
 	    die "error parsing $filepath, file seems not to exist at $backing_file_path\n";
 	}
 
-	my $virtual_size;
-	if ( !($virtual_size = PVE::Storage::file_size_info($backing_file_path)) ) {
-	    die "error parsing $backing_file_path, size seems to be $virtual_size\n";
-	}
+	($backing_file_path) = $backing_file_path =~ m|^(/.*)|; # untaint
+
+	my $virtual_size = PVE::Storage::file_size_info($backing_file_path);
+	die "error parsing $backing_file_path, cannot determine file size\n"
+	    if !$virtual_size;
 
 	$pve_disk = {
 	    disk_address => $pve_disk_address,

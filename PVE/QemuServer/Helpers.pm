@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use File::stat;
+use JSON;
 
 use PVE::INotify;
 use PVE::ProcFSTools;
@@ -12,6 +13,8 @@ use base 'Exporter';
 our @EXPORT_OK = qw(
 min_version
 config_aware_timeout
+parse_number_sets
+windows_version
 );
 
 my $nodename = PVE::INotify::nodename();
@@ -141,13 +144,19 @@ sub version_cmp {
 }
 
 sub config_aware_timeout {
-    my ($config, $is_suspended) = @_;
-    my $memory = $config->{memory};
+    my ($config, $memory, $is_suspended) = @_;
     my $timeout = 30;
 
     # Based on user reported startup time for vm with 512GiB @ 4-5 minutes
     if (defined($memory) && $memory > 30720) {
 	$timeout = int($memory/1024);
+    }
+
+    # When using PCI passthrough, users reported much higher startup times,
+    # growing with the amount of memory configured. Constant factor chosen
+    # based on user reports.
+    if (grep(/^hostpci[0-9]+$/, keys %$config)) {
+	$timeout *= 4;
     }
 
     if ($is_suspended && $timeout < 300) {
@@ -159,6 +168,61 @@ sub config_aware_timeout {
     }
 
     return $timeout;
+}
+
+sub get_node_pvecfg_version {
+    my ($node) = @_;
+
+    my $nodes_version_info = PVE::Cluster::get_node_kv('version-info', $node);
+    return if !$nodes_version_info->{$node};
+
+    my $version_info = decode_json($nodes_version_info->{$node});
+    return $version_info->{version};
+}
+
+sub pvecfg_min_version {
+    my ($verstr, $major, $minor, $release) = @_;
+
+    return 0 if !$verstr;
+
+    if ($verstr =~ m/^(\d+)\.(\d+)(?:[.-](\d+))?/) {
+	return 1 if version_cmp($1, $major, $2, $minor, $3 // 0, $release) >= 0;
+	return 0;
+    }
+
+    die "internal error: cannot check version of invalid string '$verstr'";
+}
+
+sub parse_number_sets {
+    my ($set) = @_;
+    my $res = [];
+    foreach my $part (split(/;/, $set)) {
+	if ($part =~ /^\s*(\d+)(?:-(\d+))?\s*$/) {
+	    die "invalid range: $part ($2 < $1)\n" if defined($2) && $2 < $1;
+	    push @$res, [ $1, $2 ];
+	} else {
+	    die "invalid range: $part\n";
+	}
+    }
+    return $res;
+}
+
+sub windows_version {
+    my ($ostype) = @_;
+
+    return 0 if !$ostype;
+
+    my $winversion = 0;
+
+    if($ostype eq 'wxp' || $ostype eq 'w2k3' || $ostype eq 'w2k') {
+        $winversion = 5;
+    } elsif($ostype eq 'w2k8' || $ostype eq 'wvista') {
+        $winversion = 6;
+    } elsif ($ostype =~ m/^win(\d+)$/) {
+        $winversion = $1;
+    }
+
+    return $winversion;
 }
 
 1;

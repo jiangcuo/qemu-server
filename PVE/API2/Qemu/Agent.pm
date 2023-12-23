@@ -88,7 +88,7 @@ __PACKAGE__->register_method({
     path => '',
     proxyto => 'node',
     method => 'GET',
-    description => "Qemu Agent command index.",
+    description => "QEMU Guest Agent command index.",
     permissions => {
 	user => 'all',
     },
@@ -107,7 +107,7 @@ __PACKAGE__->register_method({
 	    properties => {},
 	},
 	links => [ { rel => 'child', href => '{name}' } ],
-	description => "Returns the list of Qemu Agent commands",
+	description => "Returns the list of QEMU Guest Agent commands",
     },
     code => sub {
 	my ($param) = @_;
@@ -150,7 +150,8 @@ sub register_command {
 	properties => {
 	    node => get_standard_option('pve-node'),
 	    vmid => get_standard_option('pve-vmid', {
-		    completion => \&PVE::QemuServer::complete_vmid_running }),
+		completion => \&PVE::QemuServer::complete_vmid_running,
+	    }),
 	    command => {
 		type => 'string',
 		description => "The QGA command.",
@@ -159,7 +160,7 @@ sub register_command {
 	},
     };
 
-    my $description = "Execute Qemu Guest Agent commands.";
+    my $description = "Execute QEMU Guest Agent commands.";
     my $name = 'agent';
 
     if ($command ne '') {
@@ -273,10 +274,12 @@ __PACKAGE__->register_method({
 	    vmid => get_standard_option('pve-vmid', {
 		    completion => \&PVE::QemuServer::complete_vmid_running }),
 	    command => {
-		type => 'string',
-		format => 'string-alist',
-		description => 'The command as a list of program + arguments',
-		optional => 1,
+		type => 'array',
+		description => 'The command as a list of program + arguments.',
+		items => {
+		    format => 'string',
+		    description => 'A single part of the program + arguments.',
+		}
 	    },
 	    'input-data' => {
 		type => 'string',
@@ -299,10 +302,7 @@ __PACKAGE__->register_method({
 	my ($param) = @_;
 
 	my $vmid = $param->{vmid};
-	my $cmd = undef;
-	if ($param->{command}) {
-	    $cmd = [PVE::Tools::split_list($param->{command})];
-	}
+	my $cmd = $param->{command};
 
 	my $res = PVE::QemuServer::Agent::qemu_exec($vmid, $param->{'input-data'}, $cmd);
 	return $res;
@@ -470,9 +470,16 @@ __PACKAGE__->register_method({
 	    },
 	    content => {
 		type => 'string',
-		maxLength => 60*1024, # 60k, smaller than our 64k POST limit
+		maxLength => 60 * 1024, # 60k, smaller than our 64k POST limit
 		description => "The content to write into the file."
-	    }
+	    },
+	    encode => {
+		type => 'boolean',
+		description => "If set, the content will be encoded as base64 (required by QEMU)."
+		    ."Otherwise the content needs to be encoded beforehand - defaults to true.",
+		optional => 1,
+		default => 1,
+	    },
 	},
     },
     returns => { type => 'null' },
@@ -480,7 +487,8 @@ __PACKAGE__->register_method({
 	my ($param) = @_;
 
 	my $vmid = $param->{vmid};
-	my $buf = encode_base64($param->{content});
+
+	my $buf = ($param->{encode} // 1) ? encode_base64($param->{content}) : $param->{content};
 
 	my $qgafh = agent_cmd($vmid, "file-open",  { path => $param->{file}, mode => 'wb' }, "can't open file");
 	my $write = agent_cmd($vmid, "file-write", { handle => $qgafh, 'buf-b64' => $buf }, "can't write to file");

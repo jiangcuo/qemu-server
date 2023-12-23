@@ -4,7 +4,9 @@ use warnings;
 use strict;
 
 use PVE::JSONSchema;
+use PVE::Mapping::PCI;
 use PVE::SysFSTools;
+use PVE::Tools;
 
 use base 'Exporter';
 
@@ -17,10 +19,11 @@ parse_hostpci
 
 our $MAX_HOSTPCI_DEVICES = 16;
 
-my $PCIRE = qr/([a-f0-9]{4}:)?[a-f0-9]{2}:[a-f0-9]{2}(?:\.[a-f0-9])?/;
+my $PCIRE = qr/(?:[a-f0-9]{4,}:)?[a-f0-9]{2}:[a-f0-9]{2}(?:\.[a-f0-9])?/;
 my $hostpci_fmt = {
     host => {
 	default_key => 1,
+	optional => 1,
 	type => 'string',
 	pattern => qr/$PCIRE(;$PCIRE)*/,
 	format_description => 'HOSTPCIID[;HOSTPCIID2...]',
@@ -31,7 +34,17 @@ of PCI virtual functions of the host. HOSTPCIID syntax is:
 'bus:dev.func' (hexadecimal numbers)
 
 You can us the 'lspci' command to list existing PCI devices.
+
+Either this or the 'mapping' key must be set.
 EODESCR
+    },
+    mapping => {
+	optional => 1,
+	type => 'string',
+	format_description => 'mapping-id',
+	format => 'pve-configid',
+	description => "The ID of a cluster wide mapping. Either this or the default-key 'host'"
+	    ." must be set.",
     },
     rombar => {
 	type => 'boolean',
@@ -76,6 +89,34 @@ The type of mediated device to use.
 An instance of this type will be created on startup of the VM and
 will be cleaned up when the VM stops.
 EODESCR
+    },
+    'vendor-id' => {
+	type => 'string',
+	pattern => qr/^0x[0-9a-fA-F]{4}$/,
+	format_description => 'hex id',
+	optional => 1,
+	description => "Override PCI vendor ID visible to guest"
+    },
+    'device-id' => {
+	type => 'string',
+	pattern => qr/^0x[0-9a-fA-F]{4}$/,
+	format_description => 'hex id',
+	optional => 1,
+	description => "Override PCI device ID visible to guest"
+    },
+    'sub-vendor-id' => {
+	type => 'string',
+	pattern => qr/^0x[0-9a-fA-F]{4}$/,
+	format_description => 'hex id',
+	optional => 1,
+	description => "Override PCI subsystem vendor ID visible to guest"
+    },
+    'sub-device-id' => {
+	type => 'string',
+	pattern => qr/^0x[0-9a-fA-F]{4}$/,
+	format_description => 'hex id',
+	optional => 1,
+	description => "Override PCI subsystem device ID visible to guest"
     }
 };
 PVE::JSONSchema::register_format('pve-qm-hostpci', $hostpci_fmt);
@@ -214,6 +255,11 @@ sub get_pci_addr_map {
     return $pci_addr_map;
 }
 
+sub generate_mdev_uuid {
+    my ($vmid, $index) = @_;
+    return sprintf("%08d-0000-0000-0000-%012d", $index, $vmid);
+}
+
 my $get_addr_mapping_from_id = sub {
     my ($map, $id) = @_;
 
@@ -332,6 +378,32 @@ sub print_pcie_root_port {
     return $res;
 }
 
+# returns the parsed pci config but parses the 'host' part into
+# a list if lists into the 'id' property like this:
+#
+# {
+#   mdev => 1,
+#   rombar => ...
+#   ...
+#   ids => [
+#       # this contains a list of alternative devices,
+#       [
+#           # which are itself lists of ids for one multifunction device
+#           {
+#               id => "0000:00:00.0",
+#               vendor => "...",
+#           },
+#           {
+#               id => "0000:00:00.1",
+#               vendor => "...",
+#           },
+#       ],
+#       [
+#           ...
+#       ],
+#       ...
+#   ],
+# }
 sub parse_hostpci {
     my ($value) = @_;
 
@@ -339,50 +411,69 @@ sub parse_hostpci {
 
     my $res = PVE::JSONSchema::parse_property_string($hostpci_fmt, $value);
 
-    my @idlist = split(/;/, $res->{host});
-    delete $res->{host};
-    foreach my $id (@idlist) {
-	my $devs = PVE::SysFSTools::lspci($id);
-	die "no PCI device found for '$id'\n" if !scalar(@$devs);
-	push @{$res->{pciid}}, @$devs;
+    my $alternatives = [];
+    my $host = delete $res->{host};
+    my $mapping = delete $res->{mapping};
+
+    die "Cannot set both 'host' and 'mapping'.\n" if defined($host) && defined($mapping);
+
+    if ($mapping) {
+	# we have no ordinary pci id, must be a mapping
+	my $devices = PVE::Mapping::PCI::find_on_current_node($mapping);
+	die "PCI device mapping not found for '$mapping'\n" if !$devices || !scalar($devices->@*);
+
+	for my $device ($devices->@*) {
+	    eval { PVE::Mapping::PCI::assert_valid($mapping, $device) };
+	    die "PCI device mapping invalid (hardware probably changed): $@\n" if $@;
+	    push $alternatives->@*, [split(/;/, $device->{path})];
+	}
+    } elsif ($host) {
+	push $alternatives->@*, [split(/;/, $host)];
+    } else {
+	die "Either 'host' or 'mapping' must be set.\n";
     }
+
+    $res->{ids} = [];
+    for my $alternative ($alternatives->@*) {
+	my $ids = [];
+	foreach my $id ($alternative->@*) {
+	    my $devs = PVE::SysFSTools::lspci($id);
+	    die "no PCI device found for '$id'\n" if !scalar($devs->@*);
+	    push $ids->@*, @$devs;
+	}
+	if (scalar($ids->@*) > 1) {
+	    $res->{'has-multifunction'} = 1;
+	    die "cannot use mediated device with multifunction device\n" if $res->{mdev};
+	}
+	push $res->{ids}->@*, $ids;
+    }
+
     return $res;
 }
 
-sub print_hostpci_devices {
-    my ($vmid, $conf, $devices, $vga, $winversion, $q35, $bridges, $arch, $machine_type, $bootorder) = @_;
+# parses all hostpci devices from a config and does some sanity checks
+# returns a hash like this:
+# {
+#     hostpci0 => {
+#         # hash from parse_hostpci function
+#     },
+#     hostpci1 => { ... },
+#     ...
+# }
+sub parse_hostpci_devices {
+    my ($conf) = @_;
 
-    my $kvm_off = 0;
-    my $gpu_passthrough = 0;
+    my $q35 = PVE::QemuServer::Machine::machine_type_is_q35($conf);
     my $legacy_igd = 0;
 
-    my $pciaddr;
+    my $parsed_devices = {};
     for (my $i = 0; $i < $MAX_HOSTPCI_DEVICES; $i++)  {
 	my $id = "hostpci$i";
 	my $d = parse_hostpci($conf->{$id});
 	next if !$d;
 
-	if (my $pcie = $d->{pcie}) {
-	    die "q35 machine model is not enabled" if !$q35;
-	    # win7 wants to have the pcie devices directly on the pcie bus
-	    # instead of in the root port
-	    if ($winversion == 7) {
-		$pciaddr = print_pcie_addr("${id}bus0");
-	    } else {
-		# add more root ports if needed, 4 are present by default
-		# by pve-q35 cfgs, rest added here on demand.
-		if ($i > 3) {
-		    push @$devices, '-device', print_pcie_root_port($i);
-		}
-		$pciaddr = print_pcie_addr($id);
-	    }
-	} else {
-	    my $pci_name = $d->{'legacy-igd'} ? 'legacy-igd' : $id;
-	    $pciaddr = print_pci_addr($pci_name, $bridges, $arch, $machine_type);
-	}
-
-	my $pcidevices = $d->{pciid};
-	my $multifunction = @$pcidevices > 1;
+	# check syntax
+	die "q35 machine model is not enabled" if !$q35 && $d->{pcie};
 
 	if ($d->{'legacy-igd'}) {
 	    die "only one device can be assigned in legacy-igd mode\n"
@@ -400,10 +491,112 @@ sub print_hostpci_devices {
 	    die "legacy IGD assignment is not compatible with q35\n"
 		if $q35;
 	    die "legacy IGD assignment is not compatible with multifunction devices\n"
-		if $multifunction;
+		if $d->{'has-multifunction'};
+	    die "legacy IGD assignment is not compatible with alternate devices\n"
+		if scalar($d->{ids}->@*) > 1;
+	    # check first device for valid id
 	    die "legacy IGD assignment only works for devices on host bus 00:02.0\n"
-		if $pcidevices->[0]->{id} !~ m/02\.0$/;
+		if $d->{ids}->[0]->[0]->{id} !~ m/02\.0$/;
 	}
+
+	$parsed_devices->{$id} = $d;
+    }
+
+    return $parsed_devices;
+}
+
+# takes the hash returned by parse_hostpci_devices and for all non mdev gpus,
+# selects one of the given alternatives by trying to reserve it
+#
+# mdev devices must be chosen later when we actually allocate it, but we
+# flatten the inner list since there can only be one device per alternative anyway
+my sub choose_hostpci_devices {
+    my ($devices, $vmid) = @_;
+
+    my $used = {};
+
+    my $add_used_device = sub {
+	my ($devices) = @_;
+	for my $used_device ($devices->@*) {
+	    my $used_id = $used_device->{id};
+	    die "device '$used_id' assigned more than once\n" if $used->{$used_id};
+	    $used->{$used_id} = 1;
+	}
+    };
+
+    for (my $i = 0; $i < $MAX_HOSTPCI_DEVICES; $i++)  {
+	my $device = $devices->{"hostpci$i"};
+	next if !$device;
+
+	if ($device->{mdev}) {
+	    $device->{ids} = [ map { $_->[0] } $device->{ids}->@* ];
+	    next;
+	}
+
+	if (scalar($device->{ids}->@* == 1)) {
+	    # we only have one alternative, use that
+	    $device->{ids} = $device->{ids}->[0];
+	    $add_used_device->($device->{ids});
+	    next;
+	}
+
+	my $found = 0;
+	for my $alternative ($device->{ids}->@*) {
+	    my $ids = [map { $_->{id} } @$alternative];
+
+	    next if grep { defined($used->{$_}) } @$ids; # already used
+	    eval { reserve_pci_usage($ids, $vmid, 10, undef) };
+	    next if $@;
+
+	    # found one that is not used or reserved
+	    $add_used_device->($alternative);
+	    $device->{ids} = $alternative;
+	    $found = 1;
+	    last;
+	}
+	die "could not find a free device for 'hostpci$i'\n" if !$found;
+    }
+
+    return $devices;
+}
+
+sub print_hostpci_devices {
+    my ($vmid, $conf, $devices, $vga, $winversion, $bridges, $arch, $machine_type, $bootorder) = @_;
+
+    my $kvm_off = 0;
+    my $gpu_passthrough = 0;
+    my $legacy_igd = 0;
+
+    my $pciaddr;
+    my $pci_devices = choose_hostpci_devices(parse_hostpci_devices($conf), $vmid);
+
+    for (my $i = 0; $i < $MAX_HOSTPCI_DEVICES; $i++)  {
+	my $id = "hostpci$i";
+	my $d = $pci_devices->{$id};
+	next if !$d;
+
+	$legacy_igd = 1 if $d->{'legacy-igd'};
+
+	if (my $pcie = $d->{pcie}) {
+	    # win7 wants to have the pcie devices directly on the pcie bus
+	    # instead of in the root port
+	    if ($winversion == 7) {
+		$pciaddr = print_pcie_addr("${id}bus0");
+	    } else {
+		# add more root ports if needed, 4 are present by default
+		# by pve-q35 cfgs, rest added here on demand.
+		if ($i > 3) {
+		    push @$devices, '-device', print_pcie_root_port($i);
+		}
+		$pciaddr = print_pcie_addr($id);
+	    }
+	} else {
+	    my $pci_name = $d->{'legacy-igd'} ? 'legacy-igd' : $id;
+	    $pciaddr = print_pci_addr($pci_name, $bridges, $arch, $machine_type);
+	}
+
+	my $num_devices = scalar($d->{ids}->@*);
+	my $multifunction = $num_devices > 1 && !$d->{mdev};
 
 	my $xvga = '';
 	if ($d->{'x-vga'}) {
@@ -414,16 +607,13 @@ sub print_hostpci_devices {
 	}
 
 	my $sysfspath;
-	if ($d->{mdev} && scalar(@$pcidevices) == 1) {
-	    my $pci_id = $pcidevices->[0]->{id};
-	    my $uuid = PVE::SysFSTools::generate_mdev_uuid($vmid, $i);
-	    $sysfspath = "/sys/bus/pci/devices/$pci_id/$uuid";
-	} elsif ($d->{mdev}) {
-	    warn "ignoring mediated device '$id' with multifunction device\n";
+	if ($d->{mdev}) {
+	    my $uuid = generate_mdev_uuid($vmid, $i);
+	    $sysfspath = "/sys/bus/mdev/devices/$uuid";
 	}
 
-	my $j = 0;
-	foreach my $pcidevice (@$pcidevices) {
+	for (my $j = 0; $j < $num_devices; $j++) {
+	    my $pcidevice = $d->{ids}->[$j];
 	    my $devicestr = "vfio-pci";
 
 	    if ($sysfspath) {
@@ -441,14 +631,151 @@ sub print_hostpci_devices {
 		$devicestr .= ",multifunction=on" if $multifunction;
 		$devicestr .= ",romfile=/usr/share/kvm/$d->{romfile}" if $d->{romfile};
 		$devicestr .= ",bootindex=$bootorder->{$id}" if $bootorder->{$id};
+		for my $option (qw(vendor-id device-id sub-vendor-id sub-device-id)) {
+		    $devicestr .= ",x-pci-$option=$d->{$option}" if $d->{$option};
+		}
 	    }
 
+
 	    push @$devices, '-device', $devicestr;
-	    $j++;
+	    last if $d->{mdev};
 	}
     }
 
-    return ($kvm_off, $gpu_passthrough, $legacy_igd);
+    return ($kvm_off, $gpu_passthrough, $legacy_igd, $pci_devices);
+}
+
+sub prepare_pci_device {
+    my ($vmid, $pciid, $index, $mdev) = @_;
+
+    my $info = PVE::SysFSTools::pci_device_info("$pciid");
+    die "cannot prepare PCI pass-through, IOMMU not present\n" if !PVE::SysFSTools::check_iommu_support();
+    die "no pci device info for device '$pciid'\n" if !$info;
+
+    if ($mdev) {
+	my $uuid = generate_mdev_uuid($vmid, $index);
+	PVE::SysFSTools::pci_create_mdev_device($pciid, $uuid, $mdev);
+    } else {
+	die "can't unbind/bind PCI group to VFIO '$pciid'\n"
+	    if !PVE::SysFSTools::pci_dev_group_bind_to_vfio($pciid);
+	die "can't reset PCI device '$pciid'\n"
+	    if $info->{has_fl_reset} && !PVE::SysFSTools::pci_dev_reset($info);
+    }
+
+    return $info;
+}
+
+my $RUNDIR = '/run/qemu-server';
+my $PCIID_RESERVATION_FILE = "${RUNDIR}/pci-id-reservations";
+my $PCIID_RESERVATION_LOCK = "${PCIID_RESERVATION_FILE}.lock";
+
+# a list of PCI ID to VMID reservations, the validity is protected against leakage by either a PID,
+# for succesfully started VM processes, or a expiration time for the initial time window between
+# reservation and actual VM process start-up.
+my $parse_pci_reservation_unlocked = sub {
+    my $pciids = {};
+    if (my $fh = IO::File->new($PCIID_RESERVATION_FILE, "r")) {
+	while (my $line = <$fh>) {
+	    if ($line =~ m/^($PCIRE)\s(\d+)\s(time|pid)\:(\d+)$/) {
+		$pciids->{$1} = {
+		    vmid => $2,
+		    "$3" => $4,
+		};
+	    }
+	}
+    }
+    return $pciids;
+};
+
+my $write_pci_reservation_unlocked = sub {
+    my ($reservations) = @_;
+
+    my $data = "";
+    for my $pci_id (sort keys $reservations->%*) {
+	my ($vmid, $pid, $time) = $reservations->{$pci_id}->@{'vmid', 'pid', 'time'};
+	if (defined($pid)) {
+	    $data .= "$pci_id $vmid pid:$pid\n";
+	} else {
+	    $data .= "$pci_id $vmid time:$time\n";
+	}
+    }
+    PVE::Tools::file_set_contents($PCIID_RESERVATION_FILE, $data);
+};
+
+# removes all PCI device reservations held by the `vmid`
+sub remove_pci_reservation {
+    my ($vmid) = @_;
+
+    PVE::Tools::lock_file($PCIID_RESERVATION_LOCK, 2, sub {
+	my $reservation_list = $parse_pci_reservation_unlocked->();
+	for my $id (keys %$reservation_list) {
+	    my $reservation = $reservation_list->{$id};
+	    next if $reservation->{vmid} != $vmid;
+	    delete $reservation_list->{$id};
+	}
+	$write_pci_reservation_unlocked->($reservation_list);
+    });
+    die $@ if $@;
+}
+
+sub reserve_pci_usage {
+    my ($requested_ids, $vmid, $timeout, $pid) = @_;
+
+    $requested_ids = [ $requested_ids ] if !ref($requested_ids);
+    return if !scalar(@$requested_ids); # do nothing for empty list
+
+    PVE::Tools::lock_file($PCIID_RESERVATION_LOCK, 5, sub {
+	my $reservation_list = $parse_pci_reservation_unlocked->();
+
+	my $ctime = time();
+	for my $id ($requested_ids->@*) {
+	    my $reservation = $reservation_list->{$id};
+	    if ($reservation && $reservation->{vmid} != $vmid) {
+		# check time based reservation
+		die "PCI device '$id' is currently reserved for use by VMID '$reservation->{vmid}'\n"
+		    if defined($reservation->{time}) && $reservation->{time} > $ctime;
+
+		if (my $reserved_pid = $reservation->{pid}) {
+		    # check running vm
+		    my $running_pid = PVE::QemuServer::Helpers::vm_running_locally($reservation->{vmid});
+		    if (defined($running_pid) && $running_pid == $reserved_pid) {
+			die "PCI device '$id' already in use by VMID '$reservation->{vmid}'\n";
+		    } else {
+			warn "leftover PCI reservation found for $id, lets take it...\n";
+		    }
+		}
+	    } elsif ($reservation) {
+		# already reserved by the same vmid
+		if (my $reserved_time = $reservation->{time}) {
+		    if (defined($timeout)) {
+			# use the longer timeout
+			my $old_timeout = $reservation->{time} - 5 - $ctime;
+			$timeout = $old_timeout if $old_timeout > $timeout;
+		    }
+		} elsif (my $reserved_pid = $reservation->{pid}) {
+		    my $running_pid = PVE::QemuServer::Helpers::vm_running_locally($reservation->{vmid});
+		    if (defined($running_pid) && $running_pid == $reservation->{pid}) {
+			if (defined($pid)) {
+			    die "PCI device '$id' already in use by running VMID '$reservation->{vmid}'\n";
+			} elsif (defined($timeout)) {
+			    # ignore timeout reservation for running vms, can happen with e.g.
+			    # qm showcmd
+			    return;
+			}
+		    }
+		}
+	    }
+
+	    $reservation_list->{$id} = { vmid => $vmid };
+	    if (defined($pid)) { # VM started up, we can reserve now with the actual PID
+		$reservation_list->{$id}->{pid} = $pid;
+	    } elsif (defined($timeout)) { # tempoaray reserve as we don't now the PID yet
+		$reservation_list->{$id}->{time} = $ctime + $timeout + 5;
+	    }
+	}
+	$write_pci_reservation_unlocked->($reservation_list);
+    });
+    die $@ if $@;
 }
 
 1;

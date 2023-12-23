@@ -18,23 +18,29 @@ sub machine_type_is_q35 {
     return $conf->{machine} && ($conf->{machine} =~ m/q35/) ? 1 : 0;
 }
 
+# In list context, also returns whether the current machine is deprecated or not.
 sub current_from_query_machines {
-    my ($res) = @_;
+    my ($machines) = @_;
 
-    my ($current, $pve_version, $default);
-    foreach my $e (@$res) {
-	$default = $e->{name} if $e->{'is-default'};
-	$current = $e->{name} if $e->{'is-current'};
-	$pve_version = $e->{'pve-version'} if $e->{'pve-version'};
+    my ($current, $default);
+    for my $machine ($machines->@*) {
+	$default = $machine->{name} if $machine->{'is-default'};
+
+	if ($machine->{'is-current'}) {
+	    $current = $machine->{name};
+	    # pve-version only exists for the current machine
+	    $current .= "+$machine->{'pve-version'}" if $machine->{'pve-version'};
+	    return wantarray ? ($current, $machine->{deprecated} ? 1 : 0) : $current;
+	}
     }
 
-    $current .= "+$pve_version" if $current && $pve_version;
-
-    # fallback to the default machine if current is not supported by qemu
-    return $current || $default || 'pc';
+    # fallback to the default machine if current is not supported by qemu - assume never deprecated
+    my $fallback = $default || 'pc';
+    return wantarray ? ($fallback, 0) : $fallback;
 }
 
-# this only works if VM is running
+# This only works if VM is running.
+# In list context, also returns whether the current machine is deprecated or not.
 sub get_current_qemu_machine {
     my ($vmid) = @_;
 
