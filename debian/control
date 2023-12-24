@@ -1,7 +1,7 @@
 Source: qemu-server
 Section: admin
 Priority: optional
-Maintainer: Proxmox Support Team <support@proxmox.com>
+Maintainer: Jiangcuo <jiangcuo@bingsin.com>
 Build-Depends: debhelper-compat (= 13),
                libglib2.0-dev,
                libio-multiplex-perl,

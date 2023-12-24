@@ -80,7 +80,7 @@ install: $(PKGSOURCES)
 $(BUILDDIR):
 	rm -rf $(BUILDDIR) $(BUILDDIR).tmp
 	rsync -a * $(BUILDDIR).tmp
-	echo "git clone git://git.proxmox.com/git/qemu-server.git\\ngit checkout $(GITVERSION)" > $(BUILDDIR).tmp/debian/SOURCE
+	echo "git clone https://github.com/jiangcuo/qemu-server.git\\ngit checkout $(GITVERSION)" > $(BUILDDIR).tmp/debian/SOURCE
 	mv $(BUILDDIR).tmp $(BUILDDIR)
 
 .PHONY: deb
