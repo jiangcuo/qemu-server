@@ -133,9 +133,13 @@ sub get_usb_controllers {
 	&& defined($ostype) && ($ostype eq 'l26' || windows_version($ostype) > 7);
     my $is_q35 = PVE::QemuServer::Machine::machine_type_is_q35($conf);
 
-     if ( $is_q35 || $arch ne 'x86_64') {
-        $pciaddr = print_pci_addr('xhci', $bridges, $arch, $machine);
-        push @$devices, '-device', "qemu-xhci,id=xhci$pciaddr";
+    if ($arch ne 'x86_64') {
+        $pciaddr = print_pci_addr('ehci', $bridges, $arch, $machine);
+		if (defined($ostype) && $ostype eq 'l26'){
+			push @$devices, '-device', "qemu-xhci,id=ehci$pciaddr";
+		}else{
+        	push @$devices, '-device', "usb-ehci,id=ehci$pciaddr";
+		}
     } elsif (!$is_q35) {
         $pciaddr = print_pci_addr("piix3", $bridges, $arch, $machine);
         push @$devices, '-device', "piix3-usb-uhci,id=uhci$pciaddr.0x2";

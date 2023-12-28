@@ -1428,12 +1428,12 @@ sub print_tabletdevice_full {
     # we use uhci for old VMs because tablet driver was buggy in older qemu
     my $usbbus;
     if ($q35 || $arch eq 'aarch64' ||  $arch eq 'loongarch64' ) {
-	$usbbus = 'xhci';
+	$usbbus = 'ehci';
     } else {
 	$usbbus = 'uhci';
     }
 
-    return "usb-tablet,id=tablet";
+    return "usb-tablet,id=tablet,bus=ehci.0,port=1";
 }
 
 sub print_keyboarddevice_full {
@@ -1441,7 +1441,7 @@ sub print_keyboarddevice_full {
 
     return if $arch eq 'x86_64';
 
-    return "usb-kbd,id=keyboard";
+    return "usb-kbd,id=keyboard,bus=ehci.0,port=2";
 }
 
 my sub get_drive_id {
@@ -1904,7 +1904,7 @@ sub print_vga_device {
     }
 
     if ($vga->{type} eq 'virtio-gl') {
-	my $base = '/usr/lib/x86_64-linux-gnu/lib';
+	my $base = '/usr/lib/loongarch64-linux-gnu/lib';
 	die "missing libraries for '$vga->{type}' detected! Please install 'libgl1' and 'libegl1'\n"
 	    if !-e "${base}EGL.so.1" || !-e "${base}GL.so.1";
 
@@ -3559,7 +3559,8 @@ my sub print_ovmf_drive_commandlines {
 	$var_drive_str .= ",size=" . (-s $ovmf_vars) if $format eq 'raw' && $version_guard->(4, 1, 2);
 	$var_drive_str .= ',readonly=on' if drive_is_read_only($conf, $d);
     } else {
-	log_warn("no efidisk configured! Using temporary efivars disk.");
+    # loongarch no efidisk now
+	# log_warn("no efidisk configured! Using temporary efivars disk.");
 	my $path = "/tmp/$vmid-ovmf.fd";
 	PVE::Tools::file_copy($ovmf_vars, $path, -s $ovmf_vars);
 	$var_drive_str .= ",format=raw,file=$path";
@@ -4905,6 +4906,7 @@ sub vmconfig_hotplug_pending {
 
     my $defaults = load_defaults();
     my $arch = get_vm_arch($conf);
+	
     my $machine_type = get_vm_machine($conf, undef, $arch);
 
     # commit values which do not have any impact on running VM first
@@ -4913,7 +4915,7 @@ sub vmconfig_hotplug_pending {
 
     my $add_error = sub {
 	my ($opt, $msg) = @_;
-	$errors->{$opt} = "hotplug problem - $msg";
+	$errors->{$opt} = "hotplug problem -  $msg";
     };
 
     my $cloudinit_pending_properties = PVE::QemuServer::cloudinit_pending_properties();

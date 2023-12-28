@@ -108,10 +108,12 @@ sub vm_running_locally {
 
 sub min_version {
     my ($verstr, $major, $minor, $pve) = @_;
-
+    
     if ($verstr =~ m/^(\d+)\.(\d+)(?:\.(\d+))?(?:\+pve(\d+))?/) {
 	return 1 if version_cmp($1, $major, $2, $minor, $4, $pve) >= 0;
 	return 0;
+    }else{
+        return 0;
     }
 
     die "internal error: cannot check version of invalid string '$verstr'";
