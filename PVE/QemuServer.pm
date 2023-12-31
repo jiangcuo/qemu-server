@@ -101,12 +101,18 @@ my $OVMF = {
 	    "$EDK2_FW_BASE/AAVMF_VARS.fd",
 	],
     },
-	loongarch64 => {
-	default =>	[
-		"$EDK2_FW_BASE/LOONGARCH_CODE.fd",
-		"$EDK2_FW_BASE/LOONGARCH_VARS.fd",
+    riscv64 => {
+        default => [
+            "$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+        ],
+    },
+    loongarch64 => {
+        default =>	[
+            "$EDK2_FW_BASE/LOONGARCH_CODE.fd",
+	    "$EDK2_FW_BASE/LOONGARCH_VARS.fd",
 	],
-	},
+     },
 };
 
 my $cpuinfo = PVE::ProcFSTools::read_cpuinfo();
@@ -644,7 +650,7 @@ EODESCR
 	description => "Virtual processor architecture. Defaults to the host.",
 	optional => 1,
 	type => 'string',
-	enum => [qw(x86_64 aarch64 loongarch64)],
+	enum => [qw(x86_64 aarch64 loongarch64 riscv64)],
     },
     smbios1 => {
 	description => "Specify SMBIOS type 1 fields.",
@@ -1427,7 +1433,7 @@ sub print_tabletdevice_full {
 
     # we use uhci for old VMs because tablet driver was buggy in older qemu
     my $usbbus;
-    if ($q35 || $arch eq 'aarch64' ||  $arch eq 'loongarch64' ) {
+    if ($q35 || $arch eq 'aarch64' ||  $arch eq 'loongarch64' || $arch eq 'riscv64' ) {
 	$usbbus = 'ehci';
     } else {
 	$usbbus = 'uhci';
@@ -1904,7 +1910,7 @@ sub print_vga_device {
     }
 
     if ($vga->{type} eq 'virtio-gl') {
-	my $base = '/usr/lib/loongarch64-linux-gnu/lib';
+	my $base = '/usr/lib/riscv64-linux-gnu/lib';
 	die "missing libraries for '$vga->{type}' detected! Please install 'libgl1' and 'libegl1'\n"
 	    if !-e "${base}EGL.so.1" || !-e "${base}GL.so.1";
 
@@ -3294,7 +3300,8 @@ sub get_vm_arch {
 my $default_machines = {
     x86_64 => 'pc',
     aarch64 => 'virt',
-	loongarch64 => 'virt',
+    loongarch64 => 'virt',
+    riscv64 => 'virt',
 };
 
 sub get_installed_machine_version {
@@ -3388,6 +3395,7 @@ my $Arch2Qemu = {
     aarch64 => '/usr/bin/qemu-system-aarch64',
     x86_64 => '/usr/bin/qemu-system-x86_64',
     loongarch64 => '/usr/bin/qemu-system-loongarch64',
+    riscv64 => '/usr/bin/qemu-system-riscv64',
 };
 sub get_command_for_arch($) {
     my ($arch) = @_;
@@ -3696,7 +3704,11 @@ sub config_to_command {
 	    print_ovmf_drive_commandlines($conf, $storecfg, $vmid, $arch, $q35, $version_guard);
 	if ($arch eq 'loongarch64') {
 		push  $cmd->@*, '-bios','/usr/share/pve-edk2-firmware//LOONGARCH_CODE.fd';
-	}else{
+	}elsif ($arch eq 'riscv64') {
+		push @$cmd, '-bios','/usr/share/pve-edk2-firmware//fw_dynamic.bin';
+		push @$cmd, '-drive', $code_drive_str;
+        }
+	else{
 		push $cmd->@*, '-drive', $code_drive_str;
 		push $cmd->@*, '-drive', $var_drive_str;
     }

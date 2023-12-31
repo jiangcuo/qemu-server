@@ -33,22 +33,22 @@ sub load_custom_model_conf {
 
 #builtin models : reported-model is mandatory
 my $builtin_models = {
-    'x86-64-v2' => {
-	'reported-model' => 'qemu64',
-	flags => "+popcnt;+pni;+sse4.1;+sse4.2;+ssse3",
-    },
-    'x86-64-v2-AES' => {
-	'reported-model' => 'qemu64',
-	flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3",
-    },
-    'x86-64-v3' => {
-	'reported-model' => 'qemu64',
-	flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3;+avx;+avx2;+bmi1;+bmi2;+f16c;+fma;+abm;+movbe;+xsave",
-    },
-    'x86-64-v4' => {
-	'reported-model' => 'qemu64',
-	flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3;+avx;+avx2;+bmi1;+bmi2;+f16c;+fma;+abm;+movbe;+xsave;+avx512f;+avx512bw;+avx512cd;+avx512dq;+avx512vl",
-    },
+#    'x86-64-v2' => {
+#	'reported-model' => 'qemu64',
+#	flags => "+popcnt;+pni;+sse4.1;+sse4.2;+ssse3",
+#    },
+#    'x86-64-v2-AES' => {
+#	'reported-model' => 'qemu64',
+#	flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3",
+#    },
+#    'x86-64-v3' => {
+#	'reported-model' => 'qemu64',
+#	flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3;+avx;+avx2;+bmi1;+bmi2;+f16c;+fma;+abm;+movbe;+xsave",
+#   },
+#    'x86-64-v4' => {
+#	'reported-model' => 'qemu64',
+#	flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3;+avx;+avx2;+bmi1;+bmi2;+f16c;+fma;+abm;+movbe;+xsave;+avx512f;+avx512bw;+avx512cd;+avx512dq;+avx512vl",
+#    },
 };
 
 my $depreacated_cpu_map = {
@@ -58,8 +58,8 @@ my $depreacated_cpu_map = {
 };
 
 my $cpu_vendor_list = {
-
-    la464_loongarch_cpu => 'default',
+    host => 'default',
+    rv64 => 'default',    
     kvm64 => 'default',
     max => 'default',
 };
@@ -88,7 +88,7 @@ my $cpu_fmt = {
 	description => "Emulated CPU type. Can be default or custom name (custom model names must be prefixed with 'custom-').",
 	type => 'string',
 	format_description => 'string',
-	default => 'la464_loongarch_cpu',
+	default => 'host',
 	default_key => 1,
 	optional => 1,
     },
@@ -97,7 +97,7 @@ my $cpu_fmt = {
 	    ." Only valid for custom CPU model definitions, default models will always report themselves to the guest OS.",
 	type => 'string',
 	enum => [ sort { lc("$a") cmp lc("$b") } keys %$cpu_vendor_list ],
-	default => 'la464_loongarch_cpu',
+	default => 'host',
 	optional => 1,
     },
     hidden => {
@@ -442,6 +442,9 @@ sub get_cpu_options {
     if ($arch eq 'aarch64') {
 	$cputype = 'cortex-a57';
     } 
+    if ($arch eq 'riscv64') {
+        $cputype = 'host';
+    }
     if ($arch eq 'loongarch64') {
 	$cputype = 'la464-loongarch-cpu';
     }
@@ -515,7 +518,7 @@ sub get_cpu_options {
 	$pve_forced_flags->{'vendor'} = {
 	    value => $cpu_vendor,
 	} if $cpu_vendor ne 'default';
-    } elsif ($arch ne 'loongarch64') {
+    } elsif ($arch ne 'riscv64') {
 	die "internal error"; # should not happen
     }
 

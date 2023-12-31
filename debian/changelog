@@ -1,4 +1,4 @@
-qemu-server (8.0.11+loong64) bookworm; urgency=medium
+qemu-server (8.0.11+riscv64) bookworm; urgency=medium
 
   * Fix disk and usb hotplug issue. 
   
