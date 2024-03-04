@@ -1360,66 +1360,6 @@ sub assert_clipboard_config {
     }
 }
 
-sub scsi_inquiry {
-    my($fh, $noerr) = @_;
-
-    my $SG_IO = 0x2285;
-    my $SG_GET_VERSION_NUM = 0x2282;
-
-    my $versionbuf = "\x00" x 8;
-    my $ret = ioctl($fh, $SG_GET_VERSION_NUM, $versionbuf);
-    if (!$ret) {
-	die "scsi ioctl SG_GET_VERSION_NUM failoed - $!\n" if !$noerr;
-	return;
-    }
-    my $version = unpack("I", $versionbuf);
-    if ($version < 30000) {
-	die "scsi generic interface too old\n"  if !$noerr;
-	return;
-    }
-
-    my $buf = "\x00" x 36;
-    my $sensebuf = "\x00" x 8;
-    my $cmd = pack("C x3 C x1", 0x12, 36);
-
-    # see /usr/include/scsi/sg.h
-    my $sg_io_hdr_t = "i i C C s I P P P I I i P C C C C S S i I I";
-
-    my $packet = pack(
-	$sg_io_hdr_t, ord('S'), -3, length($cmd), length($sensebuf), 0, length($buf), $buf, $cmd, $sensebuf, 6000
-    );
-
-    $ret = ioctl($fh, $SG_IO, $packet);
-    if (!$ret) {
-	die "scsi ioctl SG_IO failed - $!\n" if !$noerr;
-	return;
-    }
-
-    my @res = unpack($sg_io_hdr_t, $packet);
-    if ($res[17] || $res[18]) {
-	die "scsi ioctl SG_IO status error - $!\n" if !$noerr;
-	return;
-    }
-
-    my $res = {};
-    $res->@{qw(type removable vendor product revision)} = unpack("C C x6 A8 A16 A4", $buf);
-
-    $res->{removable} = $res->{removable} & 128 ? 1 : 0;
-    $res->{type} &= 0x1F;
-
-    return $res;
-}
-
-sub path_is_scsi {
-    my ($path) = @_;
-
-    my $fh = IO::File->new("+<$path") || return;
-    my $res = scsi_inquiry($fh, 1);
-    close($fh);
-
-    return $res;
-}
-
 sub print_tabletdevice_full {
     my ($conf, $arch) = @_;
 
@@ -1464,31 +1404,10 @@ sub print_drivedevice_full {
 
 	my ($maxdev, $controller, $controller_prefix) = scsihw_infos($conf, $drive);
 	my $unit = $drive->{index} % $maxdev;
-	my $devicetype = 'hd';
-	my $path = '';
-	if (drive_is_cdrom($drive)) {
-	    $devicetype = 'cd';
-	} else {
-	    if ($drive->{file} =~ m|^/|) {
-		$path = $drive->{file};
-		if (my $info = path_is_scsi($path)) {
-		    if ($info->{type} == 0 && $drive->{scsiblock}) {
-			$devicetype = 'block';
-		    } elsif ($info->{type} == 1) { # tape
-			$devicetype = 'generic';
-		    }
-		}
-	    } else {
-		 $path = PVE::Storage::path($storecfg, $drive->{file});
-	    }
 
-	    # for compatibility only, we prefer scsi-hd (#2408, #2355, #2380)
-	    my $version = extract_version($machine_type, kvm_user_version());
-	    if ($path =~ m/^iscsi\:\/\// &&
-	       !min_version($version, 4, 1)) {
-		$devicetype = 'generic';
-	    }
-	}
+	my $machine_version = extract_version($machine_type, kvm_user_version());
+	my $devicetype  = PVE::QemuServer::Drive::get_scsi_devicetype(
+	    $drive, $storecfg, $machine_version);
 
 	if (!$conf->{scsihw} || $conf->{scsihw} =~ m/^lsi/ || $conf->{scsihw} eq 'pvscsi') {
 	    $device = "scsi-$devicetype,bus=$controller_prefix$controller.0,scsi-id=$unit";
@@ -4761,24 +4680,29 @@ sub qemu_volume_snapshot {
 }
 
 sub qemu_volume_snapshot_delete {
-    my ($vmid, $deviceid, $storecfg, $volid, $snap) = @_;
+    my ($vmid, $storecfg, $volid, $snap) = @_;
 
     my $running = check_running($vmid);
+    my $attached_deviceid;
 
-    if($running) {
-
-	$running = undef;
+    if ($running) {
 	my $conf = PVE::QemuConfig->load_config($vmid);
 	PVE::QemuConfig->foreach_volume($conf, sub {
 	    my ($ds, $drive) = @_;
-	    $running = 1 if $drive->{file} eq $volid;
+	    $attached_deviceid = "drive-$ds" if $drive->{file} eq $volid;
 	});
     }
 
-    if ($running && do_snapshots_with_qemu($storecfg, $volid, $deviceid)) {
-	mon_cmd($vmid, 'blockdev-snapshot-delete-internal-sync', device => $deviceid, name => $snap);
+    if ($attached_deviceid && do_snapshots_with_qemu($storecfg, $volid, $attached_deviceid)) {
+	mon_cmd(
+	    $vmid,
+	    'blockdev-snapshot-delete-internal-sync',
+	    device => $attached_deviceid,
+	    name => $snap,
+	);
     } else {
-	PVE::Storage::volume_snapshot_delete($storecfg, $volid, $snap, $running);
+	PVE::Storage::volume_snapshot_delete(
+	    $storecfg, $volid, $snap, $attached_deviceid ? 1 : undef);
     }
 }
 
@@ -5815,10 +5739,9 @@ sub vm_start_nolock {
 		$migrate->{addr} = "[$migrate->{addr}]" if Net::IP::ip_is_ipv6($migrate->{addr});
 	    }
 
-	    my $pfamily = PVE::Tools::get_host_address_family($nodename);
-	    $migrate->{port} = PVE::Tools::next_migrate_port($pfamily);
-	    $migrate->{uri} = "tcp:$migrate->{addr}:$migrate->{port}";
-	    push @$cmd, '-incoming', $migrate->{uri};
+	    # see #4501: port reservation should be done close to usage - tell QEMU where to listen
+	    # via QMP later
+	    push @$cmd, '-incoming', 'defer';
 	    push @$cmd, '-S';
 
 	} elsif ($statefile eq 'unix') {
@@ -6002,8 +5925,15 @@ sub vm_start_nolock {
     eval { PVE::QemuServer::PCI::reserve_pci_usage($pci_reserve_list, $vmid, undef, $pid) };
     warn $@ if $@;
 
-    if (defined($res->{migrate})) {
-	print "migration listens on $res->{migrate}->{uri}\n";
+    if (defined(my $migrate = $res->{migrate})) {
+	if ($migrate->{proto} eq 'tcp') {
+	    my $nodename = nodename();
+	    my $pfamily = PVE::Tools::get_host_address_family($nodename);
+	    $migrate->{port} = PVE::Tools::next_migrate_port($pfamily);
+	    $migrate->{uri} = "tcp:$migrate->{addr}:$migrate->{port}";
+	    mon_cmd($vmid, "migrate-incoming", uri => $migrate->{uri});
+	}
+	print "migration listens on $migrate->{uri}\n";
     } elsif ($statefile) {
 	eval { mon_cmd($vmid, "cont"); };
 	warn $@ if $@;
