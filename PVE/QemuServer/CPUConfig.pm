@@ -5,6 +5,7 @@ use warnings;
 
 use PVE::JSONSchema;
 use PVE::Cluster qw(cfs_register_file cfs_read_file);
+use PVE::Tools qw(get_host_arch);
 use PVE::QemuServer::Helpers qw(min_version);
 
 use base qw(PVE::SectionConfig Exporter);
@@ -12,6 +13,8 @@ use base qw(PVE::SectionConfig Exporter);
 our @EXPORT_OK = qw(
 print_cpu_device
 get_cpu_options
+get_cpu_bitness
+is_native_arch
 );
 
 # under certain race-conditions, this module might be loaded before pve-cluster
@@ -55,6 +58,17 @@ my $depreacated_cpu_map = {
     # there never was such a client CPU, so map it to the server one for backward compat
     'Icelake-Client' => 'Icelake-Server',
     'Icelake-Client-noTSX' => 'Icelake-Server-noTSX',
+};
+
+my $cputypes_32bit = {
+    '486' => 1,
+    'pentium' => 1,
+    'pentium2' => 1,
+    'pentium3' => 1,
+    'coreduo' => 1,
+    'athlon' => 1,
+    'kvm32' => 1,
+    'qemu32' => 1,
 };
 
 my $cpu_vendor_list = {
@@ -399,10 +413,13 @@ sub get_custom_model {
 
 # Print a QEMU device node for a given VM configuration for hotplugging CPUs
 sub print_cpu_device {
-    my ($conf, $id) = @_;
+    my ($conf, $arch, $id) = @_;
 
-    my $kvm = $conf->{kvm} // 1;
-    my $cpu = $kvm ? "kvm64" : "qemu64";
+    # FIXME: hot plugging other architectures like our unofficial aarch64 support?
+    die "Hotplug of non x86_64 CPU not yet supported" if $arch ne 'x86_64';
+
+    my $kvm = $conf->{kvm} // is_native_arch($arch);
+    my $cpu = get_default_cpu_type('x86_64', $kvm);
     if (my $cputype = $conf->{cpu}) {
 	my $cpuconf = PVE::JSONSchema::parse_property_string('pve-vm-cpu-conf', $cputype)
 	    or die "Cannot parse cpu description: $cputype\n";
@@ -425,7 +442,6 @@ sub print_cpu_device {
     my $current_core = ($id - 1) % $cores;
     my $current_socket = int(($id - 1 - $current_core)/$cores);
 
-    # FIXME: hot plugging other architectures like our unofficial arch64 support?
     return "$cpu-x86_64-cpu,id=cpu$id,socket-id=$current_socket,core-id=$current_core,thread-id=0";
 }
 
@@ -512,10 +528,7 @@ sub parse_cpuflag_list {
 sub get_cpu_options {
     my ($conf, $arch, $kvm, $kvm_off, $machine_version, $winversion, $gpu_passthrough) = @_;
 
-    my $cputype = $kvm ? "kvm64" : "qemu64";
-    if ($arch eq 'aarch64') {
-	$cputype = 'host';
-    }
+    my $cputype = get_default_cpu_type($arch, $kvm);
 
     my $cpu = {};
     my $custom_cpu;
@@ -714,6 +727,50 @@ sub get_cpu_from_running_vm {
     # sanitize and untaint value
     $cmdline->{cpu}->{value} =~ $qemu_cmdline_cpu_re;
     return $1;
+}
+
+sub get_default_cpu_type {
+    my ($arch, $kvm) = @_;
+
+    my $cputype = $kvm ? 'kvm64' : 'qemu64';
+    $cputype = 'host' if $arch eq 'aarch64';
+    $cputype = 'host' if $arch eq 'arm';
+    $cputype = 'rv64' if $arch eq 'riscv64';
+    $cputype = 'la464-loongarch-cpu' if $arch eq 'loongarch64';
+
+    return $cputype;
+}
+
+sub is_native_arch($) {
+    my ($arch) = @_;
+    return get_host_arch() eq $arch;
+}
+
+sub get_cpu_bitness {
+    my ($cpu_prop_str, $arch) = @_;
+
+    $arch //= get_host_arch();
+
+    my $cputype = get_default_cpu_type($arch, 0);
+
+    if ($cpu_prop_str) {
+	my $cpu = PVE::JSONSchema::parse_property_string('pve-vm-cpu-conf', $cpu_prop_str)
+	    or die "Cannot parse cpu description: $cpu_prop_str\n";
+
+	my $cputype = $cpu->{cputype};
+
+	if (my $model = $builtin_models->{$cputype}) {
+	    $cputype = $model->{'reported-model'};
+	} elsif (is_custom_model($cputype)) {
+	    my $custom_cpu = get_custom_model($cputype);
+	    $cputype = $custom_cpu->{'reported-model'} // $cpu_fmt->{'reported-model'}->{default};
+	}
+    }
+
+    return $cputypes_32bit->{$cputype} ? 32 : 64 if $arch eq 'x86_64';
+    return 64 if $arch eq 'aarch64';
+
+    die "unsupported architecture '$arch'\n";
 }
 
 __PACKAGE__->register();

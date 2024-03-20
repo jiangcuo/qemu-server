@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use IO::Multiplex;
+use IO::Socket::UNIX;
 use JSON;
 use POSIX qw(EINTR EAGAIN);
 use Scalar::Util qw(weaken);
@@ -118,20 +119,21 @@ sub cmd {
 	    # that are executed upon thaw, so use 3 minutes to be on the safe side.
 	    $timeout = 3 * 60;
 	} elsif (
-	    $cmd->{execute} eq 'savevm-start' ||
-	    $cmd->{execute} eq 'savevm-end' ||
-	    $cmd->{execute} eq 'query-backup' ||
-	    $cmd->{execute} eq 'query-block-jobs' ||
+	    $cmd->{execute} eq 'backup-cancel' ||
+	    $cmd->{execute} eq 'blockdev-snapshot-delete-internal-sync' ||
+	    $cmd->{execute} eq 'blockdev-snapshot-internal-sync' ||
 	    $cmd->{execute} eq 'block-job-cancel' ||
 	    $cmd->{execute} eq 'block-job-complete' ||
-	    $cmd->{execute} eq 'backup-cancel' ||
-	    $cmd->{execute} eq 'query-savevm' ||
+	    $cmd->{execute} eq 'drive-mirror' ||
 	    $cmd->{execute} eq 'guest-fstrim' ||
 	    $cmd->{execute} eq 'guest-shutdown' ||
-	    $cmd->{execute} eq 'blockdev-snapshot-internal-sync' ||
-	    $cmd->{execute} eq 'blockdev-snapshot-delete-internal-sync'
+	    $cmd->{execute} eq 'query-backup' ||
+	    $cmd->{execute} eq 'query-block-jobs' ||
+	    $cmd->{execute} eq 'query-savevm' ||
+	    $cmd->{execute} eq 'savevm-end' ||
+	    $cmd->{execute} eq 'savevm-start'
 	 ) {
-	    $timeout = 10*60; # 10 mins ?
+	    $timeout = 10*60; # 10 mins
 	} else {
 	    #  NOTE: if you came here as user and want to change this, try using IO-Threads first
 	    # which move out quite some processing of the main thread, leaving more time for QMP

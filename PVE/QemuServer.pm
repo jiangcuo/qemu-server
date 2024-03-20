@@ -34,6 +34,7 @@ use PVE::DataCenterConfig;
 use PVE::Exception qw(raise raise_param_exc);
 use PVE::Format qw(render_duration render_bytes);
 use PVE::GuestHelpers qw(safe_string_ne safe_num_ne safe_boolean_ne);
+use PVE::HA::Config;
 use PVE::Mapping::PCI;
 use PVE::Mapping::USB;
 use PVE::INotify;
@@ -52,7 +53,7 @@ use PVE::QemuConfig;
 use PVE::QemuServer::Helpers qw(config_aware_timeout min_version windows_version);
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CGroup;
-use PVE::QemuServer::CPUConfig qw(print_cpu_device get_cpu_options);
+use PVE::QemuServer::CPUConfig qw(print_cpu_device get_cpu_options get_cpu_bitness is_native_arch);
 use PVE::QemuServer::Drive qw(is_valid_drivename drive_is_cloudinit drive_is_cdrom drive_is_read_only parse_drive print_drive);
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Memory qw(get_current_memory);
@@ -1433,6 +1434,16 @@ sub print_drivedevice_full {
 	}
 	$device .= ",wwn=$drive->{wwn}" if $drive->{wwn};
 
+	# only scsi-hd and scsi-cd support passing vendor and product information
+	if ($devicetype eq 'hd' || $devicetype eq 'cd') {
+	    if (my $vendor = $drive->{vendor}) {
+		$device .= ",vendor=$vendor";
+	    }
+	    if (my $product = $drive->{product}) {
+		$device .= ",product=$product";
+	    }
+	}
+
     } elsif ($drive->{interface} eq 'ide' || $drive->{interface} eq 'sata') {
 	my $maxdev = ($drive->{interface} eq 'sata') ? $PVE::QemuServer::Drive::MAX_SATA_DISKS : 2;
 	my $controller = int($drive->{index} / $maxdev);
@@ -1532,7 +1543,7 @@ my sub drive_uses_cache_direct {
 }
 
 sub print_drive_commandline_full {
-    my ($storecfg, $vmid, $drive, $pbs_name, $io_uring) = @_;
+    my ($storecfg, $vmid, $drive, $live_restore_name, $io_uring) = @_;
 
     my $path;
     my $volid = $drive->{file};
@@ -1544,7 +1555,7 @@ sub print_drive_commandline_full {
 
     if (drive_is_cdrom($drive)) {
 	$path = get_iso_path($storecfg, $vmid, $volid);
-        die "$drive_id: cannot back cdrom drive with PBS snapshot\n" if $pbs_name;
+        die "$drive_id: cannot back cdrom drive with a live restore image\n" if $live_restore_name;
     } else {
 	if ($storeid) {
 	    $path = PVE::Storage::path($storecfg, $volid);
@@ -1595,7 +1606,7 @@ sub print_drive_commandline_full {
 	}
     }
 
-    if ($pbs_name) {
+    if ($live_restore_name) {
 	$format = "rbd" if $is_rbd;
 	die "$drive_id: Proxmox Backup Server backed drive cannot auto-detect the format\n"
 	    if !$format;
@@ -1635,18 +1646,18 @@ sub print_drive_commandline_full {
 
 	# note: 'detect-zeroes' works per blockdev and we want it to persist
 	# after the alloc-track is removed, so put it on 'file' directly
-	my $dz_param = $pbs_name ? "file.detect-zeroes" : "detect-zeroes";
+	my $dz_param = $live_restore_name ? "file.detect-zeroes" : "detect-zeroes";
 	$opts .= ",$dz_param=$detectzeroes" if $detectzeroes;
     }
 
-    if ($pbs_name) {
-	$opts .= ",backing=$pbs_name";
+    if ($live_restore_name) {
+	$opts .= ",backing=$live_restore_name";
 	$opts .= ",auto-remove=on";
     }
 
-    # my $file_param = $pbs_name ? "file.file.filename" : "file";
+    # my $file_param = $live_restore_name ? "file.file.filename" : "file";
     my $file_param = "file";
-    if ($pbs_name) {
+    if ($live_restore_name) {
 	# non-rbd drivers require the underlying file to be a seperate block
 	# node, so add a second .file indirection
 	$file_param .= ".file" if !$is_rbd;
@@ -1748,7 +1759,7 @@ sub print_netdev_full {
         if length($ifname) >= 16;
 
     my $vhostparam = '';
-    if (is_native($arch)) {
+    if (is_native_arch($arch)) {
 	$vhostparam = ',vhost=on' if kernel_has_vhost_net() && $net->{model} eq 'virtio';
     }
 
@@ -3219,11 +3230,6 @@ sub vga_conf_has_spice {
     return $1 || 1;
 }
 
-sub is_native($) {
-    my ($arch) = @_;
-    return get_host_arch() eq $arch;
-}
-
 sub get_vm_arch {
     my ($conf) = @_;
     return $conf->{arch} // get_host_arch();
@@ -3323,7 +3329,7 @@ my $Arch2Qemu = {
 };
 sub get_command_for_arch($) {
     my ($arch) = @_;
-    return '/usr/bin/kvm' if is_native($arch);
+    return '/usr/bin/kvm' if is_native_arch($arch);
 
     my $cmd = $Arch2Qemu->{$arch}
 	or die "don't know how to emulate architecture '$arch'\n";
@@ -3501,7 +3507,7 @@ my sub print_ovmf_drive_commandlines {
 
 sub config_to_command {
     my ($storecfg, $vmid, $conf, $defaults, $forcemachine, $forcecpu,
-        $pbs_backing) = @_;
+        $live_restore_backing) = @_;
 
     my ($globalFlags, $machineFlags, $rtcFlags) = ([], [], []);
     my $devices = [];
@@ -3524,7 +3530,7 @@ sub config_to_command {
 
     my $machine_type = get_vm_machine($conf, $forcemachine, $arch, $add_pve_version);
     my $machine_version = extract_version($machine_type, $kvmver);
-    $kvm //= 1 if is_native($arch);
+    $kvm //= 1 if is_native_arch($arch);
 
     $machine_version =~ m/(\d+)\.(\d+)/;
     my ($machine_major, $machine_minor) = ($1, $2);
@@ -3618,6 +3624,9 @@ sub config_to_command {
     }
 
     if ($conf->{bios} && $conf->{bios} eq 'ovmf') {
+	die "OVMF (UEFI) BIOS is not supported on 32-bit CPU types\n"
+	    if !$forcecpu && get_cpu_bitness($conf->{cpu}, $arch) == 32;
+
 	my ($code_drive_str, $var_drive_str) =
 	    print_ovmf_drive_commandlines($conf, $storecfg, $vmid, $arch, $q35, $version_guard);
 	push $cmd->@*, '-drive', $code_drive_str;
@@ -3746,7 +3755,7 @@ sub config_to_command {
     if ($hotplug_features->{cpu} && min_version($machine_version, 2, 7)) {
 	push @$cmd, '-smp', "1,sockets=$sockets,cores=$cores,maxcpus=$maxcpus";
         for (my $i = 2; $i <= $vcpus; $i++)  {
-	    my $cpustr = print_cpu_device($conf,$i);
+	    my $cpustr = print_cpu_device($conf, $arch, $i);
 	    push @$cmd, '-device', $cpustr;
 	}
 
@@ -3989,15 +3998,15 @@ sub config_to_command {
 	    $ahcicontroller->{$controller}=1;
         }
 
-	my $pbs_conf = $pbs_backing->{$ds};
-	my $pbs_name = undef;
-	if ($pbs_conf) {
-	    $pbs_name = "drive-$ds-pbs";
-	    push @$devices, '-blockdev', print_pbs_blockdev($pbs_conf, $pbs_name);
+	my $live_restore = $live_restore_backing->{$ds};
+	my $live_blockdev_name = undef;
+	if ($live_restore) {
+	    $live_blockdev_name = $live_restore->{name};
+	    push @$devices, '-blockdev', $live_restore->{blockdev};
 	}
 
 	my $drive_cmd = print_drive_commandline_full(
-	    $storecfg, $vmid, $drive, $pbs_name, min_version($kvmver, 6, 0));
+	    $storecfg, $vmid, $drive, $live_blockdev_name, min_version($kvmver, 6, 0));
 
 	# extra protection for templates, but SATA and IDE don't support it..
 	$drive_cmd .= ',readonly=on' if drive_is_read_only($conf, $drive);
@@ -4598,9 +4607,10 @@ sub qemu_cpu_hotplug {
 	if scalar(@{$currentrunningvcpus}) != $currentvcpus;
 
     if (PVE::QemuServer::Machine::machine_version($machine_type, 2, 7)) {
+	my $arch = get_vm_arch($conf);
 
 	for (my $i = $currentvcpus+1; $i <= $vcpus; $i++) {
-	    my $cpustr = print_cpu_device($conf, $i);
+	    my $cpustr = print_cpu_device($conf, $arch, $i);
 	    qemu_deviceadd($vmid, $cpustr);
 
 	    my $retry = 0;
@@ -5211,19 +5221,21 @@ sub vmconfig_apply_pending {
 	    if (defined($conf->{$opt}) && is_valid_drivename($opt)) {
 		vmconfig_register_unused_drive($storecfg, $vmid, $conf, parse_drive($opt, $conf->{$opt}))
 	    } elsif (defined($conf->{pending}->{$opt}) && $opt =~ m/^net\d+$/) {
-		if($have_sdn) {
-                    my $new_net = PVE::QemuServer::parse_net($conf->{pending}->{$opt});
-		    if ($conf->{$opt}){
-		        my $old_net = PVE::QemuServer::parse_net($conf->{$opt});
+		return if !$have_sdn; # return from eval if SDN is not available
 
-			if ($old_net->{bridge} ne $new_net->{bridge} ||
-			    $old_net->{macaddr} ne $new_net->{macaddr}) {
-			    PVE::Network::SDN::Vnets::del_ips_from_mac($old_net->{bridge}, $old_net->{macaddr}, $conf->{name});
-			}
-		   }
-		   #fixme: reuse ip if mac change && same bridge
-		   PVE::Network::SDN::Vnets::add_next_free_cidr($new_net->{bridge}, $conf->{name}, $new_net->{macaddr}, $vmid, undef, 1);
+		my $new_net = PVE::QemuServer::parse_net($conf->{pending}->{$opt});
+		if ($conf->{$opt}) {
+		    my $old_net = PVE::QemuServer::parse_net($conf->{$opt});
+
+		    if (defined($old_net->{bridge}) && defined($old_net->{macaddr}) && (
+			safe_string_ne($old_net->{bridge}, $new_net->{bridge}) ||
+			safe_string_ne($old_net->{macaddr}, $new_net->{macaddr})
+		    )) {
+			PVE::Network::SDN::Vnets::del_ips_from_mac($old_net->{bridge}, $old_net->{macaddr}, $conf->{name});
+		    }
 		}
+		#fixme: reuse ip if mac change && same bridge
+		PVE::Network::SDN::Vnets::add_next_free_cidr($new_net->{bridge}, $conf->{name}, $new_net->{macaddr}, $vmid, undef, 1);
 	    }
 	};
 	if (my $err = $@) {
@@ -5262,13 +5274,14 @@ sub vmconfig_update_net {
 	    safe_string_ne($oldnet->{macaddr}, $newnet->{macaddr}) ||
 	    safe_num_ne($oldnet->{queues}, $newnet->{queues}) ||
 	    safe_num_ne($oldnet->{mtu}, $newnet->{mtu}) ||
-	    !($newnet->{bridge} && $oldnet->{bridge})) { # bridge/nat mode change
+	    !($newnet->{bridge} && $oldnet->{bridge})
+	) { # bridge/nat mode change
 
             # for non online change, we try to hot-unplug
 	    die "skip\n" if !$hotplug;
 	    vm_deviceunplug($vmid, $conf, $opt);
 
-	    if($have_sdn) {
+	    if ($have_sdn) {
 		PVE::Network::SDN::Vnets::del_ips_from_mac($oldnet->{bridge}, $oldnet->{macaddr}, $conf->{name});
 	    }
 
@@ -5280,12 +5293,14 @@ sub vmconfig_update_net {
 	    if (safe_string_ne($oldnet->{bridge}, $newnet->{bridge}) ||
 		safe_num_ne($oldnet->{tag}, $newnet->{tag}) ||
 		safe_string_ne($oldnet->{trunks}, $newnet->{trunks}) ||
-		safe_num_ne($oldnet->{firewall}, $newnet->{firewall})) {
+		safe_num_ne($oldnet->{firewall}, $newnet->{firewall})
+	    ) {
 		PVE::Network::tap_unplug($iface);
 
 		#set link_down in guest if bridge or vlan change to notify guest (dhcp renew for example)
 		if (safe_string_ne($oldnet->{bridge}, $newnet->{bridge}) ||
-		    safe_num_ne($oldnet->{tag}, $newnet->{tag})) {
+		    safe_num_ne($oldnet->{tag}, $newnet->{tag})
+		) {
 		    qemu_set_link_status($vmid, $opt, 0);
 		}
 
@@ -5304,7 +5319,8 @@ sub vmconfig_update_net {
 
 		#set link_up in guest if bridge or vlan change to notify guest (dhcp renew for example)
 		if (safe_string_ne($oldnet->{bridge}, $newnet->{bridge}) ||
-		    safe_num_ne($oldnet->{tag}, $newnet->{tag})) {
+		    safe_num_ne($oldnet->{tag}, $newnet->{tag})
+		) {
 		    qemu_set_link_status($vmid, $opt, 1);
 		}
 
@@ -5384,8 +5400,10 @@ sub vmconfig_update_disk {
 		    safe_string_ne($drive->{discard}, $old_drive->{discard}) ||
 		    safe_string_ne($drive->{iothread}, $old_drive->{iothread}) ||
 		    safe_string_ne($drive->{queues}, $old_drive->{queues}) ||
+		    safe_string_ne($drive->{product}, $old_drive->{product}) ||
 		    safe_string_ne($drive->{cache}, $old_drive->{cache}) ||
 		    safe_string_ne($drive->{ssd}, $old_drive->{ssd}) ||
+		    safe_string_ne($drive->{vendor}, $old_drive->{vendor}) ||
 		    safe_string_ne($drive->{ro}, $old_drive->{ro})) {
 		    die "skip\n";
 		}
@@ -5616,12 +5634,10 @@ sub vm_start {
 #   timeout => in seconds
 #   paused => start VM in paused state (backup)
 #   resume => resume from hibernation
-#   pbs-backing => {
+#   live-restore-backing => {
 #      sata0 => {
-#         repository
-#         snapshot
-#         keyfile
-#         archive
+#          name => blockdev-name,
+#          blockdev => "arg to the -blockdev command instantiating device named 'name'",
 #      },
 #      virtio2 => ...
 #   }
@@ -5695,7 +5711,7 @@ sub vm_start_nolock {
     }
 
     my ($cmd, $vollist, $spice_port, $pci_devices) = config_to_command($storecfg, $vmid,
-	$conf, $defaults, $forcemachine, $forcecpu, $params->{'pbs-backing'});
+	$conf, $defaults, $forcemachine, $forcecpu, $params->{'live-restore-backing'});
 
     my $migration_ip;
     my $get_migration_ip = sub {
@@ -6141,12 +6157,20 @@ sub cleanup_pci_devices {
 	    my $dev_sysfs_dir = "/sys/bus/mdev/devices/$uuid";
 
 	    # some nvidia vgpu driver versions want to clean the mdevs up themselves, and error
-	    # out when we do it first. so wait for 10 seconds and then try it
-	    if ($d->{ids}->[0]->[0]->{vendor} =~ m/^(0x)?10de$/) {
-		sleep 10;
+	    # out when we do it first. so wait for up to 10 seconds and then try it manually
+	    if ($d->{ids}->[0]->[0]->{vendor} =~ m/^(0x)?10de$/ && -e $dev_sysfs_dir) {
+		my $count = 0;
+		while (-e $dev_sysfs_dir && $count < 10) {
+		    sleep 1;
+		    $count++;
+		}
+		print "waited $count seconds for mediated device driver finishing clean up\n";
 	    }
 
-	    PVE::SysFSTools::file_write("$dev_sysfs_dir/remove", "1") if -e $dev_sysfs_dir;
+	    if (-e $dev_sysfs_dir) {
+		print "actively clean up mediated device with UUID $uuid\n";
+		PVE::SysFSTools::file_write("$dev_sysfs_dir/remove", "1");
+	    }
 	}
     }
     PVE::QemuServer::PCI::remove_pci_reservation($vmid);
@@ -7207,20 +7231,27 @@ sub pbs_live_restore {
     print "starting VM for live-restore\n";
     print "repository: '$opts->{repo}', snapshot: '$opts->{snapshot}'\n";
 
-    my $pbs_backing = {};
+    my $live_restore_backing = {};
     for my $ds (keys %$restored_disks) {
 	$ds =~ m/^drive-(.*)$/;
 	my $confname = $1;
-	$pbs_backing->{$confname} = {
+	my $pbs_conf = {};
+	$pbs_conf = {
 	    repository => $opts->{repo},
 	    snapshot => $opts->{snapshot},
 	    archive => "$ds.img.fidx",
 	};
-	$pbs_backing->{$confname}->{keyfile} = $opts->{keyfile} if -e $opts->{keyfile};
-	$pbs_backing->{$confname}->{namespace} = $opts->{namespace} if defined($opts->{namespace});
+	$pbs_conf->{keyfile} = $opts->{keyfile} if -e $opts->{keyfile};
+	$pbs_conf->{namespace} = $opts->{namespace} if defined($opts->{namespace});
 
 	my $drive = parse_drive($confname, $conf->{$confname});
 	print "restoring '$ds' to '$drive->{file}'\n";
+
+	my $pbs_name = "drive-${confname}-pbs";
+	$live_restore_backing->{$confname} = {
+	    name => $pbs_name,
+	    blockdev => print_pbs_blockdev($pbs_conf, $pbs_name),
+	};
     }
 
     my $drives_streamed = 0;
@@ -7232,7 +7263,7 @@ sub pbs_live_restore {
 
 	# start VM with backing chain pointing to PBS backup, environment vars for PBS driver
 	# in QEMU (PBS_PASSWORD and PBS_FINGERPRINT) are already set by our caller
-	vm_start_nolock($storecfg, $vmid, $conf, {paused => 1, 'pbs-backing' => $pbs_backing}, {});
+	vm_start_nolock($storecfg, $vmid, $conf, {paused => 1, 'live-restore-backing' => $live_restore_backing}, {});
 
 	my $qmeventd_fd = register_qmeventd_handle($vmid);
 
@@ -7270,6 +7301,93 @@ sub pbs_live_restore {
 	_do_vm_stop($storecfg, $vmid, 1, 1, 10, 0, 1);
 	die "live-restore failed\n";
     }
+}
+
+# Inspired by pbs live-restore, this restores with the disks being available as files.
+# Theoretically this can also be used to quick-start a full-clone vm if the
+# disks are all available as files.
+#
+# The mapping should provide a path by config entry, such as
+# `{ scsi0 => { format => <qcow2|raw|...>, path => "/path/to/file", sata1 => ... } }`
+#
+# This is used when doing a `create` call with the `--live-import` parameter,
+# where the disks get an `import-from=` property. The non-live part is
+# therefore already handled in the `$create_disks()` call happening in the
+# `create` api call
+sub live_import_from_files {
+    my ($mapping, $vmid, $conf, $restore_options) = @_;
+
+    my $live_restore_backing = {};
+    for my $dev (keys %$mapping) {
+	die "disk not support for live-restoring: '$dev'\n"
+	    if !is_valid_drivename($dev) || $dev =~ /^(?:efidisk|tpmstate)/;
+
+	die "mapping contains disk '$dev' which does not exist in the config\n"
+	    if !exists($conf->{$dev});
+
+	my $info = $mapping->{$dev};
+	my ($format, $path) = $info->@{qw(format path)};
+	die "missing path for '$dev' mapping\n" if !$path;
+	die "missing format for '$dev' mapping\n" if !$format;
+	die "invalid format '$format' for '$dev' mapping\n"
+	    if !grep { $format eq $_ } qw(raw qcow2 vmdk);
+
+	$live_restore_backing->{$dev} = {
+	    name => "drive-$dev-restore",
+	    blockdev => "driver=$format,node-name=drive-$dev-restore"
+	    . ",read-only=on"
+	    . ",file.driver=file,file.filename=$path"
+	};
+    };
+
+    my $storecfg = PVE::Storage::config();
+    eval {
+
+	# make sure HA doesn't interrupt our restore by stopping the VM
+	if (PVE::HA::Config::vm_is_ha_managed($vmid)) {
+	    run_command(['ha-manager', 'set',  "vm:$vmid", '--state', 'started']);
+	}
+
+	vm_start_nolock($storecfg, $vmid, $conf, {paused => 1, 'live-restore-backing' => $live_restore_backing}, {});
+
+	# prevent shutdowns from qmeventd when the VM powers off from the inside
+	my $qmeventd_fd = register_qmeventd_handle($vmid);
+
+	# begin streaming, i.e. data copy from PBS to target disk for every vol,
+	# this will effectively collapse the backing image chain consisting of
+	# [target <- alloc-track -> PBS snapshot] to just [target] (alloc-track
+	# removes itself once all backing images vanish with 'auto-remove=on')
+	my $jobs = {};
+	for my $ds (sort keys %$live_restore_backing) {
+	    my $job_id = "restore-$ds";
+	    mon_cmd($vmid, 'block-stream',
+		'job-id' => $job_id,
+		device => "drive-$ds",
+	    );
+	    $jobs->{$job_id} = {};
+	}
+
+	mon_cmd($vmid, 'cont');
+	qemu_drive_mirror_monitor($vmid, undef, $jobs, 'auto', 0, 'stream');
+
+	print "restore-drive jobs finished successfully, removing all tracking block devices\n";
+
+	for my $ds (sort keys %$live_restore_backing) {
+	    mon_cmd($vmid, 'blockdev-del', 'node-name' => "drive-$ds-restore");
+	}
+
+	close($qmeventd_fd);
+    };
+
+    my $err = $@;
+
+    if ($err) {
+	warn "An error occurred during live-restore: $err\n";
+	_do_vm_stop($storecfg, $vmid, 1, 1, 10, 0, 1);
+	die "live-restore failed\n";
+    }
+
+    PVE::QemuConfig->remove_lock($vmid, "import");
 }
 
 sub restore_vma_archive {
@@ -7776,7 +7894,11 @@ sub qemu_img_convert {
 sub qemu_img_format {
     my ($scfg, $volname) = @_;
 
-    if ($scfg->{path} && $volname =~ m/\.($PVE::QemuServer::Drive::QEMU_FORMAT_RE)$/) {
+    # FIXME: this entire function is kind of weird given that `parse_volname`
+    # also already gives us a format?
+    my $is_path_storage = $scfg->{path} || $scfg->{type} eq 'esxi';
+
+    if ($is_path_storage && $volname =~ m/\.($PVE::QemuServer::Drive::QEMU_FORMAT_RE)$/) {
 	return $1;
     } else {
 	return "raw";
