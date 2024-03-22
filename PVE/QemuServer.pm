@@ -3366,8 +3366,8 @@ sub query_supported_cpu_flags {
 
     # FIXME: Once this is merged, the code below should work for ARM as well:
     # https://lists.nongnu.org/archive/html/qemu-devel/2019-06/msg04947.html
-    die "QEMU/KVM cannot detect CPU flags on ARM (aarch64)\n" if
-	$arch eq "aarch64";
+    # die "QEMU/KVM cannot detect CPU flags on ARM (aarch64)\n" if
+	# $arch eq "aarch64";
 
     my $kvm_supported = defined(kvm_version());
     my $qemu_cmd = get_command_for_arch($arch);
