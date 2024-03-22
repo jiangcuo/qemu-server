@@ -1,3 +1,11 @@
+qemu-server (8.1.1+port1) bookworm; urgency=medium
+
+  * update to 8.1.1
+
+  * remove qemu cpu flags check
+
+ -- jiangcuo <jiangcuo@bingsin.com>  Fri, 22 Mar 2024 21:11:29 +0800
+
 qemu-server (8.1.1) bookworm; urgency=medium
 
   * config: pending network: avoid undef-warning on old/new comparison
