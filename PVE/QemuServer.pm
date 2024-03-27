@@ -3387,13 +3387,12 @@ sub query_supported_cpu_flags {
 	    '-mon', 'chardev=qmp,mode=control',
 	    '-pidfile', $pidfile,
 	    '-S', '-daemonize',
-		'-cpu', 'host'
+		'-cpu', 'max'
 	];
 
-    # remore tcg check
-	# if (!$kvm) {
-	#     push @$cmd, '-accel', 'tcg';
-	# }
+	if (!$kvm) {
+	    push @$cmd, '-accel', 'tcg';
+	}
 
 	my $rc = run_command($cmd, noerr => 1, quiet => 0);
 	die "QEMU flag querying VM exited with code " . $rc if $rc;
@@ -3403,7 +3402,7 @@ sub query_supported_cpu_flags {
 		$fakevmid,
 		'query-cpu-model-expansion',
 		type => 'full',
-		model => { name => 'host' }
+		model => { name => 'max' }
 	    );
 
 	    my $props = $cmd_result->{model}->{props};
