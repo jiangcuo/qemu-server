@@ -3386,12 +3386,14 @@ sub query_supported_cpu_flags {
 	    '-chardev', "socket,id=qmp,path=/var/run/qemu-server/$fakevmid.qmp,server=on,wait=off",
 	    '-mon', 'chardev=qmp,mode=control',
 	    '-pidfile', $pidfile,
-	    '-S', '-daemonize'
+	    '-S', '-daemonize',
+		'-cpu', 'host'
 	];
 
-	if (!$kvm) {
-	    push @$cmd, '-accel', 'tcg';
-	}
+    # remore tcg check
+	# if (!$kvm) {
+	#     push @$cmd, '-accel', 'tcg';
+	# }
 
 	my $rc = run_command($cmd, noerr => 1, quiet => 0);
 	die "QEMU flag querying VM exited with code " . $rc if $rc;

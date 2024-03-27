@@ -1,3 +1,9 @@
+qemu-server (8.1.1+port2) bookworm; urgency=medium
+
+  * fix query_supported_cpu_flags on aarch64
+
+ -- jiangcuo <jiangcuo@bingsin.com>  Wed, 27 Mar 2024 09:26:45 +0800
+
 qemu-server (8.1.1+port1) bookworm; urgency=medium
 
   * update to 8.1.1
