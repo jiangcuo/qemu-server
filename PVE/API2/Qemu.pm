@@ -48,6 +48,7 @@ use PVE::DataCenterConfig;
 use PVE::SSHInfo;
 use PVE::Replication;
 use PVE::StorageTunnel;
+use PVE::RESTEnvironment qw(log_warn);
 
 BEGIN {
     if (!$ENV{PVE_GENERATING_DOCS}) {
@@ -315,12 +316,25 @@ my $import_from_volid = sub {
 
 # Note: $pool is only needed when creating a VM, because pool permissions
 # are automatically inherited if VM already exists inside a pool.
-my $create_disks = sub {
-    my ($rpcenv, $authuser, $conf, $arch, $storecfg, $vmid, $pool, $settings, $default_storage) = @_;
+my sub create_disks : prototype($$$$$$$$$$) {
+    my (
+	$rpcenv,
+	$authuser,
+	$conf,
+	$arch,
+	$storecfg,
+	$vmid,
+	$pool,
+	$settings,
+	$default_storage,
+	$is_live_import,
+    ) = @_;
 
     my $vollist = [];
 
     my $res = {};
+
+    my $live_import_mapping = {};
 
     my $code = sub {
 	my ($ds, $disk) = @_;
@@ -367,51 +381,81 @@ my $create_disks = sub {
 	    my ($storeid, $size) = ($2 || $default_storage, $3);
 	    die "no storage ID specified (and no default storage)\n" if !$storeid;
 
+	    $size = PVE::Tools::convert_size($size, 'gb' => 'kb'); # vdisk_alloc uses kb
+
+	    my $live_import = $is_live_import && $ds ne 'efidisk0';
+	    my $needs_creation = 1;
+
 	    if (my $source = delete $disk->{'import-from'}) {
 		my $dst_volid;
 
+		$needs_creation = $live_import;
+
 		if (PVE::Storage::parse_volume_id($source, 1)) { # PVE-managed volume
-		    my $dest_info = {
-			vmid => $vmid,
-			drivename => $ds,
-			storage => $storeid,
-			format => $disk->{format},
-		    };
+		    if ($live_import && $ds ne 'efidisk0') {
+			my $path = PVE::Storage::path($storecfg, $source)
+			    or die "failed to get a path for '$source'\n";
+			$source = $path;
+			($size, my $source_format) = PVE::Storage::file_size_info($source);
+			die "could not get file size of $source\n" if !$size;
+			$live_import_mapping->{$ds} = {
+			    path => $source,
+			    format => $source_format,
+			};
+		    } else {
+			my $dest_info = {
+			    vmid => $vmid,
+			    drivename => $ds,
+			    storage => $storeid,
+			    format => $disk->{format},
+			};
 
-		    $dest_info->{efisize} = PVE::QemuServer::get_efivars_size($conf, $disk)
-			if $ds eq 'efidisk0';
+			$dest_info->{efisize} = PVE::QemuServer::get_efivars_size($conf, $disk)
+			    if $ds eq 'efidisk0';
 
-		    ($dst_volid, $size) = eval {
-			$import_from_volid->($storecfg, $source, $dest_info, $vollist);
-		    };
-		    die "cannot import from '$source' - $@" if $@;
+			($dst_volid, $size) = eval {
+			    $import_from_volid->($storecfg, $source, $dest_info, $vollist);
+			};
+			die "cannot import from '$source' - $@" if $@;
+		    }
 		} else {
 		    $source = PVE::Storage::abs_filesystem_path($storecfg, $source, 1);
-		    $size = PVE::Storage::file_size_info($source);
+		    ($size, my $source_format) = PVE::Storage::file_size_info($source);
 		    die "could not get file size of $source\n" if !$size;
 
-		    (undef, $dst_volid) = PVE::QemuServer::ImportDisk::do_import(
-			$source,
-			$vmid,
-			$storeid,
-			{
-			    drive_name => $ds,
-			    format => $disk->{format},
-			    'skip-config-update' => 1,
-			},
-		    );
-		    push @$vollist, $dst_volid;
+		    if ($live_import && $ds ne 'efidisk0') {
+			$live_import_mapping->{$ds} = {
+			    path => $source,
+			    format => $source_format,
+			};
+		    } else {
+			(undef, $dst_volid) = PVE::QemuServer::ImportDisk::do_import(
+			    $source,
+			    $vmid,
+			    $storeid,
+			    {
+				drive_name => $ds,
+				format => $disk->{format},
+				'skip-config-update' => 1,
+			    },
+			);
+			push @$vollist, $dst_volid;
+		    }
 		}
 
-		$disk->{file} = $dst_volid;
-		$disk->{size} = $size;
-		delete $disk->{format}; # no longer needed
-		$res->{$ds} = PVE::QemuServer::print_drive($disk);
-	    } else {
+		if ($needs_creation) {
+		    $size = PVE::Tools::convert_size($size, 'b' => 'kb'); # vdisk_alloc uses kb
+		} else {
+		    $disk->{file} = $dst_volid;
+		    $disk->{size} = $size;
+		    delete $disk->{format}; # no longer needed
+		    $res->{$ds} = PVE::QemuServer::print_drive($disk);
+		}
+	    }
+
+	    if ($needs_creation) {
 		my $defformat = PVE::Storage::storage_default_format($storecfg, $storeid);
 		my $fmt = $disk->{format} || $defformat;
-
-		$size = PVE::Tools::convert_size($size, 'gb' => 'kb'); # vdisk_alloc uses kb
 
 		my $volid;
 		if ($ds eq 'efidisk0') {
@@ -473,7 +517,10 @@ my $create_disks = sub {
 	die $err;
     }
 
-    return ($vollist, $res);
+    # don't return empty import mappings
+    $live_import_mapping = undef if !%$live_import_mapping;
+
+    return ($vollist, $res, $live_import_mapping);
 };
 
 my $check_cpu_model_access = sub {
@@ -696,6 +743,33 @@ my $check_vm_modify_config_perm = sub {
     return 1;
 };
 
+sub assert_scsi_feature_compatibility {
+    my ($opt, $conf, $storecfg, $drive_attributes) = @_;
+
+    my $drive = PVE::QemuServer::Drive::parse_drive($opt, $drive_attributes, 1);
+
+    my $machine_type = PVE::QemuServer::get_vm_machine($conf, undef, $conf->{arch});
+    my $machine_version = PVE::QemuServer::Machine::extract_version(
+	$machine_type, PVE::QemuServer::kvm_user_version());
+    my $drivetype = PVE::QemuServer::Drive::get_scsi_devicetype(
+	$drive, $storecfg, $machine_version);
+
+    if ($drivetype ne 'hd' && $drivetype ne 'cd') {
+	if ($drive->{product}) {
+	    raise_param_exc({
+		$opt => "Passing of product information is only supported for 'scsi-hd' and "
+		    ."'scsi-cd' devices (e.g. not pass-through).",
+	    });
+	}
+	if ($drive->{vendor}) {
+	    raise_param_exc({
+		$opt => "Passing of vendor information is only supported for 'scsi-hd' and "
+		    ."'scsi-cd' devices (e.g. not pass-through).",
+	    });
+	}
+    }
+}
+
 __PACKAGE__->register_method({
     name => 'vmlist',
     path => '',
@@ -766,7 +840,6 @@ my $parse_restore_archive = sub {
     return $res;
 };
 
-
 __PACKAGE__->register_method({
     name => 'create_vm',
     path => '',
@@ -814,8 +887,7 @@ __PACKAGE__->register_method({
 		'live-restore' => {
 		    optional => 1,
 		    type => 'boolean',
-		    description => "Start the VM immediately from the backup and restore in background. PBS only.",
-		    requires => 'archive',
+		    description => "Start the VM immediately while importing or restoring in the background.",
 		},
 		pool => {
 		    optional => 1,
@@ -1006,6 +1078,8 @@ __PACKAGE__->register_method({
 	};
 
 	my $createfn = sub {
+	    my $live_import_mapping = {};
+
 	    # ensure no old replication state are exists
 	    PVE::ReplicationState::delete_guest_states($vmid);
 
@@ -1013,11 +1087,16 @@ __PACKAGE__->register_method({
 		my $conf = $param;
 		my $arch = PVE::QemuServer::get_vm_arch($conf);
 
+		for my $opt (sort keys $param->%*) {
+		    next if $opt !~ m/^scsi\d+$/;
+		    assert_scsi_feature_compatibility($opt, $conf, $storecfg, $param->{$opt});
+		}
+
 		$conf->{meta} = PVE::QemuServer::new_meta_info_string();
 
 		my $vollist = [];
 		eval {
-		    ($vollist, my $created_opts) = $create_disks->(
+		    ($vollist, my $created_opts, $live_import_mapping) = create_disks(
 			$rpcenv,
 			$authuser,
 			$conf,
@@ -1027,6 +1106,7 @@ __PACKAGE__->register_method({
 			$pool,
 			$param,
 			$storage,
+			$live_restore,
 		    );
 		    $conf->{$_} = $created_opts->{$_} for keys $created_opts->%*;
 
@@ -1055,8 +1135,9 @@ __PACKAGE__->register_method({
 			}
 		    }
 
-		    PVE::QemuConfig->write_config($vmid, $conf);
+		    $conf->{lock} = 'import' if $live_import_mapping;
 
+		    PVE::QemuConfig->write_config($vmid, $conf);
 		};
 		my $err = $@;
 
@@ -1075,10 +1156,13 @@ __PACKAGE__->register_method({
 
 	    PVE::QemuConfig->lock_config_full($vmid, 1, $realcmd);
 
-	    if ($start_after_create) {
+	    if ($start_after_create && !$live_restore) {
 		print "Execute autostart\n";
 		eval { PVE::API2::Qemu->vm_start({vmid => $vmid, node => $node}) };
 		warn $@ if $@;
+		return;
+	    } else {
+		return $live_import_mapping;
 	    }
 	};
 
@@ -1103,7 +1187,9 @@ __PACKAGE__->register_method({
 	} else {
 	    $worker_name = 'qmcreate';
 	    $code = sub {
-		eval { $createfn->() };
+		# If a live import was requested the create function returns
+		# the mapping for the startup.
+		my $live_import_mapping = eval { $createfn->() };
 		if (my $err = $@) {
 		    eval {
 			my $conffile = PVE::QemuConfig->config_file($vmid);
@@ -1111,6 +1197,21 @@ __PACKAGE__->register_method({
 		    };
 		    warn $@ if $@;
 		    die $err;
+		}
+
+		if ($live_import_mapping) {
+		    my $import_options = {
+			bwlimit => $bwlimit,
+			live => 1,
+		    };
+
+		    my $conf = PVE::QemuConfig->load_config($vmid);
+		    PVE::QemuServer::live_import_from_files(
+			$live_import_mapping,
+			$vmid,
+			$conf,
+			$import_options,
+		    );
 		}
 	    };
 	}
@@ -1833,7 +1934,10 @@ my $update_vm_api  = sub {
 		    PVE::QemuServer::vmconfig_register_unused_drive($storecfg, $vmid, $conf, PVE::QemuServer::parse_drive($opt, $conf->{pending}->{$opt}))
 			if defined($conf->{pending}->{$opt});
 
-		    my (undef, $created_opts) = $create_disks->(
+		    assert_scsi_feature_compatibility($opt, $conf, $storecfg, $param->{$opt})
+			if $opt =~ m/^scsi\d+$/;
+
+		    my (undef, $created_opts) = create_disks(
 			$rpcenv,
 			$authuser,
 			$conf,
@@ -1842,6 +1946,8 @@ my $update_vm_api  = sub {
 			$vmid,
 			undef,
 			{$opt => $param->{$opt}},
+			undef,
+			undef,
 		    );
 		    $conf->{pending}->{$_} = $created_opts->{$_} for keys $created_opts->%*;
 
@@ -3783,8 +3889,13 @@ __PACKAGE__->register_method({
 		PVE::QemuServer::create_ifaces_ipams_ips($newconf, $newid);
 
 		if ($target) {
-		    # always deactivate volumes - avoid lvm LVs to be active on several nodes
-		    PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname) if !$running;
+		    if (!$running) {
+			# always deactivate volumes – avoids that LVM LVs are active on several nodes
+			eval { PVE::Storage::deactivate_volumes($storecfg, $vollist, $snapname) };
+			# but only warn when that fails (e.g., parallel clones keeping them active)
+			log_warn($@) if $@;
+		    }
+
 		    PVE::Storage::deactivate_volumes($storecfg, $newvollist);
 
 		    my $newconffile = PVE::QemuConfig->config_file($newid, $target);
