@@ -140,14 +140,6 @@ PVE::JSONSchema::register_standard_option('pve-qm-stateuri', {
     optional => 1,
 });
 
-PVE::JSONSchema::register_standard_option('pve-qemu-machine', {
-	description => "Specifies the QEMU machine type.",
-	type => 'string',
-	pattern => '(pc|pc(-i440fx)?-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|q35|pc-q35-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|virt(?:-\d+(\.\d+)+)?(\+pve\d+)?)',
-	maxLength => 40,
-	optional => 1,
-});
-
 # FIXME: remove in favor of just using the INotify one, it's cached there exactly the same way
 my $nodename_cache;
 sub nodename {
@@ -1418,24 +1410,24 @@ sub print_drivedevice_full {
 	my $unit = $drive->{index} % $maxdev;
 
 	my $machine_version = extract_version($machine_type, kvm_user_version());
-	my $devicetype  = PVE::QemuServer::Drive::get_scsi_devicetype(
+	my $device_type = PVE::QemuServer::Drive::get_scsi_device_type(
 	    $drive, $storecfg, $machine_version);
 
 	if (!$conf->{scsihw} || $conf->{scsihw} =~ m/^lsi/ || $conf->{scsihw} eq 'pvscsi') {
-	    $device = "scsi-$devicetype,bus=$controller_prefix$controller.0,scsi-id=$unit";
+	    $device = "scsi-$device_type,bus=$controller_prefix$controller.0,scsi-id=$unit";
 	} else {
-	    $device = "scsi-$devicetype,bus=$controller_prefix$controller.0,channel=0,scsi-id=0"
+	    $device = "scsi-$device_type,bus=$controller_prefix$controller.0,channel=0,scsi-id=0"
 	        .",lun=$drive->{index}";
 	}
 	$device .= ",drive=drive-$drive_id,id=$drive_id";
 
-	if ($drive->{ssd} && ($devicetype eq 'block' || $devicetype eq 'hd')) {
+	if ($drive->{ssd} && ($device_type eq 'block' || $device_type eq 'hd')) {
 	    $device .= ",rotation_rate=1";
 	}
 	$device .= ",wwn=$drive->{wwn}" if $drive->{wwn};
 
 	# only scsi-hd and scsi-cd support passing vendor and product information
-	if ($devicetype eq 'hd' || $devicetype eq 'cd') {
+	if ($device_type eq 'hd' || $device_type eq 'cd') {
 	    if (my $vendor = $drive->{vendor}) {
 		$device .= ",vendor=$vendor";
 	    }
@@ -1459,9 +1451,9 @@ sub print_drivedevice_full {
 	    $unit = 0;
 	}
 
-	my $devicetype = ($drive->{media} && $drive->{media} eq 'cdrom') ? "cd" : "hd";
+	my $device_type = ($drive->{media} && $drive->{media} eq 'cdrom') ? "cd" : "hd";
 
-	$device = "ide-$devicetype";
+	$device = "ide-$device_type";
 	if ($drive->{interface} eq 'ide') {
 	    $device .= ",bus=ide.$controller,unit=$unit";
 	} else {
@@ -1469,7 +1461,7 @@ sub print_drivedevice_full {
 	}
 	$device .= ",drive=drive-$drive_id,id=$drive_id";
 
-	if ($devicetype eq 'hd') {
+	if ($device_type eq 'hd') {
 	    if (my $model = $drive->{model}) {
 		$model = URI::Escape::uri_unescape($model);
 		$device .= ",model=$model";
@@ -1810,7 +1802,7 @@ sub print_vga_device {
 	}
     }
 
-    die "no devicetype for $vga->{type}\n" if !$type;
+    die "no device-type for $vga->{type}\n" if !$type;
 
     my $memory = "";
     if ($vgamem_mb) {
@@ -2108,8 +2100,9 @@ sub qemu_created_version_fixups {
     # check if we need to apply some handling for VMs that always use the latest machine version but
     # had a machine version transition happen that affected HW such that, e.g., an OS config change
     # would be required (we do not want to pin machine version for non-windows OS type)
+    my $machine_conf = PVE::QemuServer::Machine::parse_machine($conf->{machine});
     if (
-	(!defined($conf->{machine}) || $conf->{machine} =~ m/^(?:pc|q35|virt)$/) # non-versioned machine
+	(!defined($machine_conf->{type}) || $machine_conf->{type} =~ m/^(?:pc|q35|virt)$/) # non-versioned machine
 	&& (!defined($meta->{'creation-qemu'}) || !min_version($meta->{'creation-qemu'}, 6, 1)) # created before 6.1
 	&& (!$forced_vers || min_version($forced_vers, 6, 1)) # handle snapshot-rollback/migrations
 	&& min_version($kvmver, 6, 1) # only need to apply the change since 6.1
@@ -2603,7 +2596,7 @@ sub check_local_resources {
     foreach my $k (keys %$conf) {
 	if ($k =~ m/^usb/) {
 	    my $entry = parse_property_string('pve-qm-usb', $conf->{$k});
-	    next if $entry->{host} =~ m/^spice$/i;
+	    next if $entry->{host} && $entry->{host} =~ m/^spice$/i;
 	    if ($entry->{mapping}) {
 		$add_missing_mapping->('usb', $k, $entry->{mapping});
 		push @$mapped_res, $k;
@@ -3272,7 +3265,8 @@ sub windows_get_pinned_machine_version {
 sub get_vm_machine {
     my ($conf, $forcemachine, $arch, $add_pve_version, $kvmversion) = @_;
 
-    my $machine = $forcemachine || $conf->{machine};
+    my $machine_conf = PVE::QemuServer::Machine::parse_machine($conf->{machine});
+    my $machine = $forcemachine || $machine_conf->{type};
 
     if (!$machine || $machine =~ m/^(?:pc|q35|virt)$/) {
 	$kvmversion //= kvm_user_version();
@@ -3517,6 +3511,8 @@ sub config_to_command {
     my $winversion = windows_version($ostype);
     my $kvm = $conf->{kvm};
     my $nodename = nodename();
+
+    my $machine_conf = PVE::QemuServer::Machine::parse_machine($conf->{machine});
 
     my $arch = get_vm_arch($conf);
     my $kvm_binary = get_command_for_arch($arch);
@@ -8167,7 +8163,8 @@ sub clone_disk {
     my ($newvmid, $dst_drivename, $efisize) = $dest->@{qw(vmid drivename efisize)};
     my ($storage, $format) = $dest->@{qw(storage format)};
 
-    my $use_drive_mirror = $full && $running && $src_drivename && !$snapname;
+    my $unused = defined($src_drivename) && $src_drivename =~ /^unused/;
+    my $use_drive_mirror = $full && $running && $src_drivename && !$snapname && !$unused;
 
     if ($src_drivename && $dst_drivename && $src_drivename ne $dst_drivename) {
 	die "cloning from/to EFI disk requires EFI disk\n"
@@ -8273,7 +8270,7 @@ no_data_clone:
     my $disk = dclone($drive);
     delete $disk->{format};
     $disk->{file} = $newvolid;
-    $disk->{size} = $size if defined($size);
+    $disk->{size} = $size if defined($size) && !$unused;
 
     return $disk;
 }

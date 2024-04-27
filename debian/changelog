@@ -1,3 +1,52 @@
+qemu-server (8.2.1) bookworm; urgency=medium
+
+  * cpu config: fix get_cpu_bitness always reverting to default cpu type
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 24 Apr 2024 11:49:03 +0200
+
+qemu-server (8.2.0) bookworm; urgency=medium
+
+  * qmeventd: also treat 'prelaunch' and 'suspended' states as active to avoid
+    issues when backing up VMs that currently are in those states.
+
+  * OS type: add Windows Server 2025 as supported, map it to the same virtual
+    hardware profile as the Windows 11 one.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 23 Apr 2024 17:09:20 +0200
+
+qemu-server (8.1.4) bookworm; urgency=medium
+
+  * api: create vm: add missing import for serializing machine type to fix a
+    regression of version 8.1.2.
+
+ -- Proxmox Support Team <support@proxmox.com>  Sat, 20 Apr 2024 12:28:35 +0200
+
+qemu-server (8.1.3) bookworm; urgency=medium
+
+  * firewall: add handling for new nftables based firewall implementation,
+    which currently is a opt-in drop-in replacement for the older iptables-
+    based one.
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 19 Apr 2024 20:23:39 +0200
+
+qemu-server (8.1.2) bookworm; urgency=medium
+
+  * fix #4136: backup: implement fleecing option for improved guest
+    stability when the backup target is slow
+
+  * fix #4474: stop VM: add 'overrule-shutdown' parameter to prevent
+    currently running shutdown tasks from blocking the stop task
+
+  * fix #1905: disk move: allow moving unused disks
+
+  * fix #3784: add vIOMMU parameter to support passthrough of PCI devices to
+    nested virtual machines
+
+  * fix #5363: cloudinit: fix regression to make creation of scsi cloudinit
+    disks possible again
+
+ -- Proxmox Support Team <support@proxmox.com>  Fri, 19 Apr 2024 16:09:18 +0200
+
 qemu-server (8.1.1+port2) bookworm; urgency=medium
 
   * fix query_supported_cpu_flags on aarch64
