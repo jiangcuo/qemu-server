@@ -26,6 +26,7 @@ use PVE::Format qw(render_duration render_bytes);
 
 use PVE::QemuConfig;
 use PVE::QemuServer;
+use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 
@@ -89,10 +90,6 @@ sub prepare {
 	if (!$volume->{included}) {
 	    $self->loginfo("exclude disk '$name' '$volid' ($volume->{reason})");
 	    next;
-	} elsif ($self->{vm_was_running} && $volume_config->{iothread} &&
-		 !PVE::QemuServer::Machine::runs_at_least_qemu_version($vmid, 4, 0, 1)) {
-	    die "disk '$name' '$volid' (iothread=on) can't use backup feature with running QEMU " .
-		"version < 4.0.1! Either set backup=no for this drive or upgrade QEMU and restart VM\n";
 	} else {
 	    my $log = "include disk '$name' '$volid'";
 	    if (defined(my $size = $volume_config->{size})) {
@@ -140,6 +137,7 @@ sub prepare {
 	    path => $path,
 	    volid => $volid,
 	    storeid => $storeid,
+	    size => $size,
 	    format => $format,
 	    virtdev => $ds,
 	    qmdevice => "drive-$ds",
@@ -459,7 +457,7 @@ my $attach_tpmstate_drive = sub {
 
     my $drive = "file=$task->{tpmpath},if=none,read-only=on,id=drive-tpmstate0-backup";
     $drive =~ s/\\/\\\\/g;
-    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"");
+    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"", 60);
     die "attaching TPM drive failed - $ret\n" if $ret !~ m/OK/s;
 };
 
@@ -524,6 +522,121 @@ sub get_and_check_pbs_encryption_config {
     die "internal error - unhandled case for getting & checking PBS encryption ($keyfile, $master_keyfile)!";
 }
 
+my sub cleanup_fleecing_images {
+    my ($self, $disks) = @_;
+
+    for my $di ($disks->@*) {
+	if (my $volid = $di->{'fleece-volid'}) {
+	    eval { PVE::Storage::vdisk_free($self->{storecfg}, $volid); };
+	    $self->log('warn', "error removing fleecing image '$volid' - $@") if $@;
+	}
+    }
+}
+
+my sub allocate_fleecing_images {
+    my ($self, $disks, $vmid, $fleecing_storeid, $format) = @_;
+
+    die "internal error - no fleecing storage specified\n" if !$fleecing_storeid;
+
+    # TODO what about potential left-over images from a failed attempt? Just
+    # auto-remove? While unlikely, could conflict with manually created image from user...
+
+    eval {
+	my $n = 0; # counter for fleecing image names
+
+	for my $di ($disks->@*) {
+	    next if $di->{virtdev} =~ m/^(?:tpmstate|efidisk)\d$/; # too small to be worth it
+	    if ($di->{type} eq 'block' || $di->{type} eq 'file') {
+		my $scfg = PVE::Storage::storage_config($self->{storecfg}, $fleecing_storeid);
+		my $name = "vm-$vmid-fleece-$n";
+		$name .= ".$format" if $scfg->{path};
+
+		my $size = PVE::Tools::convert_size($di->{size}, 'b' => 'kb');
+
+		$di->{'fleece-volid'} = PVE::Storage::vdisk_alloc(
+		    $self->{storecfg}, $fleecing_storeid, $vmid, $format, $name, $size);
+
+		$n++;
+	    } else {
+		die "implement me (type '$di->{type}')";
+	    }
+	}
+    };
+    if (my $err = $@) {
+	cleanup_fleecing_images($self, $disks);
+	die $err;
+    }
+}
+
+my sub detach_fleecing_images {
+    my ($disks, $vmid) = @_;
+
+    return if !PVE::QemuServer::Helpers::vm_running_locally($vmid);
+
+    for my $di ($disks->@*) {
+	if (my $volid = $di->{'fleece-volid'}) {
+	    my $devid = "$di->{qmdevice}-fleecing";
+	    $devid =~ s/^drive-//; # re-added by qemu_drivedel()
+	    eval { PVE::QemuServer::qemu_drivedel($vmid, $devid) };
+	}
+    }
+}
+
+my sub attach_fleecing_images {
+    my ($self, $disks, $vmid, $format) = @_;
+
+    # unconditionally try to remove potential left-overs from a previous backup
+    detach_fleecing_images($disks, $vmid);
+
+    my $vollist = [ map { $_->{'fleece-volid'} } grep { $_->{'fleece-volid'} } $disks->@* ];
+    PVE::Storage::activate_volumes($self->{storecfg}, $vollist);
+
+    for my $di ($disks->@*) {
+	if (my $volid = $di->{'fleece-volid'}) {
+	    $self->loginfo("$di->{qmdevice}: attaching fleecing image $volid to QEMU");
+
+	    my $path = PVE::Storage::path($self->{storecfg}, $volid);
+	    my $devid = "$di->{qmdevice}-fleecing";
+	    my $drive = "file=$path,if=none,id=$devid,format=$format,discard=unmap";
+	    # Specify size explicitly, to make it work if storage backend rounded up size for
+	    # fleecing image when allocating.
+	    $drive .= ",size=$di->{size}" if $format eq 'raw';
+	    $drive =~ s/\\/\\\\/g;
+	    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"", 60);
+	    die "attaching fleecing image $volid failed - $ret\n" if $ret !~ m/OK/s;
+	}
+    }
+}
+
+my sub check_and_prepare_fleecing {
+    my ($self, $vmid, $fleecing_opts, $disks, $is_template, $qemu_support) = @_;
+
+    # Even if the VM was started specifically for fleecing, it's possible that the VM is resumed and
+    # then starts doing IO. For VMs that are not resumed the fleecing images will just stay empty,
+    # so there is no big cost.
+
+    my $use_fleecing = $fleecing_opts && $fleecing_opts->{enabled} && !$is_template;
+
+    if ($use_fleecing && !defined($qemu_support->{'backup-fleecing'})) {
+	$self->log(
+	    'warn',
+	    "running QEMU version does not support backup fleecing - continuing without",
+	);
+	$use_fleecing = 0;
+    }
+
+    if ($use_fleecing) {
+	my ($default_format, $valid_formats) = PVE::Storage::storage_default_format(
+	    $self->{storecfg}, $fleecing_opts->{storage});
+	my $format = scalar(grep { $_ eq 'qcow2' } $valid_formats->@*) ? 'qcow2' : 'raw';
+
+	allocate_fleecing_images($self, $disks, $vmid, $fleecing_opts->{storage}, $format);
+	attach_fleecing_images($self, $disks, $vmid, $format);
+    }
+
+    return $use_fleecing;
+}
+
 sub archive_pbs {
     my ($self, $task, $vmid) = @_;
 
@@ -577,6 +690,7 @@ sub archive_pbs {
 
     # get list early so we die on unkown drive types before doing anything
     my $devlist = _get_task_devlist($task);
+    my $use_fleecing;
 
     $self->enforce_vm_running_for_backup($vmid);
     $self->{qmeventd_fh} = PVE::QemuServer::register_qmeventd_handle($vmid);
@@ -605,6 +719,11 @@ sub archive_pbs {
 
 	$attach_tpmstate_drive->($self, $task, $vmid);
 
+	my $is_template = PVE::QemuConfig->is_template($self->{vmlist}->{$vmid});
+
+	$use_fleecing = check_and_prepare_fleecing(
+	    $self, $vmid, $opts->{fleecing}, $task->{disks}, $is_template, $qemu_support);
+
 	my $fs_frozen = $self->qga_fs_freeze($task, $vmid);
 
 	my $params = {
@@ -616,6 +735,8 @@ sub archive_pbs {
 	    devlist => $devlist,
 	    'config-file' => $conffile,
 	};
+	$params->{fleecing} = JSON::true if $use_fleecing;
+
 	if (defined(my $ns = $scfg->{namespace})) {
 	    $params->{'backup-ns'} = $ns;
 	}
@@ -632,7 +753,6 @@ sub archive_pbs {
 	    $params->{"master-keyfile"} = $master_keyfile if defined($master_keyfile);
 	}
 
-	my $is_template = PVE::QemuConfig->is_template($self->{vmlist}->{$vmid});
 	$params->{'use-dirty-bitmap'} = JSON::true
 	    if $qemu_support->{'pbs-dirty-bitmap'} && !$is_template;
 
@@ -663,6 +783,11 @@ sub archive_pbs {
 	$self->resume_vm_after_job_start($task, $vmid);
     }
     $self->restore_vm_power_state($vmid);
+
+    if ($use_fleecing) {
+	detach_fleecing_images($task->{disks}, $vmid);
+	cleanup_fleecing_images($self, $task->{disks});
+    }
 
     die $err if $err;
 }
@@ -723,8 +848,10 @@ sub archive_vma {
 	$speed = $opts->{bwlimit}*1024;
     }
 
+    my $is_template = PVE::QemuConfig->is_template($self->{vmlist}->{$vmid});
+
     my $diskcount = scalar(@{$task->{disks}});
-    if (PVE::QemuConfig->is_template($self->{vmlist}->{$vmid}) || !$diskcount) {
+    if ($is_template || !$diskcount) {
 	my @pathlist;
 	foreach my $di (@{$task->{disks}}) {
 	    if ($di->{type} eq 'block' || $di->{type} eq 'file') {
@@ -764,6 +891,7 @@ sub archive_vma {
     }
 
     my $devlist = _get_task_devlist($task);
+    my $use_fleecing;
 
     $self->enforce_vm_running_for_backup($vmid);
     $self->{qmeventd_fh} = PVE::QemuServer::register_qmeventd_handle($vmid);
@@ -782,6 +910,9 @@ sub archive_vma {
 	log_warn($@) if $@;
 
 	$attach_tpmstate_drive->($self, $task, $vmid);
+
+	$use_fleecing = check_and_prepare_fleecing(
+	    $self, $vmid, $opts->{fleecing}, $task->{disks}, $is_template, $qemu_support);
 
 	my $outfh;
 	if ($opts->{stdout}) {
@@ -811,6 +942,7 @@ sub archive_vma {
 		devlist => $devlist
 	    };
 	    $params->{'firewall-file'} = $firewall if -e $firewall;
+	    $params->{fleecing} = JSON::true if $use_fleecing;
 	    add_backup_performance_options($params, $opts->{performance}, $qemu_support);
 
 	    $qmpclient->queue_cmd($vmid, $backup_cb, 'backup', %$params);
@@ -851,6 +983,11 @@ sub archive_vma {
     }
 
     $self->restore_vm_power_state($vmid);
+
+    if ($use_fleecing) {
+	detach_fleecing_images($task->{disks}, $vmid);
+	cleanup_fleecing_images($self, $task->{disks});
+    }
 
     if ($err) {
 	if ($cpid) {

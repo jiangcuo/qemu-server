@@ -29,6 +29,7 @@ use PVE::QemuServer;
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CPUConfig;
 use PVE::QemuServer::Drive;
+use PVE::QemuServer::Helpers;
 use PVE::QemuServer::ImportDisk;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::Machine;
@@ -45,8 +46,10 @@ use PVE::API2::Firewall::VM;
 use PVE::API2::Qemu::Agent;
 use PVE::VZDump::Plugin;
 use PVE::DataCenterConfig;
+use PVE::ProcFSTools;
 use PVE::SSHInfo;
 use PVE::Replication;
+use PVE::ReplicationState;
 use PVE::StorageTunnel;
 use PVE::RESTEnvironment qw(log_warn);
 
@@ -313,6 +316,24 @@ my $import_from_volid = sub {
 
     return $cloned->@{qw(file size)};
 };
+
+my sub prohibit_tpm_version_change {
+    my ($old, $new) = @_;
+
+    return if !$old || !$new;
+
+    my $old_drive = PVE::QemuServer::parse_drive('tpmstate0', $old);
+    my $new_drive = PVE::QemuServer::parse_drive('tpmstate0', $new);
+
+    return if $old_drive->{file} ne $new_drive->{file};
+
+    my $old_version = $old_drive->{version} // 'v1.2';
+    my $new_version = $new_drive->{version} // 'v1.2';
+
+    die "cannot change TPM state version after creation\n" if $old_version ne $new_version;
+
+    return;
+}
 
 # Note: $pool is only needed when creating a VM, because pool permissions
 # are automatically inherited if VM already exists inside a pool.
@@ -751,7 +772,7 @@ sub assert_scsi_feature_compatibility {
     my $machine_type = PVE::QemuServer::get_vm_machine($conf, undef, $conf->{arch});
     my $machine_version = PVE::QemuServer::Machine::extract_version(
 	$machine_type, PVE::QemuServer::kvm_user_version());
-    my $drivetype = PVE::QemuServer::Drive::get_scsi_devicetype(
+    my $drivetype = PVE::QemuServer::Drive::get_scsi_device_type(
 	$drive, $storecfg, $machine_version);
 
     if ($drivetype ne 'hd' && $drivetype ne 'cd') {
@@ -1127,13 +1148,16 @@ __PACKAGE__->register_method({
 			$conf->{vmgenid} = PVE::QemuServer::generate_uuid();
 		    }
 
-		    my $machine = $conf->{machine};
+		    my $machine_conf = PVE::QemuServer::Machine::parse_machine($conf->{machine});
+		    my $machine = $machine_conf->{type};
 		    if (!$machine || $machine =~ m/^(?:pc|q35|virt)$/) {
 			# always pin Windows' machine version on create, they get to easily confused
 			if (PVE::QemuServer::Helpers::windows_version($conf->{ostype})) {
-			    $conf->{machine} = PVE::QemuServer::windows_get_pinned_machine_version($machine);
+			    $machine_conf->{type} = PVE::QemuServer::windows_get_pinned_machine_version($machine);
+			    $conf->{machine} = PVE::QemuServer::Machine::print_machine($machine_conf);
 			}
 		    }
+		    PVE::QemuServer::Machine::assert_valid_machine_property($conf, $machine_conf);
 
 		    $conf->{lock} = 'import' if $live_import_mapping;
 
@@ -1566,7 +1590,7 @@ __PACKAGE__->register_method({
 		$item->{value} = $pending;
 		$item->{pending} = $conf->{$opt};
 	    } else {
-		$item->{value} = $conf->{$opt},
+		$item->{value} = $conf->{$opt};
 	    }
 
 	    push @$res, $item;
@@ -1927,6 +1951,7 @@ my $update_vm_api  = sub {
 		    # old drive
 		    if ($conf->{$opt}) {
 			$check_drive_perms->($opt, $conf->{$opt});
+			prohibit_tpm_version_change($conf->{$opt}, $param->{$opt}) if $opt eq 'tpmstate0';
 		    }
 
 		    # new drive
@@ -1995,6 +2020,10 @@ my $update_vm_api  = sub {
 			    { $opt => $conf->{$opt} },
 			);
 		    }
+		    $conf->{pending}->{$opt} = $param->{$opt};
+		} elsif ($opt eq 'machine') {
+		    my $machine_conf = PVE::QemuServer::Machine::parse_machine($param->{$opt});
+		    PVE::QemuServer::Machine::assert_valid_machine_property($conf, $machine_conf);
 		    $conf->{pending}->{$opt} = $param->{$opt};
 		} else {
 		    $conf->{pending}->{$opt} = $param->{$opt};
@@ -3010,8 +3039,8 @@ __PACKAGE__->register_method({
     method => 'POST',
     protected => 1,
     proxyto => 'node',
-    description => "Stop virtual machine. The qemu process will exit immediately. This" .
-	"is akin to pulling the power plug of a running computer and may damage the VM data",
+    description => "Stop virtual machine. The qemu process will exit immediately. This"
+	." is akin to pulling the power plug of a running computer and may damage the VM data.",
     permissions => {
 	check => ['perm', '/vms/{vmid}', [ 'VM.PowerMgmt' ]],
     },
@@ -3034,7 +3063,13 @@ __PACKAGE__->register_method({
 		type => 'boolean',
 		optional => 1,
 		default => 0,
-	    }
+	    },
+	    'overrule-shutdown' => {
+		description => "Try to abort active 'qmshutdown' tasks before stopping.",
+		optional => 1,
+		type => 'boolean',
+		default => 0,
+	    },
 	},
     },
     returns => {
@@ -3061,10 +3096,13 @@ __PACKAGE__->register_method({
 	raise_param_exc({ migratedfrom => "Only root may use this option." })
 	    if $migratedfrom && $authuser ne 'root@pam';
 
+	my $overrule_shutdown = extract_param($param, 'overrule-shutdown');
 
 	my $storecfg = PVE::Storage::config();
 
 	if (PVE::HA::Config::vm_is_ha_managed($vmid) && ($rpcenv->{type} ne 'ha') && !defined($migratedfrom)) {
+	    raise_param_exc({ 'overrule-shutdown' => "Not applicable for HA resources." })
+		if $overrule_shutdown;
 
 	    my $hacmd = sub {
 		my $upid = shift;
@@ -3083,6 +3121,14 @@ __PACKAGE__->register_method({
 		my $upid = shift;
 
 		syslog('info', "stop VM $vmid: $upid\n");
+
+		if ($overrule_shutdown) {
+		    my $overruled_tasks = PVE::GuestHelpers::abort_guest_tasks(
+			$rpcenv, 'qmshutdown', $vmid);
+		    my $overruled_tasks_list = join(", ", $overruled_tasks->@*);
+		    print "overruled qmshutdown tasks: $overruled_tasks_list\n"
+			if @$overruled_tasks;
+		};
 
 		PVE::QemuServer::vm_stop($storecfg, $vmid, $skiplock, 0,
 					 $param->{timeout}, 0, 1, $keepActive, $migratedfrom);
@@ -3149,8 +3195,9 @@ __PACKAGE__->register_method({
     method => 'POST',
     protected => 1,
     proxyto => 'node',
-    description => "Shutdown virtual machine. This is similar to pressing the power button on a physical machine." .
-	"This will send an ACPI event for the guest OS, which should then proceed to a clean shutdown.",
+    description => "Shutdown virtual machine. This is similar to pressing the power button on a"
+	." physical machine. This will send an ACPI event for the guest OS, which should then"
+	." proceed to a clean shutdown.",
     permissions => {
 	check => ['perm', '/vms/{vmid}', [ 'VM.PowerMgmt' ]],
     },
@@ -4358,9 +4405,6 @@ __PACKAGE__->register_method({
 	} elsif ($storeid) {
 	    $rpcenv->check($authuser, "/storage/$storeid", ['Datastore.AllocateSpace']);
 
-	    die "cannot move disk '$disk', only configured disks can be moved to another storage\n"
-		if $disk =~ m/^unused\d+$/;
-
 	    $load_and_check_move->(); # early checks before forking/locking
 
 	    my $realcmd = sub {
@@ -4897,7 +4941,7 @@ __PACKAGE__->register_method({
 
 	my $res = '';
 	eval {
-	    $res = PVE::QemuServer::Monitor::hmp_cmd($vmid, $param->{command});
+	    $res = PVE::QemuServer::Monitor::hmp_cmd($vmid, $param->{command}, 25);
 	};
 	$res = "ERROR: $@" if $@;
 
@@ -5984,8 +6028,12 @@ __PACKAGE__->register_method({
 		} elsif (my $handler = $cmd_handlers->{$cmd}) {
 		    print "received command '$cmd'\n";
 		    eval {
-			if ($cmd_desc->{$cmd}) {
-			    PVE::JSONSchema::validate($parsed, $cmd_desc->{$cmd});
+			if (my $props = $cmd_desc->{$cmd}) {
+			    my $schema = {
+				type => 'object',
+				properties => $props,
+			    };
+			    PVE::JSONSchema::validate($parsed, $schema);
 			} else {
 			    $parsed = {};
 			}

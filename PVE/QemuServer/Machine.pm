@@ -5,6 +5,7 @@ use warnings;
 
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Monitor;
+use PVE::JSONSchema qw(get_standard_option parse_property_string print_property_string);
 
 # Bump this for VM HW layout changes during a release (where the QEMU machine
 # version stays the same)
@@ -12,10 +13,61 @@ our $PVE_MACHINE_VERSION = {
     '4.1' => 2,
 };
 
+my $machine_fmt = {
+    type => {
+	default_key => 1,
+	description => "Specifies the QEMU machine type.",
+	type => 'string',
+	pattern => '(pc|pc(-i440fx)?-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|q35|pc-q35-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|virt(?:-\d+(\.\d+)+)?(\+pve\d+)?)',
+	maxLength => 40,
+	format_description => 'machine type',
+	optional => 1,
+    },
+    viommu => {
+	type => 'string',
+	description => "Enable and set guest vIOMMU variant (Intel vIOMMU needs q35 to be set as"
+	    ." machine type).",
+	enum => ['intel', 'virtio'],
+	optional => 1,
+    },
+};
+
+PVE::JSONSchema::register_format('pve-qemu-machine-fmt', $machine_fmt);
+
+PVE::JSONSchema::register_standard_option('pve-qemu-machine', {
+    description => "Specify the QEMU machine.",
+    type => 'string',
+    optional => 1,
+    format => PVE::JSONSchema::get_format('pve-qemu-machine-fmt'),
+});
+
+sub parse_machine {
+    my ($value) = @_;
+
+    return if !$value;
+
+    my $res = parse_property_string($machine_fmt, $value);
+    return $res;
+}
+
+sub print_machine {
+    my ($machine_conf) = @_;
+    return print_property_string($machine_conf, $machine_fmt);
+}
+
+sub assert_valid_machine_property {
+    my ($conf, $machine_conf) = @_;
+    my $q35 = $machine_conf->{type} && ($machine_conf->{type} =~ m/q35/) ? 1 : 0;
+    if ($machine_conf->{viommu} && $machine_conf->{viommu} eq "intel" && !$q35) {
+	die "to use Intel vIOMMU please set the machine type to q35\n";
+    }
+}
+
 sub machine_type_is_q35 {
     my ($conf) = @_;
 
-    return $conf->{machine} && ($conf->{machine} =~ m/q35/) ? 1 : 0;
+    my $machine_conf = parse_machine($conf->{machine});
+    return $machine_conf->{type} && ($machine_conf->{type} =~ m/q35/) ? 1 : 0;
 }
 
 # In list context, also returns whether the current machine is deprecated or not.
@@ -126,7 +178,8 @@ sub qemu_machine_pxe {
 
     my $machine =  get_current_qemu_machine($vmid);
 
-    if ($conf->{machine} && $conf->{machine} =~ m/\.pxe$/) {
+    my $machine_conf = parse_machine($conf->{machine});
+    if ($machine_conf->{type} && $machine_conf->{type} =~ m/\.pxe$/) {
 	$machine .= '.pxe';
     }
 

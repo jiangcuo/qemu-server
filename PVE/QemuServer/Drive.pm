@@ -394,7 +394,7 @@ my %tpmversion_fmt = (
 	description => "The TPM interface version. v2.0 is newer and should be preferred."
 	    ." Note that this cannot be changed later on.",
 	optional => 1,
-	default => 'v2.0',
+	default => 'v1.2',
     },
 );
 my $tpmstate_fmt = {
@@ -848,12 +848,12 @@ sub path_is_scsi {
     return $res;
 }
 
-sub get_scsi_devicetype {
+sub get_scsi_device_type {
     my ($drive, $storecfg, $machine_version) = @_;
 
     my $devicetype = 'hd';
     my $path = '';
-    if (drive_is_cdrom($drive)) {
+    if (drive_is_cdrom($drive) || drive_is_cloudinit($drive)) {
 	$devicetype = 'cd';
     } else {
 	if ($drive->{file} =~ m|^/|) {
