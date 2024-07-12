@@ -1,3 +1,9 @@
+qemu-server (8.2.1+port1) bookworm; urgency=medium
+
+  * fix get_cpu_bitness error
+
+ -- jiangcuo <jiangcuo@bingsin.com>  Fri, 12 Jul 2024 09:29:38 +0000
+
 qemu-server (8.2.1) bookworm; urgency=medium
 
   * cpu config: fix get_cpu_bitness always reverting to default cpu type
