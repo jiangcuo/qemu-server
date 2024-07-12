@@ -695,8 +695,11 @@ sub get_cpu_bitness {
     }
 
     return $cputypes_32bit->{$cputype} ? 32 : 64 if $arch eq 'x86_64';
-    return 64 if $arch eq 'aarch64';
-
+    if ( $arch eq 'aarch64' ||  $arch eq 'loongarch64' ||  $arch eq 'riscv64' ){
+	return 64;
+     }else{
+     	return 32;
+     }
     die "unsupported architecture '$arch'\n";
 }
 
