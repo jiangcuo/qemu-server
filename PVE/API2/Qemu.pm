@@ -29,6 +29,7 @@ use PVE::QemuServer;
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CPUConfig;
 use PVE::QemuServer::Drive;
+use PVE::QemuServer::Helpers;
 use PVE::QemuServer::ImportDisk;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::Machine;
@@ -45,8 +46,10 @@ use PVE::API2::Firewall::VM;
 use PVE::API2::Qemu::Agent;
 use PVE::VZDump::Plugin;
 use PVE::DataCenterConfig;
+use PVE::ProcFSTools;
 use PVE::SSHInfo;
 use PVE::Replication;
+use PVE::ReplicationState;
 use PVE::StorageTunnel;
 use PVE::RESTEnvironment qw(log_warn);
 
@@ -313,6 +316,24 @@ my $import_from_volid = sub {
 
     return $cloned->@{qw(file size)};
 };
+
+my sub prohibit_tpm_version_change {
+    my ($old, $new) = @_;
+
+    return if !$old || !$new;
+
+    my $old_drive = PVE::QemuServer::parse_drive('tpmstate0', $old);
+    my $new_drive = PVE::QemuServer::parse_drive('tpmstate0', $new);
+
+    return if $old_drive->{file} ne $new_drive->{file};
+
+    my $old_version = $old_drive->{version} // 'v1.2';
+    my $new_version = $new_drive->{version} // 'v1.2';
+
+    die "cannot change TPM state version after creation\n" if $old_version ne $new_version;
+
+    return;
+}
 
 # Note: $pool is only needed when creating a VM, because pool permissions
 # are automatically inherited if VM already exists inside a pool.
@@ -640,8 +661,12 @@ my sub check_usb_perm {
     $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.HWType']);
 
     my $device = PVE::JSONSchema::parse_property_string('pve-qm-usb', $value);
-    if ($device->{host} && $device->{host} !~ m/^spice$/i) {
-	die "only root can set '$opt' config for real devices\n";
+    if ($device->{host}) {
+	if ($device->{host} =~ m/^spice$/i) {
+	    # already checked generic permission above
+	} else {
+	    die "only root can set '$opt' config for real devices\n";
+	}
     } elsif ($device->{mapping}) {
 	$rpcenv->check_full($authuser, "/mapping/usb/$device->{mapping}", ['Mapping.Use']);
     } else {
@@ -1569,7 +1594,7 @@ __PACKAGE__->register_method({
 		$item->{value} = $pending;
 		$item->{pending} = $conf->{$opt};
 	    } else {
-		$item->{value} = $conf->{$opt},
+		$item->{value} = $conf->{$opt};
 	    }
 
 	    push @$res, $item;
@@ -1648,12 +1673,6 @@ my $update_vm_api  = sub {
     my $background_delay = extract_param($param, 'background_delay');
 
     my $skip_cloud_init = extract_param($param, 'skip_cloud_init');
-
-    if (defined(my $cipassword = $param->{cipassword})) {
-	# Same logic as in cloud-init (but with the regex fixed...)
-	$param->{cipassword} = PVE::Tools::encrypt_pw($cipassword)
-	    if $cipassword !~ /^\$(?:[156]|2[ay])(\$.+){2}/;
-    }
 
     my @paramarr = (); # used for log message
     foreach my $key (sort keys %$param) {
@@ -1930,6 +1949,7 @@ my $update_vm_api  = sub {
 		    # old drive
 		    if ($conf->{$opt}) {
 			$check_drive_perms->($opt, $conf->{$opt});
+			prohibit_tpm_version_change($conf->{$opt}, $param->{$opt}) if $opt eq 'tpmstate0';
 		    }
 
 		    # new drive
@@ -2003,6 +2023,13 @@ my $update_vm_api  = sub {
 		    my $machine_conf = PVE::QemuServer::Machine::parse_machine($param->{$opt});
 		    PVE::QemuServer::Machine::assert_valid_machine_property($conf, $machine_conf);
 		    $conf->{pending}->{$opt} = $param->{$opt};
+		} elsif ($opt eq 'cipassword') {
+		    if (!PVE::QemuServer::Helpers::windows_version($conf->{ostype})) {
+			# Same logic as in cloud-init (but with the regex fixed...)
+			$param->{cipassword} = PVE::Tools::encrypt_pw($param->{cipassword})
+			    if $param->{cipassword} !~ /^\$(?:[156]|2[ay])(\$.+){2}/;
+		    }
+		    $conf->{cipassword} = $param->{cipassword};
 		} else {
 		    $conf->{pending}->{$opt} = $param->{$opt};
 
@@ -4919,7 +4946,7 @@ __PACKAGE__->register_method({
 
 	my $res = '';
 	eval {
-	    $res = PVE::QemuServer::Monitor::hmp_cmd($vmid, $param->{command});
+	    $res = PVE::QemuServer::Monitor::hmp_cmd($vmid, $param->{command}, 25);
 	};
 	$res = "ERROR: $@" if $@;
 
@@ -6006,8 +6033,12 @@ __PACKAGE__->register_method({
 		} elsif (my $handler = $cmd_handlers->{$cmd}) {
 		    print "received command '$cmd'\n";
 		    eval {
-			if ($cmd_desc->{$cmd}) {
-			    PVE::JSONSchema::validate($parsed, $cmd_desc->{$cmd});
+			if (my $props = $cmd_desc->{$cmd}) {
+			    my $schema = {
+				type => 'object',
+				properties => $props,
+			    };
+			    PVE::JSONSchema::validate($parsed, $schema);
 			} else {
 			    $parsed = {};
 			}

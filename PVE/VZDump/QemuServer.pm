@@ -90,10 +90,6 @@ sub prepare {
 	if (!$volume->{included}) {
 	    $self->loginfo("exclude disk '$name' '$volid' ($volume->{reason})");
 	    next;
-	} elsif ($self->{vm_was_running} && $volume_config->{iothread} &&
-		 !PVE::QemuServer::Machine::runs_at_least_qemu_version($vmid, 4, 0, 1)) {
-	    die "disk '$name' '$volid' (iothread=on) can't use backup feature with running QEMU " .
-		"version < 4.0.1! Either set backup=no for this drive or upgrade QEMU and restart VM\n";
 	} else {
 	    my $log = "include disk '$name' '$volid'";
 	    if (defined(my $size = $volume_config->{size})) {
@@ -461,7 +457,7 @@ my $attach_tpmstate_drive = sub {
 
     my $drive = "file=$task->{tpmpath},if=none,read-only=on,id=drive-tpmstate0-backup";
     $drive =~ s/\\/\\\\/g;
-    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"");
+    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"", 60);
     die "attaching TPM drive failed - $ret\n" if $ret !~ m/OK/s;
 };
 
@@ -606,7 +602,7 @@ my sub attach_fleecing_images {
 	    # fleecing image when allocating.
 	    $drive .= ",size=$di->{size}" if $format eq 'raw';
 	    $drive =~ s/\\/\\\\/g;
-	    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"");
+	    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"", 60);
 	    die "attaching fleecing image $volid failed - $ret\n" if $ret !~ m/OK/s;
 	}
     }

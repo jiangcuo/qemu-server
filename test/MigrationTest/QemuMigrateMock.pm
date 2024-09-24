@@ -152,6 +152,9 @@ $MigrationTest::Shared::qemu_server_module->mock(
 	}
 	return;
     },
+    qemu_drive_mirror_switch_to_active_mode => sub {
+	return;
+    },
     set_migration_caps => sub {
 	return;
     },
@@ -184,6 +187,13 @@ $qemu_server_machine_module->mock(
 	die "invalid test: no runningmachine specified\n"
 	    if !defined($vm_status->{runningmachine});
 	return $vm_status->{runningmachine};
+    },
+);
+
+my $qemu_server_qmphelpers_module = Test::MockModule->new("PVE::QemuServer::QMPHelpers");
+$qemu_server_qmphelpers_module->mock(
+    runs_at_least_qemu_version => sub {
+	return 1;
     },
 );
 

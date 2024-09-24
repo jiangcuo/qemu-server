@@ -7,14 +7,17 @@ use IO::File;
 use IPC::Open2;
 use Time::HiRes qw( usleep );
 
+use PVE::AccessControl;
 use PVE::Cluster;
 use PVE::Format qw(render_bytes);
 use PVE::GuestHelpers qw(safe_boolean_ne safe_string_ne);
 use PVE::INotify;
+use PVE::JSONSchema;
 use PVE::RPCEnvironment;
 use PVE::Replication;
 use PVE::ReplicationConfig;
 use PVE::ReplicationState;
+use PVE::Storage::Plugin;
 use PVE::Storage;
 use PVE::StorageTunnel;
 use PVE::Tools;
@@ -27,6 +30,7 @@ use PVE::QemuServer::Helpers qw(min_version);
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::Memory qw(get_current_memory);
+use PVE::QemuServer::QMPHelpers;
 use PVE::QemuServer;
 
 use PVE::AbstractMigrate;
@@ -541,12 +545,6 @@ sub handle_replication {
 	if $self->{opts}->{remote};
 
     if ($self->{running}) {
-
-	my $version = PVE::QemuServer::kvm_user_version();
-	if (!min_version($version, 4, 2)) {
-	    die "can't live migrate VM with replicated volumes, pve-qemu to old (< 4.2)!\n"
-	}
-
 	my @live_replicatable_volumes = $self->filter_local_volumes('online', 1);
 	foreach my $volid (@live_replicatable_volumes) {
 	    my $drive = $local_volumes->{$volid}->{drivename};
@@ -1097,7 +1095,9 @@ sub phase2 {
 	die "only UNIX sockets are supported for remote migration\n"
 	    if $tunnel_info->{proto} ne 'unix';
 
-	my $remote_socket = $tunnel_info->{addr};
+	# untaint
+	my ($remote_socket) = $tunnel_info->{addr} =~ m|^(/run/qemu-server/\d+\.migrate)$|
+	    or die "unexpected socket address '$tunnel_info->{addr}'\n";
 	my $local_socket = $remote_socket;
 	$local_socket =~ s/$remote_vmid/$vmid/g;
 	$tunnel_info->{addr} = $local_socket;
@@ -1106,6 +1106,9 @@ sub phase2 {
 	PVE::Tunnel::forward_unix_socket($self->{tunnel}, $local_socket, $remote_socket);
 
 	foreach my $remote_socket (@{$tunnel_info->{unix_sockets}}) {
+	    # untaint
+	    ($remote_socket) = $remote_socket =~ m|^(/run/qemu-server/(?:(?!\.\./).)+\.migrate)$|
+		or die "unexpected socket address '$remote_socket'\n";
 	    my $local_socket = $remote_socket;
 	    $local_socket =~ s/$remote_vmid/$vmid/g;
 	    next if $self->{tunnel}->{forwarded}->{$local_socket};
@@ -1141,6 +1144,14 @@ sub phase2 {
 
 	    $self->log('info', "$drive: start migration to $nbd_uri");
 	    PVE::QemuServer::qemu_drive_mirror($vmid, $drive, $nbd_uri, $vmid, undef, $self->{storage_migration_jobs}, 'skip', undef, $bwlimit, $bitmap);
+	}
+
+	if (PVE::QemuServer::QMPHelpers::runs_at_least_qemu_version($vmid, 8, 2)) {
+	    $self->log('info', "switching mirror jobs to actively synced mode");
+	    PVE::QemuServer::qemu_drive_mirror_switch_to_active_mode(
+		$vmid,
+		$self->{storage_migration_jobs},
+	    );
 	}
     }
 

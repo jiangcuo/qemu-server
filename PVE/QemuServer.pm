@@ -195,7 +195,7 @@ my $agent_fmt = {
 
 my $vga_fmt = {
     type => {
-	description => "Select the VGA type.",
+	description => "Select the VGA type. Using type 'cirrus' is not recommended.",
 	type => 'string',
 	default => 'std',
 	optional => 1,
@@ -595,7 +595,10 @@ EODESCR
     migrate_downtime => {
 	optional => 1,
 	type => 'number',
-	description => "Set maximum tolerated downtime (in seconds) for migrations.",
+	description => "Set maximum tolerated downtime (in seconds) for migrations. Should the"
+	    ." migration not be able to converge in the very end, because too much newly dirtied"
+	    ." RAM needs to be transferred, the limit will be increased automatically step-by-step"
+	    ." until migration can converge.",
 	minimum => 0,
 	default => 0.1,
     },
@@ -3173,9 +3176,9 @@ sub start_swtpm {
 	    "--not-overwrite", # ignore existing state, do not modify
 	];
 
-	push @$setup_cmd, "--tpm2" if $tpm->{version} eq 'v2.0';
+	push @$setup_cmd, "--tpm2" if $tpm->{version} && $tpm->{version} eq 'v2.0';
 	# TPM 2.0 supports ECC crypto, use if possible
-	push @$setup_cmd, "--ecc" if $tpm->{version} eq 'v2.0';
+	push @$setup_cmd, "--ecc" if $tpm->{version} && $tpm->{version} eq 'v2.0';
 
 	run_command($setup_cmd, outfunc => sub {
 	    print "swtpm_setup: $1\n";
@@ -3199,7 +3202,7 @@ sub start_swtpm {
 	"--log",
 	"file=/run/qemu-server/$vmid-swtpm.log,level=1,prefix=$log_prefix",
     ];
-    push @$emulator_cmd, "--tpm2" if $tpm->{version} eq 'v2.0';
+    push @$emulator_cmd, "--tpm2" if $tpm->{version} && $tpm->{version} eq 'v2.0';
     run_command($emulator_cmd, outfunc => sub { print $1; });
 
     my $tries = 100; # swtpm may take a bit to start before daemonizing, wait up to 5s for pid
@@ -3500,9 +3503,52 @@ my sub print_ovmf_drive_commandlines {
     return ("if=pflash,unit=0,format=raw,readonly=on,file=$ovmf_code", $var_drive_str);
 }
 
+my sub get_vga_properties {
+    my ($conf, $arch, $machine_version, $winversion) = @_;
+
+    my $vga = parse_vga($conf->{vga});
+
+    my $qxlnum = vga_conf_has_spice($conf->{vga});
+    $vga->{type} = 'qxl' if $qxlnum;
+
+    if (!$vga->{type}) {
+	if ($arch eq 'aarch64') {
+	    $vga->{type} = 'virtio';
+	} elsif (min_version($machine_version, 2, 9)) {
+	    $vga->{type} = (!$winversion || $winversion >= 6) ? 'std' : 'cirrus';
+	} else {
+	    $vga->{type} = ($winversion >= 6) ? 'std' : 'cirrus';
+	}
+    }
+
+    return ($vga, $qxlnum);
+}
+
 sub config_to_command {
     my ($storecfg, $vmid, $conf, $defaults, $forcemachine, $forcecpu,
         $live_restore_backing) = @_;
+
+    # minimize config for templates, they can only start for backup,
+    # so most options besides the disks are irrelevant
+    if (PVE::QemuConfig->is_template($conf)) {
+	my $newconf = {
+	    template => 1, # in case below code checks that
+	    kvm => 0, # to prevent an error on hosts without virtualization extensions
+	    vga => 'none', # to not start a vnc server
+	    scsihw => $conf->{scsihw}, # so that the scsi disks are correctly added
+	    bios => $conf->{bios}, # so efidisk gets included if it exists
+	    name => $conf->{name}, # so it's correct in the process list
+	};
+
+	# copy all disks over
+	for my $device (PVE::QemuServer::Drive::valid_drive_names()) {
+	    $newconf->{$device} = $conf->{$device};
+	}
+
+	# remaining configs stay default
+
+	$conf = $newconf;
+    }
 
     my ($globalFlags, $machineFlags, $rtcFlags) = ([], [], []);
     my $devices = [];
@@ -3651,20 +3697,8 @@ sub config_to_command {
     my @usbcontrollers = PVE::QemuServer::USB::get_usb_controllers(
 	$conf, $bridges, $arch, $machine_type, $machine_version);
     push @$devices, @usbcontrollers if @usbcontrollers;
-    my $vga = parse_vga($conf->{vga});
 
-    my $qxlnum = vga_conf_has_spice($conf->{vga});
-    $vga->{type} = 'qxl' if $qxlnum;
-
-    if (!$vga->{type}) {
-	if ($arch eq 'aarch64') {
-	    $vga->{type} = 'virtio';
-	} elsif (min_version($machine_version, 2, 9)) {
-	    $vga->{type} = (!$winversion || $winversion >= 6) ? 'std' : 'cirrus';
-	} else {
-	    $vga->{type} = ($winversion >= 6) ? 'std' : 'cirrus';
-	}
-    }
+    my ($vga, $qxlnum) = get_vga_properties($conf, $arch, $machine_version, $winversion);
 
     # enable absolute mouse coordinates (needed by vnc)
     my $tablet = $conf->{tablet};
@@ -4386,7 +4420,7 @@ sub qemu_driveadd {
     my $io_uring = min_version($kvmver, 6, 0);
     my $drive = print_drive_commandline_full($storecfg, $vmid, $device, undef, $io_uring);
     $drive =~ s/\\/\\\\/g;
-    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"");
+    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"", 60);
 
     # If the command succeeds qemu prints: "OK"
     return 1 if $ret =~ m/OK/s;
@@ -4397,7 +4431,7 @@ sub qemu_driveadd {
 sub qemu_drivedel {
     my ($vmid, $deviceid) = @_;
 
-    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_del drive-$deviceid");
+    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_del drive-$deviceid", 10 * 60);
     $ret =~ s/^\s+//;
 
     return 1 if $ret eq "";
@@ -5075,8 +5109,8 @@ sub vmconfig_hotplug_pending {
 		my $new_cpuunits = PVE::CGroup::clamp_cpu_shares($conf->{pending}->{$opt}); #clamp
 		$cgroup->change_cpu_shares($new_cpuunits);
 	    } elsif ($opt eq 'cpulimit') {
-		my $cpulimit = $conf->{pending}->{$opt} == 0 ? -1 : int($conf->{pending}->{$opt} * 100000);
-		$cgroup->change_cpu_quota($cpulimit, 100000);
+		my $cpulimit = $conf->{pending}->{$opt} == 0 ? undef : int($conf->{pending}->{$opt} * 100);
+		$cgroup->change_cpu_quota($cpulimit, undef);
 	    } elsif ($opt eq 'agent') {
 		vmconfig_update_agent($conf, $opt, $value);
 	    } else {
@@ -5229,10 +5263,11 @@ sub vmconfig_apply_pending {
 			safe_string_ne($old_net->{macaddr}, $new_net->{macaddr})
 		    )) {
 			PVE::Network::SDN::Vnets::del_ips_from_mac($old_net->{bridge}, $old_net->{macaddr}, $conf->{name});
+			PVE::Network::SDN::Vnets::add_next_free_cidr($new_net->{bridge}, $conf->{name}, $new_net->{macaddr}, $vmid, undef, 1);
 		    }
+		} else {
+		    PVE::Network::SDN::Vnets::add_next_free_cidr($new_net->{bridge}, $conf->{name}, $new_net->{macaddr}, $vmid, undef, 1);
 		}
-		#fixme: reuse ip if mac change && same bridge
-		PVE::Network::SDN::Vnets::add_next_free_cidr($new_net->{bridge}, $conf->{name}, $new_net->{macaddr}, $vmid, undef, 1);
 	    }
 	};
 	if (my $err = $@) {
@@ -5314,20 +5349,18 @@ sub vmconfig_update_net {
 		    PVE::Network::tap_plug($iface, $newnet->{bridge}, $newnet->{tag}, $newnet->{firewall}, $newnet->{trunks}, $newnet->{rate});
 		}
 
-		#set link_up in guest if bridge or vlan change to notify guest (dhcp renew for example)
-		if (safe_string_ne($oldnet->{bridge}, $newnet->{bridge}) ||
-		    safe_num_ne($oldnet->{tag}, $newnet->{tag})
-		) {
-		    qemu_set_link_status($vmid, $opt, 1);
-		}
-
 	    } elsif (safe_num_ne($oldnet->{rate}, $newnet->{rate})) {
 		# Rate can be applied on its own but any change above needs to
 		# include the rate in tap_plug since OVS resets everything.
 		PVE::Network::tap_rate_limit($iface, $newnet->{rate});
 	    }
 
-	    if (safe_string_ne($oldnet->{link_down}, $newnet->{link_down})) {
+	    # set link_down on changed bridge/tag as well, because we detach the
+	    # network device in the section above if the bridge or tag changed
+	    if (safe_string_ne($oldnet->{link_down}, $newnet->{link_down})
+		|| safe_string_ne($oldnet->{bridge}, $newnet->{bridge})
+		|| safe_num_ne($oldnet->{tag}, $newnet->{tag})
+	    ) {
 		qemu_set_link_status($vmid, $opt, !$newnet->{link_down});
 	    }
 
@@ -6143,6 +6176,9 @@ sub get_vm_volumes {
 sub cleanup_pci_devices {
     my ($vmid, $conf) = @_;
 
+    # templates don't use pci devices
+    return if $conf->{template};
+
     foreach my $key (keys %$conf) {
 	next if $key !~ m/^hostpci(\d+)$/;
 	my $hostpciindex = $1;
@@ -6181,14 +6217,6 @@ sub vm_stop_cleanup {
 	if (!$keepActive) {
 	    my $vollist = get_vm_volumes($conf);
 	    PVE::Storage::deactivate_volumes($storecfg, $vollist);
-
-	    if (my $tpmdrive = $conf->{tpmstate0}) {
-		my $tpm = parse_drive("tpmstate0", $tpmdrive);
-		my ($storeid, $volname) = PVE::Storage::parse_volume_id($tpm->{file}, 1);
-		if ($storeid) {
-		    PVE::Storage::unmap_volume($storecfg, $tpm->{file});
-		}
-	    }
 	}
 
 	foreach my $ext (qw(mon qmp pid vnc qga)) {
@@ -6412,7 +6440,8 @@ sub vm_suspend {
 	    if ($err) {
 		# cleanup, but leave suspending lock, to indicate something went wrong
 		eval {
-		    mon_cmd($vmid, "savevm-end");
+		    eval { mon_cmd($vmid, "savevm-end"); };
+		    warn $@ if $@;
 		    PVE::Storage::deactivate_volumes($storecfg, [$vmstate]);
 		    PVE::Storage::vdisk_free($storecfg, $vmstate);
 		    delete $conf->@{qw(vmstate runningmachine runningcpu)};
@@ -6439,7 +6468,9 @@ sub vm_resume {
     my ($vmid, $skiplock, $nocheck) = @_;
 
     PVE::QemuConfig->lock_config($vmid, sub {
-	my $res = mon_cmd($vmid, 'query-status');
+	# After migration, the VM might not immediately be able to respond to QMP commands, because
+	# activating the block devices might take a bit of time.
+	my $res = mon_cmd($vmid, 'query-status', timeout => 60);
 	my $resume_cmd = 'cont';
 	my $reset = 0;
 	my $conf;
@@ -7274,6 +7305,7 @@ sub pbs_live_restore {
 	    mon_cmd($vmid, 'block-stream',
 		'job-id' => $job_id,
 		device => "$ds",
+		'auto-dismiss' => JSON::false,
 	    );
 	    $jobs->{$job_id} = {};
 	}
@@ -7360,6 +7392,7 @@ sub live_import_from_files {
 	    mon_cmd($vmid, 'block-stream',
 		'job-id' => $job_id,
 		device => "drive-$ds",
+		'auto-dismiss' => JSON::false,
 	    );
 	    $jobs->{$job_id} = {};
 	}
@@ -7542,15 +7575,17 @@ sub restore_vma_archive {
     my $oldtimeout;
 
     eval {
+	my $timeout_message = "got timeout preparing VMA restore\n";
 	# enable interrupts
 	local $SIG{INT} =
 	    local $SIG{TERM} =
 	    local $SIG{QUIT} =
 	    local $SIG{HUP} =
 	    local $SIG{PIPE} = sub { die "interrupted by signal\n"; };
-	local $SIG{ALRM} = sub { die "got timeout\n"; };
+	local $SIG{ALRM} = sub { die $timeout_message; };
 
-	$oldtimeout = alarm(5); # for reading the VMA header - might hang with a corrupted one
+	$oldtimeout = alarm(60); # for reading the VMA header - might hang with a corrupted one
+	$timeout_message = "got timeout reading VMA header - corrupted?\n";
 
 	my $parser = sub {
 	    my $line = shift;
@@ -7561,6 +7596,7 @@ sub restore_vma_archive {
 		my ($dev_id, $size, $devname) = ($1, $2, $3);
 		$devinfo->{$devname} = { size => $size, dev_id => $dev_id };
 	    } elsif ($line =~ m/^CTIME: /) {
+		$timeout_message = "got timeout during VMA restore\n";
 		# we correctly received the vma config, so we can disable
 		# the timeout now for disk allocation
 		alarm($oldtimeout || 0);
@@ -7927,7 +7963,14 @@ sub qemu_drive_mirror {
 	$qemu_target = $is_zero_initialized ? "zeroinit:$dst_path" : $dst_path;
     }
 
-    my $opts = { timeout => 10, device => "drive-$drive", mode => "existing", sync => "full", target => $qemu_target };
+    my $opts = {
+	timeout => 10,
+	device => "drive-$drive",
+	mode => "existing",
+	sync => "full",
+	target => $qemu_target,
+	'auto-dismiss' => JSON::false,
+    };
     $opts->{format} = $format if $format;
 
     if (defined($src_bitmap)) {
@@ -7995,6 +8038,9 @@ sub qemu_drive_mirror_monitor {
 		}
 
 		die "$job_id: '$op' has been cancelled\n" if !defined($job);
+
+		qemu_handle_concluded_blockjob($vmid, $job_id, $job)
+		    if $job && $job->{status} eq 'concluded';
 
 		my $busy = $job->{busy};
 		my $ready = $job->{ready};
@@ -8064,7 +8110,7 @@ sub qemu_drive_mirror_monitor {
 
 		    for my $job_id (sort keys %$jobs) {
 			# try to switch the disk if source and destination are on the same guest
-			print "$job_id: Completing block job_id...\n";
+			print "$job_id: Completing block job...\n";
 
 			my $op;
 			if ($completion eq 'complete') {
@@ -8075,10 +8121,13 @@ sub qemu_drive_mirror_monitor {
 			    die "invalid completion value: $completion\n";
 			}
 			eval { mon_cmd($vmid, $op, device => $job_id) };
-			if ($@ =~ m/cannot be completed/) {
+			my $err = $@;
+			if ($err && $err =~ m/cannot be completed/) {
 			    print "$job_id: block job cannot be completed, trying again.\n";
 			    $err_complete++;
-			}else {
+			} elsif ($err) {
+			    die "$job_id: block job cannot be completed - $err\n";
+			} else {
 			    print "$job_id: Completed successfully.\n";
 			    $jobs->{$job_id}->{complete} = 1;
 			}
@@ -8094,6 +8143,19 @@ sub qemu_drive_mirror_monitor {
 	eval { PVE::QemuServer::qemu_blockjobs_cancel($vmid, $jobs) };
 	die "block job ($op) error: $err";
     }
+}
+
+# If the job was started with auto-dismiss=false, it's necessary to dismiss it manually. Using this
+# option is useful to get the error for failed jobs here. QEMU's job lock should make it impossible
+# to see a job in 'concluded' state when auto-dismiss=true.
+# $info is the 'BlockJobInfo' for the job returned by query-block-jobs.
+sub qemu_handle_concluded_blockjob {
+    my ($vmid, $job_id, $info) = @_;
+
+    eval { mon_cmd($vmid, 'job-dismiss', id => $job_id); };
+    log_warn("$job_id: failed to dismiss job - $@") if $@;
+
+    die "$job_id: $info->{error} (io-status: $info->{'io-status'})\n" if $info->{error};
 }
 
 sub qemu_blockjobs_cancel {
@@ -8114,14 +8176,71 @@ sub qemu_blockjobs_cancel {
 	}
 
 	foreach my $job (keys %$jobs) {
+	    my $info = $running_jobs->{$job};
+	    eval {
+		qemu_handle_concluded_blockjob($vmid, $job, $info)
+		    if $info && $info->{status} eq 'concluded';
+	    };
+	    log_warn($@) if $@; # only warn and proceed with canceling other jobs
 
-	    if (defined($jobs->{$job}->{cancel}) && !defined($running_jobs->{$job})) {
+	    if (defined($jobs->{$job}->{cancel}) && !defined($info)) {
 		print "$job: Done.\n";
 		delete $jobs->{$job};
 	    }
 	}
 
 	last if scalar(keys %$jobs) == 0;
+
+	sleep 1;
+    }
+}
+
+# Callers should version guard this (only available with a binary >= QEMU 8.2)
+sub qemu_drive_mirror_switch_to_active_mode {
+    my ($vmid, $jobs) = @_;
+
+    my $switching = {};
+
+    for my $job (sort keys $jobs->%*) {
+	print "$job: switching to actively synced mode\n";
+
+	eval {
+	    mon_cmd(
+		$vmid,
+		"block-job-change",
+		id => $job,
+		type => 'mirror',
+		'copy-mode' => 'write-blocking',
+	    );
+	    $switching->{$job} = 1;
+	};
+	die "could not switch mirror job $job to active mode - $@\n" if $@;
+    }
+
+    while (1) {
+	my $stats = mon_cmd($vmid, "query-block-jobs");
+
+	my $running_jobs = {};
+	$running_jobs->{$_->{device}} = $_ for $stats->@*;
+
+	for my $job (sort keys $switching->%*) {
+	    die "$job: vanished while switching to active mode\n" if !$running_jobs->{$job};
+
+	    my $info = $running_jobs->{$job};
+	    if ($info->{status} eq 'concluded') {
+		qemu_handle_concluded_blockjob($vmid, $job, $info);
+		# The 'concluded' state should occur here if and only if the job failed, so the
+		# 'die' below should be unreachable, but play it safe.
+		die "$job: expected job to have failed, but no error was set\n";
+	    }
+
+	    if ($info->{'actively-synced'}) {
+		print "$job: successfully switched to actively synced mode\n";
+		delete $switching->{$job};
+	    }
+	}
+
+	last if scalar(keys $switching->%*) == 0;
 
 	sleep 1;
     }
@@ -8226,7 +8345,7 @@ sub clone_disk {
 	    # when cloning multiple disks (e.g. during clone_vm) it might be the last disk
 	    # if this is the case, we have to complete any block-jobs still there from
 	    # previous drive-mirrors
-	    if (($completion eq 'complete') && (scalar(keys %$jobs) > 0)) {
+	    if (($completion && $completion eq 'complete') && (scalar(keys %$jobs) > 0)) {
 		qemu_drive_mirror_monitor($vmid, $newvmid, $jobs, $completion, $qga);
 	    }
 	    goto no_data_clone;
@@ -8597,7 +8716,7 @@ sub complete_backup_archives {
     my $res = [];
     foreach my $id (keys %$data) {
 	foreach my $item (@{$data->{$id}}) {
-	    next if $item->{format} !~ m/^vma\.(${\PVE::Storage::Plugin::COMPRESSOR_RE})$/;
+	    next if ($item->{subtype} // '') ne 'qemu';
 	    push @$res, $item->{volid} if defined($item->{volid});
 	}
     }
