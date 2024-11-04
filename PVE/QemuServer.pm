@@ -97,6 +97,22 @@ my $OVMF = {
 	],
     },
     aarch64 => {
+    '4m-no-smm' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.fd",
+    ],
+    '4m-no-smm-ms' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.ms.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.ms.fd",
+    ],
+   '4m' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.fd",
+    ],
+    '4m-ms' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.ms.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.ms.fd",
+    ],
 	default => [
 	    "$EDK2_FW_BASE/AAVMF_CODE.fd",
 	    "$EDK2_FW_BASE/AAVMF_VARS.fd",
@@ -184,7 +200,7 @@ my $vga_fmt = {
 	default => 'std',
 	optional => 1,
 	default_key => 1,
-	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio virtio-gl vmware)],
+	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio virtio-gl vmware ramfb)],
     },
     memory => {
 	description => "Sets the VGA memory (in MiB). Has no effect with serial display.",
@@ -391,8 +407,8 @@ my $confdesc = {
 	optional => 1,
 	type => 'string',
 	description => "SCSI controller model",
-	enum => [qw(lsi lsi53c810 virtio-scsi-pci virtio-scsi-single megasas pvscsi)],
-	default => 'lsi',
+	enum => [qw(virtio-scsi-pci virtio-scsi-single)],
+	default => 'virtio-scsi-pci',
     },
     description => {
 	optional => 1,
@@ -404,8 +420,7 @@ my $confdesc = {
     ostype => {
 	optional => 1,
 	type => 'string',
-	# NOTE: When extending, also consider extending `%guest_types` in `Import/ESXi.pm`.
-	enum => [qw(other wxp w2k w2k3 w2k8 wvista win7 win8 win10 win11 l24 l26 solaris)],
+	enum => [qw(win11 l26 other)],
 	description => "Specify guest operating system.",
 	verbose_description => <<EODESC,
 Specify guest operating system. This is used to enable special
@@ -599,9 +614,9 @@ EODESCR
     },
     cdrom => {
 	optional => 1,
-	type => 'string', format => 'pve-qm-ide',
+	type => 'string', format => 'pve-qm-scsi',
 	typetext => '<volume>',
-	description => "This is an alias for option -ide2",
+	description => "This is an alias for option -scsi",
     },
     cpu => {
 	optional => 1,
@@ -1370,7 +1385,7 @@ sub print_tabletdevice_full {
     # we use uhci for old VMs because tablet driver was buggy in older qemu
     my $usbbus;
     if ($q35 || $arch eq 'aarch64') {
-	$usbbus = 'ehci';
+	$usbbus = 'qemu-xhci';
     } else {
 	$usbbus = 'uhci';
     }
@@ -1383,7 +1398,7 @@ sub print_keyboarddevice_full {
 
     return if $arch ne 'aarch64';
 
-    return "usb-kbd,id=keyboard,bus=ehci.0,port=2";
+    return "usb-kbd,id=keyboard,bus=qemu-xhci.0,port=2";
 }
 
 my sub get_drive_id {
@@ -1775,7 +1790,8 @@ my $vga_map = {
     'std' => 'VGA',
     'vmware' => 'vmware-svga',
     'virtio' => 'virtio-vga',
-    'virtio-gl' => 'virtio-vga-gl',
+    'virtio-gl' => 'virtio-gpu-gl',
+    'ramfb' => 'ramfb',
 };
 
 sub print_vga_device {
@@ -1835,7 +1851,7 @@ sub print_vga_device {
     }
 
     if ($vga->{type} eq 'virtio-gl') {
-	my $base = '/usr/lib/x86_64-linux-gnu/lib';
+	my $base = '/usr/lib/aarch64-linux-gnu/lib';
 	die "missing libraries for '$vga->{type}' detected! Please install 'libgl1' and 'libegl1'\n"
 	    if !-e "${base}EGL.so.1" || !-e "${base}GL.so.1";
 
@@ -3159,7 +3175,14 @@ sub add_tpm_device {
 
     push @$devices, "-chardev", "socket,id=tpmchar,path=$paths->{socket}";
     push @$devices, "-tpmdev", "emulator,id=tpmdev,chardev=tpmchar";
+
+	#https://bugzilla.proxmox.com/show_bug.cgi?id=4219
+	my $arch = $conf->{arch} // get_host_arch();
+	if ($arch eq 'x86_64'){
     push @$devices, "-device", "tpm-tis,tpmdev=tpmdev";
+	}else{
+	push @$devices, "-device", "tpm-tis-device,tpmdev=tpmdev";
+	}
 }
 
 sub start_swtpm {
@@ -3329,13 +3352,9 @@ sub get_ovmf_files($$$) {
 	or die "no OVMF images known for architecture '$arch'\n";
 
     my $type = 'default';
-    if ($arch eq 'x86_64') {
-	if (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
-	    $type = $smm ? "4m" : "4m-no-smm";
-	    $type .= '-ms' if $efidisk->{'pre-enrolled-keys'};
-	} else {
-	    # TODO: log_warn about use of legacy images for x86_64 with Promxox VE 9
-	}
+    if (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
+	$type = $smm ? "4m" : "4m-no-smm";
+	$type .= '-ms' if $efidisk->{'pre-enrolled-keys'};
     }
 
     my ($ovmf_code, $ovmf_vars) = $types->{$type}->@*;
@@ -3388,8 +3407,8 @@ sub query_supported_cpu_flags {
 
     # FIXME: Once this is merged, the code below should work for ARM as well:
     # https://lists.nongnu.org/archive/html/qemu-devel/2019-06/msg04947.html
-    die "QEMU/KVM cannot detect CPU flags on ARM (aarch64)\n" if
-	$arch eq "aarch64";
+    # die "QEMU/KVM cannot detect CPU flags on ARM (aarch64)\n" if
+	# $arch eq "aarch64";
 
     my $kvm_supported = defined(kvm_version());
     my $qemu_cmd = get_command_for_arch($arch);
@@ -3408,7 +3427,8 @@ sub query_supported_cpu_flags {
 	    '-chardev', "socket,id=qmp,path=/var/run/qemu-server/$fakevmid.qmp,server=on,wait=off",
 	    '-mon', 'chardev=qmp,mode=control',
 	    '-pidfile', $pidfile,
-	    '-S', '-daemonize'
+	    '-S', '-daemonize',
+		'-cpu', 'max'
 	];
 
 	if (!$kvm) {
@@ -3713,7 +3733,7 @@ sub config_to_command {
 	push @$cmd, $fixups->@*;
     }
 
-    if ($conf->{vmgenid}) {
+    if ($conf->{vmgenid} && $arch eq 'x86_64') {
 	push @$devices, '-device', 'vmgenid,guid='.$conf->{vmgenid};
     }
 
@@ -3827,9 +3847,12 @@ sub config_to_command {
     push @$cmd, '-no-reboot' if  defined($conf->{reboot}) && $conf->{reboot} == 0;
 
     if ($vga->{type} && $vga->{type} !~ m/^serial\d+$/ && $vga->{type} ne 'none'){
-	push @$devices, '-device', print_vga_device(
-	    $conf, $vga, $arch, $machine_version, $machine_type, undef, $qxlnum, $bridges);
-
+        if ($vga->{type} eq 'ramfb'){
+            push @$devices, '-device', 'ramfb';
+        } else {
+            push @$devices, '-device', print_vga_device(
+            $conf, $vga, $arch, $machine_version, $machine_type, undef, $qxlnum, $bridges);
+    	}
 	push @$cmd, '-display', 'egl-headless,gl=core' if $vga->{type} eq 'virtio-gl'; # VIRGL
 
 	my $socket = PVE::QemuServer::Helpers::vnc_socket($vmid);
@@ -4146,19 +4169,15 @@ sub config_to_command {
 	$machine_type_min =~ s/\+pve\d+$//;
 	$machine_type_min .= "+pve$required_pve_version";
     }
-    push @$machineFlags, "type=${machine_type_min}";
-
-    PVE::QemuServer::Machine::assert_valid_machine_property($conf, $machine_conf);
-
-    if (my $viommu = $machine_conf->{viommu}) {
-	if ($viommu eq 'intel') {
-	    unshift @$devices, '-device', 'intel-iommu,intremap=on,caching-mode=on';
-	    push @$machineFlags, 'kernel-irqchip=split';
-	} elsif ($viommu eq 'virtio') {
-	    push @$devices, '-device', 'virtio-iommu-pci';
+    if ($arch eq 'aarch64'){
+	if (!$kvm){
+        push @$machineFlags, "type=${machine_type_min}";
+	}else{
+	 push @$machineFlags, "type=${machine_type_min},gic-version=host";
 	}
+    }else{
+       push @$machineFlags, "type=${machine_type_min}";
     }
-
     push @$cmd, @$devices;
     push @$cmd, '-rtc', join(',', @$rtcFlags) if scalar(@$rtcFlags);
     push @$cmd, '-machine', join(',', @$machineFlags) if scalar(@$machineFlags);
