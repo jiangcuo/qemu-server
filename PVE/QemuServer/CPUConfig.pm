@@ -161,6 +161,9 @@ my $cpu_vendor_list = {
     'cortex-a76' => 'default',
     'neoverse-n1' => 'default',
     'max' => 'default',
+    'la464_loongarch_cpu' => 'default',
+    'rv64' => 'default', 
+
 };
 
 my @supported_cpu_flags = (
@@ -596,7 +599,7 @@ sub get_cpu_options {
 	$pve_forced_flags->{'vendor'} = {
 	    value => $cpu_vendor,
 	} if $cpu_vendor ne 'default';
-    } elsif ($arch ne 'aarch64') {
+    } elsif ($arch ne 'loongarch64') {
 	die "internal error"; # should not happen
     }
 
@@ -736,7 +739,7 @@ sub get_default_cpu_type {
     $cputype = 'host' if $arch eq 'aarch64';
     $cputype = 'host' if $arch eq 'arm';
     $cputype = 'rv64' if $arch eq 'riscv64';
-    $cputype = 'la464-loongarch-cpu' if $arch eq 'loongarch64';
+    $cputype = 'max' if $arch eq 'loongarch64';
 
     return $cputype;
 }
@@ -768,7 +771,9 @@ sub get_cpu_bitness {
     }
 
     return $cputypes_32bit->{$cputype} ? 32 : 64 if $arch eq 'x86_64';
-    return 64 if $arch eq 'aarch64';
+    if ($arch eq 'aarch64' || $arch eq 'loongarch64' || $arch eq 'riscv64') {
+        return 64;
+    }
 
     die "unsupported architecture '$arch'\n";
 }

@@ -118,6 +118,19 @@ my $OVMF = {
 	    "$EDK2_FW_BASE/AAVMF_VARS.fd",
 	],
     },
+	loongarch64 => {
+	default =>	[
+		"$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+		"$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+	],
+	},
+	riscv64 => {
+	default =>	[
+		"$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+		"$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+	],
+	},
+
 };
 
 my $cpuinfo = PVE::ProcFSTools::read_cpuinfo();
@@ -661,7 +674,7 @@ EODESCR
 	description => "Virtual processor architecture. Defaults to the host.",
 	optional => 1,
 	type => 'string',
-	enum => [qw(x86_64 aarch64)],
+	enum => [qw(x86_64 aarch64 loongarch64 riscv64)],
     },
     smbios1 => {
 	description => "Specify SMBIOS type 1 fields.",
@@ -1384,11 +1397,14 @@ sub print_tabletdevice_full {
 
     # we use uhci for old VMs because tablet driver was buggy in older qemu
     my $usbbus;
-    if ($q35 || $arch eq 'aarch64') {
-	$usbbus = 'qemu-xhci';
+	if ($q35) {
+		$usbbus = 'ehci';
     } else {
-	$usbbus = 'uhci';
+		$usbbus = 'uhci';
     }
+	if ($arch ne 'x86_64'){
+		$usbbus = 'ehci';
+	}
 
     return "usb-tablet,id=tablet,bus=$usbbus.0,port=1";
 }
@@ -1396,9 +1412,9 @@ sub print_tabletdevice_full {
 sub print_keyboarddevice_full {
     my ($conf, $arch) = @_;
 
-    return if $arch ne 'aarch64';
+    return if $arch eq 'x86_64';
 
-    return "usb-kbd,id=keyboard,bus=qemu-xhci.0,port=2";
+    return "usb-kbd,id=keyboard,bus=ehci.0,port=2";
 }
 
 my sub get_drive_id {
@@ -1798,8 +1814,11 @@ sub print_vga_device {
     my ($conf, $vga, $arch, $machine_version, $machine, $id, $qxlnum, $bridges) = @_;
 
     my $type = $vga_map->{$vga->{type}};
-    if ($arch eq 'aarch64' && defined($type) && $type eq 'virtio-vga') {
-	$type = 'virtio-gpu';
+    if ($arch ne 'x86_64' && defined($type) && $type eq 'virtio-vga') {
+		$type = 'virtio-gpu-pci';
+    }
+	if ($arch ne 'x86_64' && defined($type) && $type eq 'virtio-gpu-gl') {
+		$type = 'virtio-gpu-gl';
     }
     my $vgamem_mb = $vga->{memory};
 
@@ -1851,7 +1870,7 @@ sub print_vga_device {
     }
 
     if ($vga->{type} eq 'virtio-gl') {
-	my $base = '/usr/lib/aarch64-linux-gnu/lib';
+	my $base = "/usr/lib/$arch-linux-gnu/lib";
 	die "missing libraries for '$vga->{type}' detected! Please install 'libgl1' and 'libegl1'\n"
 	    if !-e "${base}EGL.so.1" || !-e "${base}GL.so.1";
 
@@ -3278,6 +3297,8 @@ sub get_vm_arch {
 my $default_machines = {
     x86_64 => 'pc',
     aarch64 => 'virt',
+	riscv64 => 'virt',
+	loongarch64 => 'virt',
 };
 
 sub get_installed_machine_version {
@@ -3323,7 +3344,7 @@ sub get_vm_machine {
 	if (windows_version($conf->{ostype})) {
 	    $machine = windows_get_pinned_machine_version($machine, '5.1', $kvmversion);
 	}
-	$arch //= 'x86_64';
+	$arch //= get_host_arch();
 	$machine ||= $default_machines->{$arch};
 	if ($add_pve_version) {
 	    my $pvever = PVE::QemuServer::Machine::get_pve_version($kvmversion);
@@ -3367,6 +3388,8 @@ sub get_ovmf_files($$$) {
 my $Arch2Qemu = {
     aarch64 => '/usr/bin/qemu-system-aarch64',
     x86_64 => '/usr/bin/qemu-system-x86_64',
+	loongarch64 => '/usr/bin/qemu-system-loongarch64',
+	riscv64 => '/usr/bin/qemu-system-riscv64',
 };
 sub get_command_for_arch($) {
     my ($arch) = @_;
@@ -3556,7 +3579,7 @@ my sub get_vga_properties {
     $vga->{type} = 'qxl' if $qxlnum;
 
     if (!$vga->{type}) {
-	if ($arch eq 'aarch64') {
+	if ($arch ne 'x86_64') {
 	    $vga->{type} = 'virtio';
 	} elsif (min_version($machine_version, 2, 9)) {
 	    $vga->{type} = (!$winversion || $winversion >= 6) ? 'std' : 'cirrus';
@@ -3716,8 +3739,16 @@ sub config_to_command {
 
 	my ($code_drive_str, $var_drive_str) =
 	    print_ovmf_drive_commandlines($conf, $storecfg, $vmid, $arch, $q35, $version_guard);
-	push $cmd->@*, '-drive', $code_drive_str;
-	push $cmd->@*, '-drive', $var_drive_str;
+	if ($arch eq 'loongarch64') {
+			push  $cmd->@*, '-bios','/usr/share/pve-edk2-firmware//LOONGARCH64_VIRT_CODE.fd';
+		}elsif ($arch eq 'riscv64') {
+			push @$cmd, '-bios','/usr/share/pve-edk2-firmware//fw_dynamic.bin';
+			push @$cmd, '-drive', $code_drive_str;
+        }else{
+			push $cmd->@*, '-drive', $code_drive_str;
+			push $cmd->@*, '-drive', $var_drive_str;
+		}
+
     }
 
     if ($q35) { # tell QEMU to load q35 config early
@@ -3781,7 +3812,7 @@ sub config_to_command {
 	    # On aarch64, serial0 is the UART device. QEMU only allows
 	    # connecting UART devices via the '-serial' command line, as
 	    # the device has a fixed slot on the hardware...
-	    if ($arch eq 'aarch64' && $i == 0) {
+	    if ($arch ne 'x86_64' && $i == 0) {
 		push @$devices, '-serial', "chardev:serial$i";
 	    } else {
 		push @$devices, '-device', "isa-serial,chardev=serial$i";
@@ -4148,15 +4179,17 @@ sub config_to_command {
 	if ($k == 2 && $legacy_igd) {
 	    $k_name = "$k-igd";
 	}
-	my $pciaddr = print_pci_addr("pci.$k_name", undef, $arch, $machine_type);
-	my $devstr = "pci-bridge,id=pci.$k,chassis_nr=$k$pciaddr";
-
-	if ($q35) { # add after -readconfig pve-q35.cfg
-	    splice @$devices, 2, 0, '-device', $devstr;
-	} else {
-	    unshift @$devices, '-device', $devstr if $k > 0;
+	if ( $arch eq 'x86_64' ){ 
+		my $pciaddr = print_pci_addr("pci.$k_name", undef, $arch, $machine_type);
+		my $devstr = "pci-bridge,id=pci.$k,chassis_nr=$k$pciaddr";
+	
+		if ($q35) { # add after -readconfig pve-q35.cfg
+			splice @$devices, 2, 0, '-device', $devstr;
+		} else {
+			unshift @$devices, '-device', $devstr if $k > 0;
+		}
+		}
 	}
-    }
 
     if (!$kvm) {
 	push @$machineFlags, 'accel=tcg';
@@ -5037,10 +5070,10 @@ sub vmconfig_hotplug_pending {
 		if ($defaults->{tablet}) {
 		    vm_deviceplug($storecfg, $conf, $vmid, 'tablet', $arch, $machine_type);
 		    vm_deviceplug($storecfg, $conf, $vmid, 'keyboard', $arch, $machine_type)
-			if $arch eq 'aarch64';
+			if $arch ne 'x86_64';
 		} else {
 		    vm_deviceunplug($vmid, $conf, 'tablet');
-		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch eq 'aarch64';
+		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch ne 'x86_64';
 		}
 	    } elsif ($opt =~ m/^usb(\d+)$/) {
 		my $index = $1;
@@ -5102,10 +5135,10 @@ sub vmconfig_hotplug_pending {
 		if ($value == 1) {
 		    vm_deviceplug($storecfg, $conf, $vmid, 'tablet', $arch, $machine_type);
 		    vm_deviceplug($storecfg, $conf, $vmid, 'keyboard', $arch, $machine_type)
-			if $arch eq 'aarch64';
+			if $arch ne 'x86_64';
 		} elsif ($value == 0) {
 		    vm_deviceunplug($vmid, $conf, 'tablet');
-		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch eq 'aarch64';
+		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch ne 'x86_64';
 		}
 	    } elsif ($opt =~ m/^usb(\d+)$/) {
 		my $index = $1;

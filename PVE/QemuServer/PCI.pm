@@ -14,6 +14,7 @@ our @EXPORT_OK = qw(
 print_pci_addr
 print_pcie_addr
 print_pcie_root_port
+print_pcie_root_port_for_port
 parse_hostpci
 );
 
@@ -138,121 +139,261 @@ PVE::JSONSchema::register_standard_option("pve-qm-hostpci", $hostpcidesc);
 
 my $pci_addr_map;
 sub get_pci_addr_map {
-    $pci_addr_map = {
-	piix3 => { bus => 0, addr => 1, conflict_ok => qw(ehci)  },
-	ehci => { bus => 0, addr => 1, conflict_ok => qw(piix3) }, # instead of piix3 on arm
-	vga => { bus => 0, addr => 2, conflict_ok => qw(legacy-igd) },
-	'legacy-igd' => { bus => 0, addr => 2, conflict_ok => qw(vga) }, # legacy-igd requires vga=none
-	balloon0 => { bus => 0, addr => 3 },
-	watchdog => { bus => 0, addr => 4 },
-	scsihw0 => { bus => 0, addr => 5, conflict_ok => qw(pci.3) },
-	'pci.3' => { bus => 0, addr => 5, conflict_ok => qw(scsihw0) }, # also used for virtio-scsi-single bridge
-	scsihw1 => { bus => 0, addr => 6 },
-	ahci0 => { bus => 0, addr => 7 },
-	qga0 => { bus => 0, addr => 8 },
-	spice => { bus => 0, addr => 9 },
-#   pcie.1 =>  { bus => 0, addr => 10 }, 
-	net0 => { bus => 0, addr => 11 },
-	hostpci4 => { bus => 0, addr => 12 },
-	hostpci5 => { bus => 0, addr => 13 },
-	hostpci6 => { bus => 0, addr => 14 },
-	hostpci7 => { bus => 0, addr => 15 },
-	hostpci8 => { bus => 0, addr => 16 },
-	hostpci19 => { bus => 0, addr => 17 },
-	hostpci10 => { bus => 0, addr => 18 },
- 	'xhci' => { bus => 0, addr => 19 },
-	hostpci0 => { bus => 0, addr => 22 },
-	hostpci1 => { bus => 0, addr => 23 },
-	vga1 => { bus => 0, addr => 24 },
-	vga2 => { bus => 0, addr => 25 },
-#	vga3 => { bus => 0, addr => 26 }, #use to pcie2-3,for aarch64
-	hostpci2 => { bus => 0, addr => 27 },
-	hostpci3 => { bus => 0, addr => 28 },
-#	addr29 : usb-host (pve-usb.cfg)
-	'pci.1' => { bus => 0, addr => 30 },
-	'pci.2' => { bus => 0, addr => 31 },
-#	'net0' => { bus => 1, addr => 1 },
-	'net1' => { bus => 1, addr => 2 },
-	'net2' => { bus => 1, addr => 3 },
-	'net3' => { bus => 1, addr => 4 },
-	'net4' => { bus => 1, addr => 5 },
-	'net5' => { bus => 1, addr => 6 },
-	'net6' => { bus => 1, addr => 7 },
-	'net7' => { bus => 1, addr => 8 },
-	'net8' => { bus => 1, addr => 9 },
-	'net9' => { bus => 1, addr => 10 },
-	'net10' => { bus => 1, addr => 11 },
-	'net11' => { bus => 1, addr => 12 },
-	'net12' => { bus => 1, addr => 13 },
-	'net13' => { bus => 1, addr => 14 },
-	'net14' => { bus => 1, addr => 15 },
-	'net15' => { bus => 1, addr => 16 },
-	'net16' => { bus => 1, addr => 17 },
-	'net17' => { bus => 1, addr => 18 },
-	'net18' => { bus => 1, addr => 19 },
-	'net19' => { bus => 1, addr => 20 },
-	'net20' => { bus => 1, addr => 21 },
-	'net21' => { bus => 1, addr => 22 },
-	'net22' => { bus => 1, addr => 23 },
-	'net23' => { bus => 1, addr => 24 },
-	'net24' => { bus => 1, addr => 25 },	
-	'pci.4' => { bus => 1, addr => 28 },
-	'rng0' => { bus => 1, addr => 29 },
-	'pci.2-igd' => { bus => 1, addr => 30 }, # replaces pci.2 in case a legacy IGD device is passed through
-	'virtio0' => { bus => 2, addr => 1 },
-	'virtio1' => { bus => 2, addr => 2 },
-	'virtio2' => { bus => 2, addr => 3 },
-	'virtio3' => { bus => 2, addr => 4 },
-	'virtio4' => { bus => 2, addr => 5 },
-	'virtio5' => { bus => 2, addr => 6 },
-	'virtio6' => { bus => 2, addr => 7 },
-	'virtio7' => { bus => 2, addr => 8 },
-	'virtio8' => { bus => 2, addr => 9 },
-	'virtio9' => { bus => 2, addr => 10 },
-    'virtio10' => { bus => 2, addr => 11 },
-	'virtio11' => { bus => 2, addr => 12 },
-	'virtio12' => { bus => 2, addr => 13 },
-	'virtio13' => { bus => 2, addr => 14 },
-	'virtio14' => { bus => 2, addr => 15 },
-	'virtio15' => { bus => 2, addr => 16 },
-	'ivshmem' => { bus => 2, addr => 17 },
-	'audio0' => { bus => 2, addr => 18 },
-	'virtioscsi0' => { bus => 3, addr => 1 },
-	'virtioscsi1' => { bus => 3, addr => 2 },
-	'virtioscsi2' => { bus => 3, addr => 3 },
-	'virtioscsi3' => { bus => 3, addr => 4 },
-	'virtioscsi4' => { bus => 3, addr => 5 },
-	'virtioscsi5' => { bus => 3, addr => 6 },
-	'virtioscsi6' => { bus => 3, addr => 7 },
-	'virtioscsi7' => { bus => 3, addr => 8 },
-	'virtioscsi8' => { bus => 3, addr => 9 },
-	'virtioscsi9' => { bus => 3, addr => 10 },
-	'virtioscsi10' => { bus => 3, addr => 11 },
-	'virtioscsi11' => { bus => 3, addr => 12 },
-	'virtioscsi12' => { bus => 3, addr => 13 },
-	'virtioscsi13' => { bus => 3, addr => 14 },
-	'virtioscsi14' => { bus => 3, addr => 15 },
-	'virtioscsi15' => { bus => 3, addr => 16 },
-	'virtioscsi16' => { bus => 3, addr => 17 },
-	'virtioscsi17' => { bus => 3, addr => 18 },
-	'virtioscsi18' => { bus => 3, addr => 19 },
-	'virtioscsi19' => { bus => 3, addr => 20 },
-	'virtioscsi20' => { bus => 3, addr => 21 },
-	'virtioscsi21' => { bus => 3, addr => 22 },
-	'virtioscsi22' => { bus => 3, addr => 23 },
-	'virtioscsi23' => { bus => 3, addr => 24 },
-	'virtioscsi24' => { bus => 3, addr => 25 },
-	'virtioscsi25' => { bus => 3, addr => 26 },
-	'virtioscsi26' => { bus => 3, addr => 27 },
-	'virtioscsi27' => { bus => 3, addr => 28 },
-	'virtioscsi28' => { bus => 3, addr => 29 },
-	'virtioscsi29' => { bus => 3, addr => 30 },
-	'virtioscsi30' => { bus => 3, addr => 31 },
-	'scsihw2' => { bus => 4, addr => 1 },
-	'scsihw3' => { bus => 4, addr => 2 },
-	'scsihw4' => { bus => 4, addr => 3 },
-    } if !defined($pci_addr_map);
-    return $pci_addr_map;
+	my ($arch) = @_;
+	if ($arch ne 'x86_64'){
+		$pci_addr_map = {
+			piix3 => { bus => 0, addr => 1, conflict_ok => qw(ehci)  },
+			ehci => { bus => 0, addr => 1, conflict_ok => qw(piix3) }, # instead of piix3 on arm
+			vga => { bus => 0, addr => 2, conflict_ok => qw(legacy-igd) },
+			'legacy-igd' => { bus => 0, addr => 2, conflict_ok => qw(vga) }, # legacy-igd requires vga=none
+			balloon0 => { bus => 0, addr => 3 },
+			watchdog => { bus => 0, addr => 4 },
+			scsihw0 => { bus => 0, addr => 5 },
+			scsihw1 => { bus => 0, addr => 6 },
+			ahci0 => { bus => 0, addr => 7 },
+			qga0 => { bus => 0, addr => 8 },
+			spice => { bus => 0, addr => 9 },
+			net0 => { bus => 0, addr => 11 },
+			# pci 1 bus => 0, addr => 12
+			# pci 2 bus => 0, addr => 13
+			# pci 3 bus => 0, addr => 14
+			# pci 4 bus => 0, addr => 15
+			# pcie-port 5 bus => 0, addr => 16
+			# pcie-port 6 bus => 0, addr => 17
+			# pcie-port 7 bus => 0, addr => 18
+			# pcie-port 8 bus => 0, addr => 19
+			# pcie-port 9 bus => 0, addr => 20
+			# pcie-port 10 bus => 0, addr => 21
+			# pcie-port 11 bus => 0, addr => 22
+			# pcie-port 12 bus => 0, addr => 23
+			# pcie-port 13 bus => 0, addr => 24
+			# pcie-port 14 bus => 0, addr => 25 
+			# pcie-port 15 bus => 0, addr => 26 
+			hostpci0 => { bus => 5, addr => 0 },
+			hostpci1 => { bus => 6, addr => 0 },
+			hostpci2 => { bus => 7, addr => 0 },
+			hostpci3 => { bus => 8, addr => 0 },
+			hostpci4 => { bus => 9, addr => 0 },
+			hostpci5 => { bus => 10, addr => 0 },
+			hostpci6 => { bus => 11, addr => 0 },
+			hostpci7 => { bus => 12, addr => 0 },
+			hostpci8 => { bus => 13, addr => 0 },
+			hostpci19 => { bus => 14, addr => 0 },
+			hostpci10 => { bus => 15, addr => 0 },
+			'xhci' => { bus => 0, addr => 30 },
+			vga1 => { bus => 0, addr => 27 },
+			vga2 => { bus => 0, addr => 28 },
+			#vga3 => { bus => 0, addr => 26 }, #use to pcie2-3,for aarch64
+			#addr29 : usb-host (pve-usb.cfg)
+			# 'pci.1' => { bus => 0, addr => 30 },
+			# 'pci.2' => { bus => 0, addr => 31 },
+			# 'pci.4' => { bus => 1, addr => 28 },
+			'rng0' => { bus => 1, addr => 29 },
+			'net1' => { bus => 2, addr => 2 },
+			'net2' => { bus => 2, addr => 3 },
+			'net3' => { bus => 2, addr => 4 },
+			'net4' => { bus => 2, addr => 5 },
+			'net5' => { bus => 2, addr => 6 },
+			'net6' => { bus => 2, addr => 7 },
+			'net7' => { bus => 2, addr => 8 },
+			'net8' => { bus => 2, addr => 9 },
+			'net9' => { bus => 2, addr => 10 },
+			'net10' => { bus => 2, addr => 11 },
+			'net11' => { bus => 2, addr => 12 },
+			'net12' => { bus => 2, addr => 13 },
+			'net13' => { bus => 2, addr => 14 },
+			'net14' => { bus => 2, addr => 15 },
+			'net15' => { bus => 2, addr => 16 },
+			'net16' => { bus => 2, addr => 17 },
+			'net17' => { bus => 2, addr => 18 },
+			'net18' => { bus => 2, addr => 19 },
+			'net19' => { bus => 2, addr => 20 },
+			'net20' => { bus => 2, addr => 21 },
+			'net21' => { bus => 2, addr => 22 },
+			'net22' => { bus => 2, addr => 23 },
+			'net23' => { bus => 2, addr => 24 },
+			'net24' => { bus => 2, addr => 25 },	
+			'pci.2-igd' => { bus => 2, addr => 30 }, # replaces pci.2 in case a legacy IGD device is passed through
+			'virtio0' => { bus => 3, addr => 1 },
+			'virtio1' => { bus => 3, addr => 2 },
+			'virtio2' => { bus => 3, addr => 3 },
+			'virtio3' => { bus => 3, addr => 4 },
+			'virtio4' => { bus => 3, addr => 5 },
+			'virtio5' => { bus => 3, addr => 6 },
+			'virtio6' => { bus => 3, addr => 7 },
+			'virtio7' => { bus => 3, addr => 8 },
+			'virtio8' => { bus => 3, addr => 9 },
+			'virtio9' => { bus => 3, addr => 10 },
+			'virtio10' => { bus => 3, addr => 11 },
+			'virtio11' => { bus => 3, addr => 12 },
+			'virtio12' => { bus => 3, addr => 13 },
+			'virtio13' => { bus => 3, addr => 14 },
+			'virtio14' => { bus => 3, addr => 15 },
+			'virtio15' => { bus => 3, addr => 16 },
+			'ivshmem' => { bus => 3, addr => 17 },
+			'audio0' => { bus => 3, addr => 18 },
+			'scsihw2' => { bus => 3, addr => 19 },
+			'scsihw3' => { bus => 3, addr => 20 },
+			'scsihw4' => { bus => 3, addr => 21 },
+			'virtioscsi0' => { bus => 4, addr => 1 },
+			'virtioscsi1' => { bus => 4, addr => 2 },
+			'virtioscsi2' => { bus => 4, addr => 3 },
+			'virtioscsi3' => { bus => 4, addr => 4 },
+			'virtioscsi4' => { bus => 4, addr => 5 },
+			'virtioscsi5' => { bus => 4, addr => 6 },
+			'virtioscsi6' => { bus => 4, addr => 7 },
+			'virtioscsi7' => { bus => 4, addr => 8 },
+			'virtioscsi8' => { bus => 4, addr => 9 },
+			'virtioscsi9' => { bus => 4, addr => 10 },
+			'virtioscsi10' => { bus => 4, addr => 11 },
+			'virtioscsi11' => { bus => 4, addr => 12 },
+			'virtioscsi12' => { bus => 4, addr => 13 },
+			'virtioscsi13' => { bus => 4, addr => 14 },
+			'virtioscsi14' => { bus => 4, addr => 15 },
+			'virtioscsi15' => { bus => 4, addr => 16 },
+			'virtioscsi16' => { bus => 4, addr => 17 },
+			'virtioscsi17' => { bus => 4, addr => 18 },
+			'virtioscsi18' => { bus => 4, addr => 19 },
+			'virtioscsi19' => { bus => 4, addr => 20 },
+			'virtioscsi20' => { bus => 4, addr => 21 },
+			'virtioscsi21' => { bus => 4, addr => 22 },
+			'virtioscsi22' => { bus => 4, addr => 23 },
+			'virtioscsi23' => { bus => 4, addr => 24 },
+			'virtioscsi24' => { bus => 4, addr => 25 },
+			'virtioscsi25' => { bus => 4, addr => 26 },
+			'virtioscsi26' => { bus => 4, addr => 27 },
+			'virtioscsi27' => { bus => 4, addr => 28 },
+			'virtioscsi28' => { bus => 4, addr => 29 },
+			'virtioscsi29' => { bus => 4, addr => 30 },
+			'virtioscsi30' => { bus => 4, addr => 31 },
+		}
+		} else{
+		$pci_addr_map = {
+			piix3 => { bus => 0, addr => 1, conflict_ok => qw(ehci)  },
+			ehci => { bus => 0, addr => 1, conflict_ok => qw(piix3) }, # instead of piix3 on arm
+			vga => { bus => 0, addr => 2, conflict_ok => qw(legacy-igd) },
+			'legacy-igd' => { bus => 0, addr => 2, conflict_ok => qw(vga) }, # legacy-igd requires vga=none
+			balloon0 => { bus => 0, addr => 3 },
+			watchdog => { bus => 0, addr => 4 },
+			scsihw0 => { bus => 0, addr => 5, conflict_ok => qw(pci.3) },
+			'pci.3' => { bus => 0, addr => 5, conflict_ok => qw(scsihw0) }, # also used for virtio-scsi-single bridge
+			scsihw1 => { bus => 0, addr => 6 },
+			ahci0 => { bus => 0, addr => 7 },
+			qga0 => { bus => 0, addr => 8 },
+			spice => { bus => 0, addr => 9 },
+			virtio0 => { bus => 0, addr => 10 },
+			virtio1 => { bus => 0, addr => 11 },
+			virtio2 => { bus => 0, addr => 12 },
+			virtio3 => { bus => 0, addr => 13 },
+			virtio4 => { bus => 0, addr => 14 },
+			virtio5 => { bus => 0, addr => 15 },
+			hostpci0 => { bus => 0, addr => 16 },
+			hostpci1 => { bus => 0, addr => 17 },
+			net0 => { bus => 0, addr => 18 },
+			net1 => { bus => 0, addr => 19 },
+			net2 => { bus => 0, addr => 20 },
+			net3 => { bus => 0, addr => 21 },
+			net4 => { bus => 0, addr => 22 },
+			net5 => { bus => 0, addr => 23 },
+			vga1 => { bus => 0, addr => 24 },
+			vga2 => { bus => 0, addr => 25 },
+			vga3 => { bus => 0, addr => 26 },
+			hostpci2 => { bus => 0, addr => 27 },
+			hostpci3 => { bus => 0, addr => 28 },
+			#addr29 : usb-host (pve-usb.cfg)
+			'pci.1' => { bus => 0, addr => 30 },
+			'pci.2' => { bus => 0, addr => 31 },
+			'net6' => { bus => 2, addr => 1 },
+			'net7' => { bus => 2, addr => 2 },
+			'net8' => { bus => 2, addr => 3 },
+			'net9' => { bus => 2, addr => 4 },
+			'net10' => { bus => 2, addr => 5 },
+			'net11' => { bus => 2, addr => 6 },
+			'net12' => { bus => 2, addr => 7 },
+			'net13' => { bus => 2, addr => 8 },
+			'net14' => { bus => 2, addr => 9 },
+			'net15' => { bus => 2, addr => 10 },
+			'net16' => { bus => 2, addr => 11 },
+			'net17' => { bus => 2, addr => 12 },
+			'net18' => { bus => 2, addr => 13 },
+			'net19' => { bus => 2, addr => 14 },
+			'net20' => { bus => 2, addr => 15 },
+			'net21' => { bus => 2, addr => 16 },
+			'net22' => { bus => 2, addr => 17 },
+			'net23' => { bus => 2, addr => 18 },
+			'net24' => { bus => 2, addr => 19 },
+			'net25' => { bus => 2, addr => 20 },
+			'net26' => { bus => 2, addr => 21 },
+			'net27' => { bus => 2, addr => 22 },
+			'net28' => { bus => 2, addr => 23 },
+			'net29' => { bus => 2, addr => 24 },
+			'net30' => { bus => 2, addr => 25 },
+			'net31' => { bus => 2, addr => 26 },
+			'xhci' => { bus => 2, addr => 27 },
+			'pci.4' => { bus => 2, addr => 28 },
+			'rng0' => { bus => 2, addr => 29 },
+			'pci.2-igd' => { bus => 2, addr => 30 }, # replaces pci.2 in case a legacy IGD device is passed through
+			'virtio6' => { bus => 3, addr => 1 },
+			'virtio7' => { bus => 3, addr => 2 },
+			'virtio8' => { bus => 3, addr => 3 },
+			'virtio9' => { bus => 3, addr => 4 },
+			'virtio10' => { bus => 3, addr => 5 },
+			'virtio11' => { bus => 3, addr => 6 },
+			'virtio12' => { bus => 3, addr => 7 },
+			'virtio13' => { bus => 3, addr => 8 },
+			'virtio14' => { bus => 3, addr => 9 },
+			'virtio15' => { bus => 3, addr => 10 },
+			'ivshmem' => { bus => 3, addr => 11 },
+			'audio0' => { bus => 3, addr => 12 },
+			hostpci4 => { bus => 3, addr => 13 },
+			hostpci5 => { bus => 3, addr => 14 },
+			hostpci6 => { bus => 3, addr => 15 },
+			hostpci7 => { bus => 3, addr => 16 },
+			hostpci8 => { bus => 3, addr => 17 },
+			hostpci9 => { bus => 3, addr => 18 },
+			hostpci10 => { bus => 3, addr => 19 },
+			hostpci11 => { bus => 3, addr => 20 },
+			hostpci12 => { bus => 3, addr => 21 },
+			hostpci13 => { bus => 3, addr => 22 },
+			hostpci14 => { bus => 3, addr => 23 },
+			hostpci15 => { bus => 3, addr => 24 },
+			'virtioscsi0' => { bus => 4, addr => 1 },
+			'virtioscsi1' => { bus => 4, addr => 2 },
+			'virtioscsi2' => { bus => 4, addr => 3 },
+			'virtioscsi3' => { bus => 4, addr => 4 },
+			'virtioscsi4' => { bus => 4, addr => 5 },
+			'virtioscsi5' => { bus => 4, addr => 6 },
+			'virtioscsi6' => { bus => 4, addr => 7 },
+			'virtioscsi7' => { bus => 4, addr => 8 },
+			'virtioscsi8' => { bus => 4, addr => 9 },
+			'virtioscsi9' => { bus => 4, addr => 10 },
+			'virtioscsi10' => { bus => 4, addr => 11 },
+			'virtioscsi11' => { bus => 4, addr => 12 },
+			'virtioscsi12' => { bus => 4, addr => 13 },
+			'virtioscsi13' => { bus => 4, addr => 14 },
+			'virtioscsi14' => { bus => 4, addr => 15 },
+			'virtioscsi15' => { bus => 4, addr => 16 },
+			'virtioscsi16' => { bus => 4, addr => 17 },
+			'virtioscsi17' => { bus => 4, addr => 18 },
+			'virtioscsi18' => { bus => 4, addr => 19 },
+			'virtioscsi19' => { bus => 4, addr => 20 },
+			'virtioscsi20' => { bus => 4, addr => 21 },
+			'virtioscsi21' => { bus => 4, addr => 22 },
+			'virtioscsi22' => { bus => 4, addr => 23 },
+			'virtioscsi23' => { bus => 4, addr => 24 },
+			'virtioscsi24' => { bus => 4, addr => 25 },
+			'virtioscsi25' => { bus => 4, addr => 26 },
+			'virtioscsi26' => { bus => 4, addr => 27 },
+			'virtioscsi27' => { bus => 4, addr => 28 },
+			'virtioscsi28' => { bus => 4, addr => 29 },
+			'virtioscsi29' => { bus => 4, addr => 30 },
+			'virtioscsi30' => { bus => 4, addr => 31 },
+			'scsihw2' => { bus => 4, addr => 1 },
+			'scsihw3' => { bus => 4, addr => 2 },
+			'scsihw4' => { bus => 4, addr => 3 },
+		}
+		}
+		return $pci_addr_map;
 }
 
 sub generate_mdev_uuid {
@@ -276,12 +417,12 @@ sub print_pci_addr {
 
     # using same bus slots on all HW, so we need to check special cases here:
     my $busname = 'pci';
-    if ($arch eq 'aarch64' && $machine =~ /^virt/) {
+    if ($arch ne 'x86_64' && $machine =~ /^virt/) {
 	die "aarch64/virt cannot use IDE devices\n" if $id =~ /^ide/;
 	$busname = 'pcie';
     }
 
-    my $map = get_pci_addr_map();
+    my $map = get_pci_addr_map($arch);
     if (my $d = $get_addr_mapping_from_id->($map, $id)) {
 	$res = ",bus=$busname.$d->{bus},addr=$d->{addr}";
 	$bridges->{$d->{bus}} = 1 if $bridges;
@@ -370,6 +511,35 @@ sub print_pcie_root_port {
     if (defined($root_port_addresses->{$i})) {
 	my $id = $i + 1;
 	$res = "pcie-root-port,id=ich9-pcie-port-${id}";
+	$res .= ",addr=$root_port_addresses->{$i}";
+	$res .= ",x-speed=16,x-width=32,multifunction=on,bus=pcie.0";
+	$res .= ",port=${id},chassis=${id}";
+    }
+
+    return $res;
+}
+
+sub print_pcie_root_port_for_port {
+    my ($i) = @_;
+    my $res = '';
+
+    my $root_port_addresses = {
+	 0 => "0x11",
+	 1 => "0x12",
+	 2 => "0x13",
+	 3 => "0x14",
+	 4 => "0x15",
+	 5 => "0x16",
+	 6 => "0x17",
+	 7 => "0x18",
+	 8 => "0x19",
+	 9 => "0x1a",
+	10 => "0x1b",
+    };
+
+    if (defined($root_port_addresses->{$i})) {
+	my $id = $i + 5;
+	$res = "pcie-root-port,id=pcie.${id}";
 	$res .= ",addr=$root_port_addresses->{$i}";
 	$res .= ",x-speed=16,x-width=32,multifunction=on,bus=pcie.0";
 	$res .= ",port=${id},chassis=${id}";
@@ -624,8 +794,8 @@ sub print_hostpci_devices {
     my $kvm_off = 0;
     my $gpu_passthrough = 0;
     my $legacy_igd = 0;
-	if ($arch eq 'aarch64') { 
-        push @$devices, '-readconfig', '/usr/share/qemu-server/pve-aarch64.cfg';
+	if ($arch ne 'x86_64') { 
+        push @$devices, '-readconfig', '/usr/share/qemu-server/pve-port.cfg';
     }
     my $pciaddr;
     my $pci_devices = choose_hostpci_devices(parse_hostpci_devices($conf), $vmid);
@@ -651,6 +821,10 @@ sub print_hostpci_devices {
 		$pciaddr = print_pcie_addr($id);
 	    }
 	} else {
+		# Aarch64 need pcie-root-port too! We try add it
+		if ($arch ne 'x86_64') {
+			push @$devices, '-device', print_pcie_root_port_for_port($i);
+		}
 	    my $pci_name = $d->{'legacy-igd'} ? 'legacy-igd' : $id;
 	    $pciaddr = print_pci_addr($pci_name, $bridges, $arch, $machine_type);
 	}
