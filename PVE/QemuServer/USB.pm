@@ -156,7 +156,7 @@ sub get_usb_controllers {
 	$use_usb2 = 1 if !$d->{usb3};
     }
 
-    if (!$use_qemu_xhci && !$is_q35 && $use_usb2 && $arch ne 'aarch64') {
+    if (!$use_qemu_xhci && !$is_q35 && $use_usb2 && $arch eq 'x86_64') {
 	# include usb device config if still on x86 before-xhci machines and if USB 3 is not used
 	push @$devices, '-readconfig', '/usr/share/qemu-server/pve-usb.cfg';
     }

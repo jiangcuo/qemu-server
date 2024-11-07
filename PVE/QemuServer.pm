@@ -3760,6 +3760,7 @@ sub config_to_command {
 	}
     }
 
+
     if (defined(my $fixups = qemu_created_version_fixups($conf, $forcemachine, $kvmver))) {
 	push @$cmd, $fixups->@*;
     }
@@ -4190,6 +4191,9 @@ sub config_to_command {
 		}
 		}
 	}
+	if ($arch ne 'x86_64') { 
+       unshift @$devices, '-readconfig', '/usr/share/qemu-server/pve-port.cfg';
+    }
 
     if (!$kvm) {
 	push @$machineFlags, 'accel=tcg';
