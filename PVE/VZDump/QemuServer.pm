@@ -57,6 +57,15 @@ sub vmlist {
 sub prepare {
     my ($self, $task, $vmid, $mode) = @_;
 
+    my $running = PVE::QemuServer::Helpers::vm_running_locally($vmid);
+
+    if ($running && (my $status = mon_cmd($vmid, 'query-backup'))) {
+	if ($status->{status} && $status->{status} eq 'active') {
+	    $self->log('warn', "left-over backup job still running inside QEMU - canceling now");
+	    mon_cmd($vmid, 'backup-cancel');
+	}
+    }
+
     $task->{disks} = [];
 
     my $conf = $self->{vmlist}->{$vmid} = PVE::QemuConfig->load_config($vmid);
@@ -64,11 +73,9 @@ sub prepare {
     $self->loginfo("VM Name: $conf->{name}")
 	if defined($conf->{name});
 
-    $self->{vm_was_running} = 1;
+    $self->{vm_was_running} = $running ? 1 : 0;
     $self->{vm_was_paused} = 0;
-    if (!PVE::QemuServer::check_running($vmid)) {
-	$self->{vm_was_running} = 0;
-    } elsif (PVE::QemuServer::vm_is_paused($vmid, 0)) {
+    if ($running && PVE::QemuServer::vm_is_paused($vmid, 0)) {
 	# Do not treat a suspended VM as paused, as it would cause us to skip
 	# fs-freeze even if the VM wakes up before we reach qga_fs_freeze.
 	$self->{vm_was_paused} = 1;
@@ -690,7 +697,6 @@ sub archive_pbs {
 
     # get list early so we die on unkown drive types before doing anything
     my $devlist = _get_task_devlist($task);
-    my $use_fleecing;
 
     $self->enforce_vm_running_for_backup($vmid);
     $self->{qmeventd_fh} = PVE::QemuServer::register_qmeventd_handle($vmid);
@@ -721,7 +727,7 @@ sub archive_pbs {
 
 	my $is_template = PVE::QemuConfig->is_template($self->{vmlist}->{$vmid});
 
-	$use_fleecing = check_and_prepare_fleecing(
+	$task->{'use-fleecing'} = check_and_prepare_fleecing(
 	    $self, $vmid, $opts->{fleecing}, $task->{disks}, $is_template, $qemu_support);
 
 	my $fs_frozen = $self->qga_fs_freeze($task, $vmid);
@@ -735,7 +741,7 @@ sub archive_pbs {
 	    devlist => $devlist,
 	    'config-file' => $conffile,
 	};
-	$params->{fleecing} = JSON::true if $use_fleecing;
+	$params->{fleecing} = JSON::true if $task->{'use-fleecing'};
 
 	if (defined(my $ns = $scfg->{namespace})) {
 	    $params->{'backup-ns'} = $ns;
@@ -783,11 +789,6 @@ sub archive_pbs {
 	$self->resume_vm_after_job_start($task, $vmid);
     }
     $self->restore_vm_power_state($vmid);
-
-    if ($use_fleecing) {
-	detach_fleecing_images($task->{disks}, $vmid);
-	cleanup_fleecing_images($self, $task->{disks});
-    }
 
     die $err if $err;
 }
@@ -891,7 +892,6 @@ sub archive_vma {
     }
 
     my $devlist = _get_task_devlist($task);
-    my $use_fleecing;
 
     $self->enforce_vm_running_for_backup($vmid);
     $self->{qmeventd_fh} = PVE::QemuServer::register_qmeventd_handle($vmid);
@@ -911,7 +911,7 @@ sub archive_vma {
 
 	$attach_tpmstate_drive->($self, $task, $vmid);
 
-	$use_fleecing = check_and_prepare_fleecing(
+	$task->{'use-fleecing'} = check_and_prepare_fleecing(
 	    $self, $vmid, $opts->{fleecing}, $task->{disks}, $is_template, $qemu_support);
 
 	my $outfh;
@@ -942,7 +942,7 @@ sub archive_vma {
 		devlist => $devlist
 	    };
 	    $params->{'firewall-file'} = $firewall if -e $firewall;
-	    $params->{fleecing} = JSON::true if $use_fleecing;
+	    $params->{fleecing} = JSON::true if $task->{'use-fleecing'};
 	    add_backup_performance_options($params, $opts->{performance}, $qemu_support);
 
 	    $qmpclient->queue_cmd($vmid, $backup_cb, 'backup', %$params);
@@ -983,11 +983,6 @@ sub archive_vma {
     }
 
     $self->restore_vm_power_state($vmid);
-
-    if ($use_fleecing) {
-	detach_fleecing_images($task->{disks}, $vmid);
-	cleanup_fleecing_images($self, $task->{disks});
-    }
 
     if ($err) {
 	if ($cpid) {
@@ -1130,7 +1125,13 @@ sub snapshot {
 sub cleanup {
     my ($self, $task, $vmid) = @_;
 
-    $detach_tpmstate_drive->($task, $vmid);
+    # If VM was started only for backup, it is already stopped now.
+    if (PVE::QemuServer::Helpers::vm_running_locally($vmid)) {
+	$detach_tpmstate_drive->($task, $vmid);
+	detach_fleecing_images($task->{disks}, $vmid) if $task->{'use-fleecing'};
+    }
+
+    cleanup_fleecing_images($self, $task->{disks}) if $task->{'use-fleecing'};
 
     if ($self->{qmeventd_fh}) {
 	close($self->{qmeventd_fh});

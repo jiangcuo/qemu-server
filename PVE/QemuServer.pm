@@ -43,6 +43,7 @@ use PVE::ProcFSTools;
 use PVE::PBSClient;
 use PVE::RESTEnvironment qw(log_warn);
 use PVE::RPCEnvironment;
+use PVE::SafeSyslog;
 use PVE::Storage;
 use PVE::SysFSTools;
 use PVE::Systemd;
@@ -53,7 +54,7 @@ use PVE::QemuConfig;
 use PVE::QemuServer::Helpers qw(config_aware_timeout min_version windows_version);
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CGroup;
-use PVE::QemuServer::CPUConfig qw(print_cpu_device get_cpu_options get_cpu_bitness is_native_arch);
+use PVE::QemuServer::CPUConfig qw(print_cpu_device get_cpu_options get_cpu_bitness is_native_arch get_amd_sev_object);
 use PVE::QemuServer::Drive qw(is_valid_drivename drive_is_cloudinit drive_is_cdrom drive_is_read_only parse_drive print_drive);
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Memory qw(get_current_memory);
@@ -386,6 +387,12 @@ my $confdesc = {
 	type => 'string',
 	description => "Memory properties.",
 	format => $PVE::QemuServer::Memory::memory_fmt
+    },
+    'amd-sev' => {
+	description => "Secure Encrypted Virtualization (SEV) features by AMD CPUs",
+	optional => 1,
+	format => 'pve-qemu-sev-fmt',
+	type => 'string',
     },
     balloon => {
 	optional => 1,
@@ -2417,7 +2424,7 @@ sub parse_vm_config {
 	    } else {
 		$handle_error->("vm $vmid - property 'delete' is only allowed in [PENDING]\n");
 	    }
-	} elsif ($line =~ m/^([a-z][a-z_]*\d*):\s*(.+?)\s*$/) {
+	} elsif ($line =~ m/^([a-z][a-z_\-]*\d*):\s*(.+?)\s*$/) {
 	    my $key = $1;
 	    my $value = $2;
 	    if ($section eq 'cloudinit') {
@@ -2592,12 +2599,31 @@ sub config_list {
     return $res;
 }
 
+sub check_non_migratable_resources {
+    my ($conf, $state, $noerr) = @_;
+
+    my @blockers = ();
+    if ($state && $conf->{"amd-sev"}) {
+	push @blockers, "amd-sev";
+    }
+
+    if (scalar(@blockers) && !$noerr) {
+	die "Cannot live-migrate, snapshot (with RAM), or hibernate a VM with: "
+	    . join(', ', @blockers) ."\n";
+    }
+
+    return @blockers;
+}
+
 # test if VM uses local resources (to prevent migration)
 sub check_local_resources {
-    my ($conf, $noerr) = @_;
+    my ($conf, $state, $noerr) = @_;
 
     my @loc_res = ();
     my $mapped_res = [];
+
+    my @non_migratable_resources = check_non_migratable_resources($conf, $state, $noerr);
+    push(@loc_res, @non_migratable_resources);
 
     my $nodelist = PVE::Cluster::get_nodelist();
     my $pci_map = PVE::Mapping::PCI::config();
@@ -4215,6 +4241,12 @@ sub config_to_command {
     }else{
        push @$machineFlags, "type=${machine_type_min}";
     }
+
+    if ($conf->{'amd-sev'}) {
+	push @$devices, '-object', get_amd_sev_object($conf->{'amd-sev'}, $conf->{bios});
+	push @$machineFlags, 'confidential-guest-support=sev0';
+    }
+
     push @$cmd, @$devices;
     push @$cmd, '-rtc', join(',', @$rtcFlags) if scalar(@$rtcFlags);
     push @$cmd, '-machine', join(',', @$machineFlags) if scalar(@$machineFlags);
@@ -6061,6 +6093,8 @@ sub vm_start_nolock {
     eval { PVE::QemuServer::PCI::reserve_pci_usage($pci_reserve_list, $vmid, undef, $pid) };
     warn $@ if $@;
 
+    syslog("info", "VM $vmid started with PID $pid.");
+
     if (defined(my $migrate = $res->{migrate})) {
 	if ($migrate->{proto} eq 'tcp') {
 	    my $nodename = nodename();
@@ -6490,6 +6524,8 @@ sub vm_suspend {
 	die "cannot suspend to disk during backup\n"
 	    if $is_backing_up && $includestate;
 
+	check_non_migratable_resources($conf, $includestate, 0);
+
 	if ($includestate) {
 	    $conf->{lock} = 'suspending';
 	    my $date = strftime("%Y-%m-%d", localtime(time()));
@@ -6869,6 +6905,7 @@ my $restore_allocate_devices = sub {
     my $map = {};
     foreach my $virtdev (sort keys %$virtdev_hash) {
 	my $d = $virtdev_hash->{$virtdev};
+	die "got no size for '$virtdev'\n" if !defined($d->{size});
 	my $alloc_size = int(($d->{size} + 1024 - 1)/1024);
 	my $storeid = $d->{storeid};
 	my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
@@ -7452,6 +7489,7 @@ sub live_import_from_files {
     my ($mapping, $vmid, $conf, $restore_options) = @_;
 
     my $live_restore_backing = {};
+    my $sources_to_remove = [];
     for my $dev (keys %$mapping) {
 	die "disk not support for live-restoring: '$dev'\n"
 	    if !is_valid_drivename($dev) || $dev =~ /^(?:efidisk|tpmstate)/;
@@ -7472,6 +7510,9 @@ sub live_import_from_files {
 	    . ",read-only=on"
 	    . ",file.driver=file,file.filename=$path"
 	};
+
+	my $source_volid = $info->{'delete-after-finish'};
+	push $sources_to_remove->@*, $source_volid if defined($source_volid);
     };
 
     my $storecfg = PVE::Storage::config();
@@ -7515,6 +7556,14 @@ sub live_import_from_files {
     };
 
     my $err = $@;
+
+    for my $volid ($sources_to_remove->@*) {
+	eval {
+	    PVE::Storage::vdisk_free($storecfg, $volid);
+	    print "cleaned up extracted image $volid\n";
+	};
+	warn "An error occurred while cleaning up source images: $@\n" if $@;
+    }
 
     if ($err) {
 	warn "An error occurred during live-restore: $err\n";
@@ -7908,7 +7957,17 @@ sub qga_check_running {
     return 1;
 }
 
-sub template_create {
+=head3 template_create($vmid, $conf [, $disk])
+
+Converts all used disk volumes for the VM with the identifier C<$vmid> and
+configuration C<$conf> to base images (e.g. for VM templates).
+
+If the optional C<$disk> parameter is set, it will only convert the disk
+volume at the specified drive name (e.g. "scsi0").
+
+=cut
+
+sub template_create : prototype($$;$) {
     my ($vmid, $conf, $disk) = @_;
 
     my $storecfg = PVE::Storage::config();
@@ -7925,6 +7984,8 @@ sub template_create {
 	my $voliddst = PVE::Storage::vdisk_create_base($storecfg, $volid);
 	$drive->{file} = $voliddst;
 	$conf->{$ds} = print_drive($drive);
+
+	# write vm config on every change in case this fails on subsequent iterations
 	PVE::QemuConfig->write_config($vmid, $conf);
     });
 }
@@ -8660,12 +8721,6 @@ sub generate_uuid {
 
 sub generate_smbios1_uuid {
     return "uuid=".generate_uuid();
-}
-
-sub nbd_stop {
-    my ($vmid) = @_;
-
-    mon_cmd($vmid, 'nbd-server-stop', timeout => 25);
 }
 
 sub create_reboot_request {

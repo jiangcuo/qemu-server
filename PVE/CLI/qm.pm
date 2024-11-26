@@ -19,6 +19,7 @@ use PVE::APIClient::LWP;
 use PVE::Cluster;
 use PVE::Exception qw(raise_param_exc);
 use PVE::GuestHelpers;
+use PVE::GuestImport::OVF;
 use PVE::INotify;
 use PVE::JSONSchema qw(get_standard_option);
 use PVE::Network;
@@ -29,12 +30,12 @@ use PVE::Tools qw(extract_param file_get_contents);
 use PVE::API2::Qemu::Agent;
 use PVE::API2::Qemu;
 use PVE::QemuConfig;
-use PVE::QemuServer::Drive;
+use PVE::QemuServer::Drive qw(is_valid_drivename);
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Agent qw(agent_available);
 use PVE::QemuServer::ImportDisk;
 use PVE::QemuServer::Monitor qw(mon_cmd);
-use PVE::QemuServer::OVF;
+use PVE::QemuServer::QMPHelpers;
 use PVE::QemuServer;
 
 use PVE::CLIHandler;
@@ -385,7 +386,7 @@ __PACKAGE__->register_method ({
 
 	my $vmid = $param->{vmid};
 
-	eval { PVE::QemuServer::nbd_stop($vmid) };
+	eval { PVE::QemuServer::QMPHelpers::nbd_stop($vmid) };
 	warn $@ if $@;
 
 	return;
@@ -579,6 +580,12 @@ __PACKAGE__->register_method ({
 		enum => [ 'raw', 'qcow2', 'vmdk' ],
 		optional => 1,
 	    },
+	    'target-disk' => {
+		type => 'string',
+		description => 'The disk name where the volume will be imported to (e.g. scsi1).',
+		enum => [PVE::QemuServer::Drive::valid_drive_names_with_unused()],
+		optional => 1,
+	    },
 	},
     },
     returns => { type => 'null'},
@@ -589,6 +596,10 @@ __PACKAGE__->register_method ({
 	my $source = extract_param($param, 'source');
 	my $storeid = extract_param($param, 'storage');
 	my $format = extract_param($param, 'format');
+	my $target_disk = extract_param($param, 'target-disk');
+
+	# do_import does not allow invalid drive names (e.g. unused0)
+	$target_disk = undef if !is_valid_drivename($target_disk);
 
 	my $vm_conf = PVE::QemuConfig->load_config($vmid);
 	PVE::QemuConfig->check_lock($vm_conf);
@@ -602,8 +613,24 @@ __PACKAGE__->register_method ({
 	    if !$target_storage_config->{content}->{images};
 
 	print "importing disk '$source' to VM $vmid ...\n";
-	my ($drive_id, $volid) = PVE::QemuServer::ImportDisk::do_import($source, $vmid, $storeid, { format => $format });
-	print "Successfully imported disk as '$drive_id:$volid'\n";
+
+	my ($drive_id, $volid) = PVE::QemuServer::ImportDisk::do_import(
+	    $source,
+	    $vmid,
+	    $storeid,
+	    {
+		drive_name => $target_disk,
+		format => $format,
+	    },
+	);
+
+	$vm_conf = PVE::QemuConfig->load_config($vmid);
+
+	# change imported _used_ disk to a base volume in case the VM is a template
+	PVE::QemuServer::template_create($vmid, $vm_conf, $drive_id)
+	    if is_valid_drivename($drive_id) && PVE::QemuConfig->is_template($vm_conf);
+
+	print "$drive_id: successfully imported disk '$vm_conf->{$drive_id}'\n";
 
 	return;
     }});
@@ -729,7 +756,7 @@ __PACKAGE__->register_method ({
 	my $storecfg = PVE::Storage::config();
 	PVE::Storage::storage_check_enabled($storecfg, $storeid);
 
-	my $parsed = PVE::QemuServer::OVF::parse_ovf($ovf_file);
+	my $parsed = PVE::GuestImport::OVF::parse_ovf($ovf_file);
 
 	if ($dryrun) {
 	    print to_json($parsed, { pretty => 1, canonical => 1});
