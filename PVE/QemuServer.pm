@@ -4417,6 +4417,10 @@ sub vm_deviceplug {
 
 	my $machine_type = PVE::QemuServer::Machine::qemu_machine_pxe($vmid, $conf);
 	my $machine_version = PVE::QemuServer::Machine::extract_version($machine_type);
+	#loongarch qemu is special, we get machine_version from the current qemu version
+	if ( $arch = 'loongarch64'){
+		$machine_version = extract_version($machine_type, kvm_user_version());
+	}
 	my $use_old_bios_files = undef;
 	($use_old_bios_files, $machine_type) = qemu_use_old_bios_files($machine_type);
 
