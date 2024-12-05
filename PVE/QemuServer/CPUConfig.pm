@@ -166,7 +166,8 @@ my $cpu_vendor_list = {
     'max' => 'default',
     'la464_loongarch_cpu' => 'default',
     'rv64' => 'default', 
-
+    'la464' => 'default',
+    'la132' => 'default',
 };
 
 my @supported_cpu_flags = (
@@ -576,6 +577,11 @@ sub get_cpu_options {
 	    or die "Cannot parse cpu description: $cpu_prop_str\n";
 
 	$cputype = $cpu->{cputype};
+
+	if ( $cputype eq 'la464_loongarch_cpu' ) {
+		$cputype = 'la464';
+	}
+
 	if (my $model = $builtin_models->{$cputype}) {
 	    $cputype = $model->{'reported-model'};
 	    $builtin_cpu->{flags} = $model->{'flags'};
