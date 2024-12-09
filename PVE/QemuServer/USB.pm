@@ -131,6 +131,12 @@ sub get_usb_controllers {
 
     my $use_qemu_xhci = min_version($machine_version, 7, 1)
 	&& defined($ostype) && ($ostype eq 'l26' || windows_version($ostype) > 7);
+	
+	# We use qemu_xhci only for !x86_64 device
+	if ($arch ne 'x86_64'){
+		$use_qemu_xhci = 1;
+	}
+
     my $is_q35 = PVE::QemuServer::Machine::machine_type_is_q35($conf);
 
     if ($arch ne 'x86_64') {
@@ -162,11 +168,17 @@ sub get_usb_controllers {
     }
 
     $pciaddr = print_pci_addr("xhci", $bridges, $arch, $machine);
-    if ($use_qemu_xhci && $any_usb) {
-	push @$devices, '-device', print_qemu_xhci_controller($pciaddr);
-    } elsif ($use_usb3) {
-	push @$devices, '-device', "nec-usb-xhci,id=xhci$pciaddr";
-    }
+	
+	if ($arch ne 'x86_64') {
+		#  Create the usb controller on first boot so that we don't need to hot-plug the device later.
+		push @$devices, '-device', print_qemu_xhci_controller($pciaddr);
+	}else{
+		if ($use_qemu_xhci && $any_usb) {
+		push @$devices, '-device', print_qemu_xhci_controller($pciaddr);
+		} elsif ($use_usb3) {
+		push @$devices, '-device', "nec-usb-xhci,id=xhci$pciaddr";
+		}
+	}
 
     return @$devices;
 }
