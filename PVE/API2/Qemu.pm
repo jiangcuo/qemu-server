@@ -1223,6 +1223,11 @@ __PACKAGE__->register_method({
 		    );
 		    $conf->{$_} = $created_opts->{$_} for keys $created_opts->%*;
 
+            # set default bios to ovmf
+            if (!$conf->{bios}){
+                $conf->{bios} = 'ovmf';
+            }
+
 		    if (!$conf->{boot}) {
 			my $devs = PVE::QemuServer::get_default_bootdevices($conf);
 			$conf->{boot} = PVE::QemuServer::print_bootorder($devs);
