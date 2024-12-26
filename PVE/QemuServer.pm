@@ -421,6 +421,12 @@ my $confdesc = {
 	description => "Memory properties.",
 	format => $PVE::QemuServer::Memory::memory_fmt
     },
+	gicversion => {
+    optional => 1,
+    type => 'string',
+    description => "Set virt gic-version",
+    enum => [qw(host 2 3 4 max)],
+    },
     'amd-sev' => {
 	description => "Secure Encrypted Virtualization (SEV) features by AMD CPUs",
 	optional => 1,
@@ -4279,14 +4285,17 @@ sub config_to_command {
     my $machine_type_min = $machine_type;
     $machine_type_min =~ s/\+pve\d+$//;
     $machine_type_min .= "+pve$required_pve_version";
+
+
+	my $gicv = $kvm ? 'host' : 'max';
+    if ( $conf->{gicversion} ) {
+        $gicv = $conf->{gicversion};
+    } 
+
     if ($arch eq 'aarch64'){
-	if (!$kvm){
-        push @$machineFlags, "type=${machine_type_min}";
-	}else{
-	 push @$machineFlags, "type=${machine_type_min},gic-version=host";
-	}
+		push @$machineFlags, "type=${machine_type_min},gic-version=${gicv}";
     }else{
-       push @$machineFlags, "type=${machine_type_min}";
+    	push @$machineFlags, "type=${machine_type_min}";
     }
 
 	# This method is prevented from being executed on the Port branch.

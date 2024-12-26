@@ -684,6 +684,7 @@ my $generaloptions = {
     'name' => 1,
     'onboot' => 1,
     'ostype' => 1,
+	'gicversion' =>1,
     'protection' => 1,
     'reboot' => 1,
     'startdate' => 1,
