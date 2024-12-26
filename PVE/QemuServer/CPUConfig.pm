@@ -39,22 +39,22 @@ sub load_custom_model_conf {
 
 #builtin models : reported-model is mandatory
 my $builtin_models = {
-    'x86-64-v2' => {
-	'reported-model' => 'qemu64',
-	flags => "+popcnt;+pni;+sse4.1;+sse4.2;+ssse3",
-    },
-    'x86-64-v2-AES' => {
-	'reported-model' => 'qemu64',
-	flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3",
-    },
-    'x86-64-v3' => {
-	'reported-model' => 'qemu64',
-	flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3;+avx;+avx2;+bmi1;+bmi2;+f16c;+fma;+abm;+movbe;+xsave",
-    },
-    'x86-64-v4' => {
-	'reported-model' => 'qemu64',
-	flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3;+avx;+avx2;+bmi1;+bmi2;+f16c;+fma;+abm;+movbe;+xsave;+avx512f;+avx512bw;+avx512cd;+avx512dq;+avx512vl",
-    },
+    # 'x86-64-v2' => {
+	# 'reported-model' => 'qemu64',
+	# flags => "+popcnt;+pni;+sse4.1;+sse4.2;+ssse3",
+    # },
+    # 'x86-64-v2-AES' => {
+	# 'reported-model' => 'qemu64',
+	# flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3",
+    # },
+    # 'x86-64-v3' => {
+	# 'reported-model' => 'qemu64',
+	# flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3;+avx;+avx2;+bmi1;+bmi2;+f16c;+fma;+abm;+movbe;+xsave",
+    # },
+    # 'x86-64-v4' => {
+	# 'reported-model' => 'qemu64',
+	# flags => "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3;+avx;+avx2;+bmi1;+bmi2;+f16c;+fma;+abm;+movbe;+xsave;+avx512f;+avx512bw;+avx512cd;+avx512dq;+avx512vl",
+    # },
 };
 
 my $depreacated_cpu_map = {
@@ -76,100 +76,101 @@ my $cputypes_32bit = {
 
 my $cpu_vendor_list = {
     # Intel CPUs
-    486 => 'GenuineIntel',
-    pentium => 'GenuineIntel',
-    pentium2 => 'GenuineIntel',
-    pentium3 => 'GenuineIntel',
-    coreduo => 'GenuineIntel',
-    core2duo => 'GenuineIntel',
-    Conroe => 'GenuineIntel',
-    Penryn => 'GenuineIntel',
-    Nehalem => 'GenuineIntel',
-    'Nehalem-IBRS' => 'GenuineIntel',
-    Westmere => 'GenuineIntel',
-    'Westmere-IBRS' => 'GenuineIntel',
-    SandyBridge => 'GenuineIntel',
-    'SandyBridge-IBRS' => 'GenuineIntel',
-    IvyBridge => 'GenuineIntel',
-    'IvyBridge-IBRS' => 'GenuineIntel',
-    Haswell => 'GenuineIntel',
-    'Haswell-IBRS' => 'GenuineIntel',
-    'Haswell-noTSX' => 'GenuineIntel',
-    'Haswell-noTSX-IBRS' => 'GenuineIntel',
-    Broadwell => 'GenuineIntel',
-    'Broadwell-IBRS' => 'GenuineIntel',
-    'Broadwell-noTSX' => 'GenuineIntel',
-    'Broadwell-noTSX-IBRS' => 'GenuineIntel',
-    'Skylake-Client' => 'GenuineIntel',
-    'Skylake-Client-IBRS' => 'GenuineIntel',
-    'Skylake-Client-noTSX-IBRS' => 'GenuineIntel',
-    'Skylake-Client-v4' => 'GenuineIntel',
-    'Skylake-Server' => 'GenuineIntel',
-    'Skylake-Server-IBRS' => 'GenuineIntel',
-    'Skylake-Server-noTSX-IBRS' => 'GenuineIntel',
-    'Skylake-Server-v4' => 'GenuineIntel',
-    'Skylake-Server-v5' => 'GenuineIntel',
-    'Cascadelake-Server' => 'GenuineIntel',
-    'Cascadelake-Server-v2' => 'GenuineIntel',
-    'Cascadelake-Server-noTSX' => 'GenuineIntel',
-    'Cascadelake-Server-v4' => 'GenuineIntel',
-    'Cascadelake-Server-v5' => 'GenuineIntel',
-    'Cooperlake' => 'GenuineIntel',
-    'Cooperlake-v2' => 'GenuineIntel',
-    KnightsMill => 'GenuineIntel',
-    'Icelake-Client' => 'GenuineIntel', # depreacated, removed with QEMU 7.1
-    'Icelake-Client-noTSX' => 'GenuineIntel', # depreacated, removed with QEMU 7.1
-    'Icelake-Server' => 'GenuineIntel',
-    'Icelake-Server-noTSX' => 'GenuineIntel',
-    'Icelake-Server-v3' => 'GenuineIntel',
-    'Icelake-Server-v4' => 'GenuineIntel',
-    'Icelake-Server-v5' => 'GenuineIntel',
-    'Icelake-Server-v6' => 'GenuineIntel',
-    'SapphireRapids' => 'GenuineIntel',
-    'SapphireRapids-v2' => 'GenuineIntel',
-    'GraniteRapids' => 'GenuineIntel',
+    # 486 => 'GenuineIntel',
+    # pentium => 'GenuineIntel',
+    # pentium2 => 'GenuineIntel',
+    # pentium3 => 'GenuineIntel',
+    # coreduo => 'GenuineIntel',
+    # core2duo => 'GenuineIntel',
+    # Conroe => 'GenuineIntel',
+    # Penryn => 'GenuineIntel',
+    # Nehalem => 'GenuineIntel',
+    # 'Nehalem-IBRS' => 'GenuineIntel',
+    # Westmere => 'GenuineIntel',
+    # 'Westmere-IBRS' => 'GenuineIntel',
+    # SandyBridge => 'GenuineIntel',
+    # 'SandyBridge-IBRS' => 'GenuineIntel',
+    # IvyBridge => 'GenuineIntel',
+    # 'IvyBridge-IBRS' => 'GenuineIntel',
+    # Haswell => 'GenuineIntel',
+    # 'Haswell-IBRS' => 'GenuineIntel',
+    # 'Haswell-noTSX' => 'GenuineIntel',
+    # 'Haswell-noTSX-IBRS' => 'GenuineIntel',
+    # Broadwell => 'GenuineIntel',
+    # 'Broadwell-IBRS' => 'GenuineIntel',
+    # 'Broadwell-noTSX' => 'GenuineIntel',
+    # 'Broadwell-noTSX-IBRS' => 'GenuineIntel',
+    # 'Skylake-Client' => 'GenuineIntel',
+    # 'Skylake-Client-IBRS' => 'GenuineIntel',
+    # 'Skylake-Client-noTSX-IBRS' => 'GenuineIntel',
+    # 'Skylake-Client-v4' => 'GenuineIntel',
+    # 'Skylake-Server' => 'GenuineIntel',
+    # 'Skylake-Server-IBRS' => 'GenuineIntel',
+    # 'Skylake-Server-noTSX-IBRS' => 'GenuineIntel',
+    # 'Skylake-Server-v4' => 'GenuineIntel',
+    # 'Skylake-Server-v5' => 'GenuineIntel',
+    # 'Cascadelake-Server' => 'GenuineIntel',
+    # 'Cascadelake-Server-v2' => 'GenuineIntel',
+    # 'Cascadelake-Server-noTSX' => 'GenuineIntel',
+    # 'Cascadelake-Server-v4' => 'GenuineIntel',
+    # 'Cascadelake-Server-v5' => 'GenuineIntel',
+    # 'Cooperlake' => 'GenuineIntel',
+    # 'Cooperlake-v2' => 'GenuineIntel',
+    # KnightsMill => 'GenuineIntel',
+    # 'Icelake-Client' => 'GenuineIntel', # depreacated, removed with QEMU 7.1
+    # 'Icelake-Client-noTSX' => 'GenuineIntel', # depreacated, removed with QEMU 7.1
+    # 'Icelake-Server' => 'GenuineIntel',
+    # 'Icelake-Server-noTSX' => 'GenuineIntel',
+    # 'Icelake-Server-v3' => 'GenuineIntel',
+    # 'Icelake-Server-v4' => 'GenuineIntel',
+    # 'Icelake-Server-v5' => 'GenuineIntel',
+    # 'Icelake-Server-v6' => 'GenuineIntel',
+    # 'SapphireRapids' => 'GenuineIntel',
 
-    # AMD CPUs
-    athlon => 'AuthenticAMD',
-    phenom => 'AuthenticAMD',
-    Opteron_G1 => 'AuthenticAMD',
-    Opteron_G2 => 'AuthenticAMD',
-    Opteron_G3 => 'AuthenticAMD',
-    Opteron_G4 => 'AuthenticAMD',
-    Opteron_G5 => 'AuthenticAMD',
-    EPYC => 'AuthenticAMD',
-    'EPYC-IBPB' => 'AuthenticAMD',
-    'EPYC-v3' => 'AuthenticAMD',
-    'EPYC-v4' => 'AuthenticAMD',
-    'EPYC-Rome' => 'AuthenticAMD',
-    'EPYC-Rome-v2' => 'AuthenticAMD',
-    'EPYC-Rome-v3' => 'AuthenticAMD',
-    'EPYC-Rome-v4' => 'AuthenticAMD',
-    'EPYC-Milan' => 'AuthenticAMD',
-    'EPYC-Milan-v2' => 'AuthenticAMD',
-    'EPYC-Genoa' => 'AuthenticAMD',
+    # # AMD CPUs
+    # athlon => 'AuthenticAMD',
+    # phenom => 'AuthenticAMD',
+    # Opteron_G1 => 'AuthenticAMD',
+    # Opteron_G2 => 'AuthenticAMD',
+    # Opteron_G3 => 'AuthenticAMD',
+    # Opteron_G4 => 'AuthenticAMD',
+    # Opteron_G5 => 'AuthenticAMD',
+    # EPYC => 'AuthenticAMD',
+    # 'EPYC-IBPB' => 'AuthenticAMD',
+    # 'EPYC-v3' => 'AuthenticAMD',
+    #'EPYC-v4' => 'AuthenticAMD',
+    # 'EPYC-Rome' => 'AuthenticAMD',
+    # 'EPYC-Rome-v2' => 'AuthenticAMD',
+    #'EPYC-Rome-v3' => 'AuthenticAMD',
+    #'EPYC-Rome-v4' => 'AuthenticAMD',
+    #'EPYC-Milan' => 'AuthenticAMD',
+    #'EPYC-Milan-v2' => 'AuthenticAMD',
+    #'EPYC-Genoa' => 'AuthenticAMD',
 
-    # generic types, use vendor from host node
-    host => 'default',
-    kvm32 => 'default',
-    kvm64 => 'default',
-    qemu32 => 'default',
-    qemu64 => 'default',
-    max => 'default',
+    # # generic types, use vendor from host node
+    # host => 'default',
+    # kvm32 => 'default',
+    # kvm64 => 'default',
+    # qemu32 => 'default',
+    # qemu64 => 'default',
+    # max => 'default',
+    # virt arm64 cpus
+    'host' => 'default',
+    'cortex-a35' => 'default',
+    'cortex-a53' => 'default',
+    'cortex-a55' => 'default',
+    'cortex-a57' => 'default',
+    'cortex-a72' => 'default',
+    'cortex-a76' => 'default',
+    'neoverse-n1' => 'default',
+    'max' => 'default',
+    'la464_loongarch_cpu' => 'default',
+    'rv64' => 'default', 
+    'la464' => 'default',
+    'la132' => 'default',
 };
 
 my @supported_cpu_flags = (
-    'pcid',
-    'spec-ctrl',
-    'ibpb',
-    'ssbd',
-    'virt-ssbd',
-    'amd-ssbd',
-    'amd-no-ssb',
-    'pdpe1gb',
-    'md-clear',
-    'hv-tlbflush',
-    'hv-evmcs',
     'aes'
 );
 my $cpu_flag_supported_re = qr/([+-])(@{[join('|', @supported_cpu_flags)]})/;
@@ -191,7 +192,7 @@ my $cpu_fmt = {
 	    ." Only valid for custom CPU model definitions, default models will always report themselves to the guest OS.",
 	type => 'string',
 	enum => [ sort { lc("$a") cmp lc("$b") } keys %$cpu_vendor_list ],
-	default => 'kvm64',
+	default => 'host',
 	optional => 1,
     },
     hidden => {
@@ -576,6 +577,11 @@ sub get_cpu_options {
 	    or die "Cannot parse cpu description: $cpu_prop_str\n";
 
 	$cputype = $cpu->{cputype};
+
+	if ( $cputype eq 'la464_loongarch_cpu' ) {
+		$cputype = 'la464';
+	}
+
 	if (my $model = $builtin_models->{$cputype}) {
 	    $cputype = $model->{'reported-model'};
 	    $builtin_cpu->{flags} = $model->{'flags'};
@@ -633,7 +639,7 @@ sub get_cpu_options {
 	$pve_forced_flags->{'vendor'} = {
 	    value => $cpu_vendor,
 	} if $cpu_vendor ne 'default';
-    } elsif ($arch ne 'aarch64') {
+    } elsif ($arch ne 'loongarch64') {
 	die "internal error"; # should not happen
     }
 
@@ -770,7 +776,10 @@ sub get_default_cpu_type {
     my ($arch, $kvm) = @_;
 
     my $cputype = $kvm ? 'kvm64' : 'qemu64';
-    $cputype = 'cortex-a57' if $arch eq 'aarch64';
+    $cputype = 'host' if $arch eq 'aarch64';
+    $cputype = 'host' if $arch eq 'arm';
+    $cputype = 'rv64' if $arch eq 'riscv64';
+    $cputype = 'max' if $arch eq 'loongarch64';
 
     return $cputype;
 }
@@ -802,7 +811,9 @@ sub get_cpu_bitness {
     }
 
     return $cputypes_32bit->{$cputype} ? 32 : 64 if $arch eq 'x86_64';
-    return 64 if $arch eq 'aarch64';
+    if ($arch eq 'aarch64' || $arch eq 'loongarch64' || $arch eq 'riscv64') {
+        return 64;
+    }
 
     die "unsupported architecture '$arch'\n";
 }

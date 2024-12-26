@@ -14,7 +14,7 @@ MAN5DIR=$(MANDIR)/man5/
 BASHCOMPLDIR=$(PREFIX)/share/bash-completion/completions/
 ZSHCOMPLDIR=$(PREFIX)/share/zsh/vendor-completions/
 export PERLDIR=$(PREFIX)/share/perl5
-PERLINCDIR=$(PERLDIR)/asm-x86_64
+PERLINCDIR=$(PERLDIR)/asm-aarch64
 
 GITVERSION:=$(shell git rev-parse HEAD)
 
@@ -81,7 +81,7 @@ install: $(PKGSOURCES)
 $(BUILDDIR):
 	rm -rf $(BUILDDIR) $(BUILDDIR).tmp
 	rsync -a * $(BUILDDIR).tmp
-	echo "git clone git://git.proxmox.com/git/qemu-server.git\\ngit checkout $(GITVERSION)" > $(BUILDDIR).tmp/debian/SOURCE
+	echo "git clone https://github.com/jiangcuo/qemu-server.git\\ngit checkout $(GITVERSION)" > $(BUILDDIR).tmp/debian/SOURCE
 	mv $(BUILDDIR).tmp $(BUILDDIR)
 
 .PHONY: deb
@@ -100,11 +100,6 @@ $(DSC): $(BUILDDIR)
 sbuild: $(DSC)
 	sbuild $(DSC)
 
-.PHONY: test
-test:
-	PVE_GENERATING_DOCS=1 perl -I. ./qm verifyapi
-	$(MAKE) -C test
-
 .PHONY: upload
 upload: UPLOAD_DIST ?= $(DEB_DISTRIBUTION)
 upload: $(DEB)
@@ -112,7 +107,6 @@ upload: $(DEB)
 
 .PHONY: clean
 clean:
-	$(MAKE) -C test $@
 	rm -rf $(PACKAGE)-*/ *.deb *.build *.buildinfo *.changes *.dsc $(PACKAGE)_*.tar.?z
 	rm -f *.xml.tmp *.1 *.5 *.8 *{synopsis,opts}.adoc docinfo.xml
 
