@@ -168,6 +168,7 @@ my $cpu_vendor_list = {
     'rv64' => 'default', 
     'la464' => 'default',
     'la132' => 'default',
+    'Kunpeng-920' => 'default',
 };
 
 my @supported_cpu_flags = (
