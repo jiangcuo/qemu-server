@@ -1,8 +1,14 @@
+qemu-server (8.3.3+port3) bookworm; urgency=medium
+
+  * Add x86_64 cpu for compatible with x86 host
+
+ -- Jiangcuo <jiangcuo@lierfang.com>  Fri, 17 Jan 2025 11:57:51 +0800
+
 qemu-server (8.3.3+port2) bookworm; urgency=medium
 
   * Add 'gicversion' param.
 
- -- Jiangcuo <Jiangcuo@lierfang.com>  Thu, 26 Dec 2024 12:13:33 +0800
+ -- Jiangcuo <Jiangcuo@lierfang.com>  Thu, 26 Dec 2024 12:14:33 +0800
 
 qemu-server (8.3.3+port) bookworm; urgency=medium
 
