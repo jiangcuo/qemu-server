@@ -38,7 +38,7 @@ __PACKAGE__->register_method({
 		},
 		type => {
 		    type => 'string',
-		    enum => ['q35', 'virt'],
+		    enum => ['q35', 'virt', 'i440fx'],
 		    description => "The machine type.",
 		},
 		version => {
@@ -50,7 +50,7 @@ __PACKAGE__->register_method({
     },
     code => sub {
 	my $machines = eval {
-	    my $raw = file_get_contents('/usr/share/kvm/machine-versions-aarch64.json');
+	    my $raw = file_get_contents('/usr/share/kvm/machine-versions.json');
 	    return from_json($raw, { utf8 => 1 });
 	};
 	die "could not load supported machine versions - $@\n" if $@;
