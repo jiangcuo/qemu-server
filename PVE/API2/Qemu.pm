@@ -28,7 +28,7 @@ use PVE::GuestImport;
 use PVE::QemuConfig;
 use PVE::QemuServer;
 use PVE::QemuServer::Cloudinit;
-use PVE::QemuServer::CPUConfig;
+use PVE::QemuServer::CPUConfig qw(get_default_cpu_type);
 use PVE::QemuServer::Drive qw(checked_parse_volname);
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::ImportDisk;
@@ -1244,22 +1244,39 @@ __PACKAGE__->register_method({
 			$conf->{smbios1} = PVE::QemuServer::generate_smbios1_uuid();
 		    }
 
+		    # set default arch for vm
+		    my $hostarch = get_host_arch();
 		    if (!$conf->{arch}) {
-			$conf->{arch} = get_host_arch();
+			$conf->{arch} = $hostarch;
 		    }
 
 		    if ((!defined($conf->{vmgenid}) || $conf->{vmgenid} eq '1') && $arch ne 'aarch64') {
 			$conf->{vmgenid} = PVE::QemuServer::generate_uuid();
 		    }
 
+		    # We detect the value of machine
+		    # and if not, force it to be specified
+		    if (!$conf->{machine}){
+			    if ($conf->{arch} eq 'x86_64'){
+					$conf->{machine} = 'pc';
+			    }else{
+					$conf->{machine} = 'virt';
+			    }
+		    }
+
 		    my $machine_conf = PVE::QemuServer::Machine::parse_machine($conf->{machine});
 		    my $machine = $machine_conf->{type};
-		    if (!$machine){
-			    if ($conf->{arch} eq 'x86_64'){
-					$machine = 'pc';
-			    }else{
-					$machine = 'virt';
-			    }
+
+		    # We check the status of the kvm
+		    # if it is a different architecture, the kvm will be disabled in vm config.
+		    my $kvm = $conf->{kvm} // 1;
+		    if ($conf->{arch} ne $hostarch) {
+				$kvm = 0;
+		    }
+		    $conf->{kvm} = $kvm;
+
+		    if (!$conf->{cpu}) {
+			$conf->{cpu} = get_default_cpu_type($arch,$kvm);
 		    }
 
 			# always pin Windows' machine version on create, they get to easily confused
