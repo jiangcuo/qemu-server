@@ -17,7 +17,7 @@ use PVE::CGroup;
 use PVE::Cluster qw (cfs_read_file cfs_write_file);;
 use PVE::RRD;
 use PVE::SafeSyslog;
-use PVE::Tools qw(extract_param);
+use PVE::Tools qw(extract_param get_host_arch);
 use PVE::Exception qw(raise raise_param_exc raise_perm_exc);
 use PVE::Storage;
 use PVE::JSONSchema qw(get_standard_option);
@@ -675,6 +675,7 @@ my $hwtypeoptions = {
 
 my $generaloptions = {
     'agent' => 1,
+    'arch' => 1,
     'autostart' => 1,
     'bios' => 1,
     'description' => 1,
@@ -1225,10 +1226,10 @@ __PACKAGE__->register_method({
 		    );
 		    $conf->{$_} = $created_opts->{$_} for keys $created_opts->%*;
 
-            # set default bios to ovmf
-            if (!$conf->{bios}){
-                $conf->{bios} = 'ovmf';
-            }
+		    # set default bios to ovmf
+		    if (!$conf->{bios}){
+			$conf->{bios} = 'ovmf';
+		    }
 
 		    if (!$conf->{boot}) {
 			my $devs = PVE::QemuServer::get_default_bootdevices($conf);
@@ -1241,6 +1242,10 @@ __PACKAGE__->register_method({
 		    # auto generate uuid if user did not specify smbios1 option
 		    if (!$conf->{smbios1}) {
 			$conf->{smbios1} = PVE::QemuServer::generate_smbios1_uuid();
+		    }
+
+		    if (!$conf->{arch}) {
+			$conf->{arch} = get_host_arch();
 		    }
 
 		    if ((!defined($conf->{vmgenid}) || $conf->{vmgenid} eq '1') && $arch ne 'aarch64') {

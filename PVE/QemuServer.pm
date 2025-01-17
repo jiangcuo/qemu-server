@@ -3017,6 +3017,7 @@ sub vmstatus {
 	$d->{cpus} = $conf->{vcpus} if $conf->{vcpus};
 
 	$d->{name} = $conf->{name} || "VM $vmid";
+	$d->{arch}  = $conf->{arch} || get_host_arch();
 	$d->{maxmem} = get_current_memory($conf->{memory})*(1024*1024);
 
 	if ($conf->{balloon}) {
