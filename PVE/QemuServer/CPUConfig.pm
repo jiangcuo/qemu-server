@@ -213,7 +213,7 @@ my $cpu_fmt = {
 	    ." Only valid for custom CPU model definitions, default models will always report themselves to the guest OS.",
 	type => 'string',
 	enum => [ sort { lc("$a") cmp lc("$b") } keys %$cpu_vendor_list ],
-	default => 'kvm64',
+	default => 'max',
 	optional => 1,
     },
     hidden => {
