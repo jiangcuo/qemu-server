@@ -9,7 +9,6 @@
   -pidfile /var/run/qemu-server/8006.pid \
   -daemonize \
   -smbios 'type=1,uuid=6cf17dc3-8341-4ecc-aebd-7503f2583fb3' \
-  -smbios 'type=1,uuid=6cf17dc3-8341-4ecc-aebd-7503f2583fb3' \
   -smp '1,sockets=1,cores=1,maxcpus=1' \
   -nodefaults \
   -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \

@@ -11,8 +11,9 @@
   -smp '1,sockets=1,cores=1,maxcpus=1' \
   -nodefaults \
   -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
-  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
-  -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
+  -vga none \
+  -nographic \
+  -cpu qemu64 \
   -m 512 \
   -global 'PIIX4_PM.disable_s3=1' \
   -global 'PIIX4_PM.disable_s4=1' \
