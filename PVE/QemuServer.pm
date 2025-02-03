@@ -97,11 +97,72 @@ my $OVMF = {
 	],
     },
     aarch64 => {
+	'4m-no-smm' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.fd",
+    ],
+    '4m-no-smm-ms' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.ms.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.ms.fd",
+    ],
+   '4m' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.fd",
+    ],
+    '4m-ms' => [
+        "$EDK2_FW_BASE/AAVMF_CODE.ms.fd",
+        "$EDK2_FW_BASE/AAVMF_VARS.ms.fd",
+    ],
 	default => [
 	    "$EDK2_FW_BASE/AAVMF_CODE.fd",
 	    "$EDK2_FW_BASE/AAVMF_VARS.fd",
 	],
     },
+	loongarch64 => {
+	default =>	[
+		"$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+		"$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+	],
+	'4m-no-smm' =>      [
+                "$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+                "$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+        ],
+	'4m-no-smm-ms' =>      [
+                "$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+                "$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+        ],
+	'4m' =>      [
+                "$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+                "$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+        ],
+	'4m-ms' =>      [
+                "$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+                "$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+        ],
+	},
+	riscv64 => {
+	default =>	[
+		"$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+		"$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+	],
+        '4m-no-smm' =>      [
+                "$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+                "$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+        ],
+        '4m-no-smm-ms' =>      [
+                "$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+                "$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+        ],
+        '4m' =>      [
+                "$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+                "$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+        ],
+        '4m-ms' =>      [
+                "$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+                "$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+        ],
+
+	},
 };
 
 my $cpuinfo = PVE::ProcFSTools::read_cpuinfo();
@@ -184,7 +245,7 @@ my $vga_fmt = {
 	default => 'std',
 	optional => 1,
 	default_key => 1,
-	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio virtio-gl vmware)],
+	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio virtio-gl vmware ramfb)],
     },
     memory => {
 	description => "Sets the VGA memory (in MiB). Has no effect with serial display.",
@@ -343,6 +404,12 @@ my $confdesc = {
 	description => "Memory properties.",
 	format => $PVE::QemuServer::Memory::memory_fmt
     },
+	gicversion => {
+    optional => 1,
+    type => 'string',
+    description => "Set virt gic-version",
+    enum => [qw(host 2 3 4 max)],
+    },
     'amd-sev' => {
 	description => "Secure Encrypted Virtualization (SEV) features by AMD CPUs",
 	optional => 1,
@@ -383,7 +450,7 @@ my $confdesc = {
 	type => 'string',
 	description => "SCSI controller model",
 	enum => [qw(lsi lsi53c810 virtio-scsi-pci virtio-scsi-single megasas pvscsi)],
-	default => 'lsi',
+	default => 'virtio-scsi-pci',
     },
     description => {
 	optional => 1,
@@ -637,7 +704,7 @@ EODESCR
 	description => "Virtual processor architecture. Defaults to the host.",
 	optional => 1,
 	type => 'string',
-	enum => [qw(x86_64 aarch64)],
+	enum => [qw(x86_64 aarch64 loongarch64 riscv64)],
     },
     smbios1 => {
 	description => "Specify SMBIOS type 1 fields.",
@@ -1302,11 +1369,15 @@ sub print_tabletdevice_full {
 
     # we use uhci for old VMs because tablet driver was buggy in older qemu
     my $usbbus;
-    if ($q35 || $arch eq 'aarch64') {
-	$usbbus = 'ehci';
+    if ($q35) {
+		$usbbus = 'ehci';
     } else {
-	$usbbus = 'uhci';
+		$usbbus = 'uhci';
     }
+	
+	if ($arch ne 'x86_64'){
+		$usbbus = 'ehci';
+	}
 
     return "usb-tablet,id=tablet,bus=$usbbus.0,port=1";
 }
@@ -1314,7 +1385,7 @@ sub print_tabletdevice_full {
 sub print_keyboarddevice_full {
     my ($conf, $arch) = @_;
 
-    return if $arch ne 'aarch64';
+    return if $arch eq 'x86_64';
 
     return "usb-kbd,id=keyboard,bus=ehci.0,port=2";
 }
@@ -1690,15 +1761,19 @@ my $vga_map = {
     'std' => 'VGA',
     'vmware' => 'vmware-svga',
     'virtio' => 'virtio-vga',
-    'virtio-gl' => 'virtio-vga-gl',
+    'virtio-gl' => 'virtio-gpu-gl',
+	'ramfb' => 'ramfb',
 };
 
 sub print_vga_device {
     my ($conf, $vga, $arch, $machine_version, $machine, $id, $qxlnum, $bridges) = @_;
 
     my $type = $vga_map->{$vga->{type}};
-    if ($arch eq 'aarch64' && defined($type) && $type eq 'virtio-vga') {
-	$type = 'virtio-gpu';
+    if ($arch ne 'x86_64' && defined($type) && $type eq 'virtio-vga') {
+		$type = 'virtio-gpu-pci';
+    }
+	if ($arch ne 'x86_64' && defined($type) && $type eq 'virtio-gpu-gl') {
+		$type = 'virtio-gpu-gl';
     }
     my $vgamem_mb = $vga->{memory};
 
@@ -1750,7 +1825,7 @@ sub print_vga_device {
     }
 
     if ($vga->{type} eq 'virtio-gl') {
-	my $base = '/usr/lib/x86_64-linux-gnu/lib';
+	my $base = '/usr/lib/$arch-linux-gnu/lib';
 	die "missing libraries for '$vga->{type}' detected! Please install 'libgl1' and 'libegl1'\n"
 	    if !-e "${base}EGL.so.1" || !-e "${base}GL.so.1";
 
@@ -2814,6 +2889,7 @@ sub vmstatus {
 	$d->{cpus} = $conf->{vcpus} if $conf->{vcpus};
 
 	$d->{name} = $conf->{name} || "VM $vmid";
+	$d->{arch}  = $conf->{arch} || get_host_arch();
 	$d->{maxmem} = get_current_memory($conf->{memory})*(1024*1024);
 
 	if ($conf->{balloon}) {
@@ -3082,7 +3158,12 @@ sub add_tpm_device {
 
     push @$devices, "-chardev", "socket,id=tpmchar,path=$paths->{socket}";
     push @$devices, "-tpmdev", "emulator,id=tpmdev,chardev=tpmchar";
+    my $arch = $conf->{arch} // get_host_arch();
+    if ($arch eq 'x86_64'){
     push @$devices, "-device", "tpm-tis,tpmdev=tpmdev";
+    }else{
+    push @$devices, "-device", "tpm-tis-device,tpmdev=tpmdev";
+    }
 }
 
 sub start_swtpm {
@@ -3179,14 +3260,13 @@ sub get_ovmf_files($$$) {
 	or die "no OVMF images known for architecture '$arch'\n";
 
     my $type = 'default';
-    if ($arch eq 'x86_64') {
 	if (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
 	    $type = $smm ? "4m" : "4m-no-smm";
 	    $type .= '-ms' if $efidisk->{'pre-enrolled-keys'};
 	} else {
 	    # TODO: log_warn about use of legacy images for x86_64 with Promxox VE 9
 	}
-    }
+
 
     my ($ovmf_code, $ovmf_vars) = $types->{$type}->@*;
     die "EFI base image '$ovmf_code' not found\n" if ! -f $ovmf_code;
@@ -3225,8 +3305,8 @@ sub query_supported_cpu_flags {
 
     # FIXME: Once this is merged, the code below should work for ARM as well:
     # https://lists.nongnu.org/archive/html/qemu-devel/2019-06/msg04947.html
-    die "QEMU/KVM cannot detect CPU flags on ARM (aarch64)\n" if
-	$arch eq "aarch64";
+    die "QEMU/KVM cannot detect CPU flags on LoongArch64  \n" if
+	$arch eq "loongarch64";
 
     my $kvm_supported = defined(kvm_version());
     my $qemu_cmd = PVE::QemuServer::Helpers::get_command_for_arch($arch);
@@ -3245,7 +3325,8 @@ sub query_supported_cpu_flags {
 	    '-chardev', "socket,id=qmp,path=/var/run/qemu-server/$fakevmid.qmp,server=on,wait=off",
 	    '-mon', 'chardev=qmp,mode=control',
 	    '-pidfile', $pidfile,
-	    '-S', '-daemonize'
+	    '-S', '-daemonize',
+		'-cpu', 'max',
 	];
 
 	if (!$kvm) {
@@ -3260,7 +3341,7 @@ sub query_supported_cpu_flags {
 		$fakevmid,
 		'query-cpu-model-expansion',
 		type => 'full',
-		model => { name => 'host' }
+		model => { name => 'max' }
 	    );
 
 	    my $props = $cmd_result->{model}->{props};
@@ -3370,7 +3451,7 @@ my sub get_vga_properties {
     $vga->{type} = 'qxl' if $qxlnum;
 
     if (!$vga->{type}) {
-	if ($arch eq 'aarch64') {
+	if ($arch ne 'x86_64') {
 	    $vga->{type} = 'virtio';
 	} elsif (min_version($machine_version, 2, 9)) {
 	    $vga->{type} = (!$winversion || $winversion >= 6) ? 'std' : 'cirrus';
@@ -3482,7 +3563,10 @@ sub config_to_command {
 
     push @$cmd, '-name', "$vmname,debug-threads=on";
 
-    push @$cmd, '-no-shutdown';
+    # fix nvram poweroff issue on loongarch
+	if ( $arch ne 'loongarch64'){
+	    push @$cmd, '-no-shutdown';
+	}
 
     my $use_virtio = 0;
 
@@ -3545,7 +3629,7 @@ sub config_to_command {
 	push @$cmd, $fixups->@*;
     }
 
-    if ($conf->{vmgenid}) {
+    if ($conf->{vmgenid} && $arch eq 'x86_64' ) {
 	push @$devices, '-device', 'vmgenid,guid='.$conf->{vmgenid};
     }
 
@@ -3593,7 +3677,7 @@ sub config_to_command {
 	    # On aarch64, serial0 is the UART device. QEMU only allows
 	    # connecting UART devices via the '-serial' command line, as
 	    # the device has a fixed slot on the hardware...
-	    if ($arch eq 'aarch64' && $i == 0) {
+	    if ($arch ne 'x86_64' && $i == 0) {
 		push @$devices, '-serial', "chardev:serial$i";
 	    } else {
 		push @$devices, '-device', "isa-serial,chardev=serial$i";
@@ -3654,14 +3738,18 @@ sub config_to_command {
 
     push @$cmd, '-boot', "menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg";
 
-    push $machineFlags->@*, 'acpi=off' if defined($conf->{acpi}) && $conf->{acpi} == 0;
+    push $machineFlags->@*, 'acpi=off' if defined($conf->{acpi}) && $conf->{acpi} == 0 && $arch ne 'loongarch64';
 
     push @$cmd, '-no-reboot' if  defined($conf->{reboot}) && $conf->{reboot} == 0;
 
     if ($vga->{type} && $vga->{type} !~ m/^serial\d+$/ && $vga->{type} ne 'none'){
+	
+    if ($vga->{type} eq 'ramfb'){
+        push @$devices, '-device', 'ramfb';
+    }else{
 	push @$devices, '-device', print_vga_device(
 	    $conf, $vga, $arch, $machine_version, $machine_type, undef, $qxlnum, $bridges);
-
+	}
 	push @$cmd, '-display', 'egl-headless,gl=core' if $vga->{type} eq 'virtio-gl'; # VIRGL
 
 	my $socket = PVE::QemuServer::Helpers::vnc_socket($vmid);
@@ -3957,14 +4045,18 @@ sub config_to_command {
 	if ($k == 2 && $legacy_igd) {
 	    $k_name = "$k-igd";
 	}
+	if ( $arch eq 'x86_64' ){ 
 	my $pciaddr = print_pci_addr("pci.$k_name", undef, $arch, $machine_type);
 	my $devstr = "pci-bridge,id=pci.$k,chassis_nr=$k$pciaddr";
-
-	if ($q35) { # add after -readconfig pve-q35.cfg
-	    splice @$devices, 2, 0, '-device', $devstr;
-	} else {
-	    unshift @$devices, '-device', $devstr if $k > 0;
+		if ($q35) { # add after -readconfig pve-q35.cfg
+			splice @$devices, 2, 0, '-device', $devstr;
+		} else {
+			unshift @$devices, '-device', $devstr if $k > 0;
+		}
+		}
 	}
+	if ($arch ne 'x86_64') { 
+        unshift @$devices, '-readconfig', '/usr/share/qemu-server/pve-port.cfg';
     }
 
     if (!$kvm) {
@@ -3976,12 +4068,11 @@ sub config_to_command {
     my $machine_type_min = $machine_type;
     $machine_type_min =~ s/\+pve\d+$//;
     $machine_type_min .= "+pve$required_pve_version";
-    push @$machineFlags, "type=${machine_type_min}";
 
     PVE::QemuServer::Machine::assert_valid_machine_property($machine_conf);
 
     if (my $viommu = $machine_conf->{viommu}) {
-	if ($viommu eq 'intel') {
+	if ($viommu eq 'intel' && ($arch eq 'x86_64')) {
 	    unshift @$devices, '-device', 'intel-iommu,intremap=on,caching-mode=on';
 	    push @$machineFlags, 'kernel-irqchip=split';
 	} elsif ($viommu eq 'virtio') {
@@ -3989,7 +4080,18 @@ sub config_to_command {
 	}
     }
 
-    if ($conf->{'amd-sev'}) {
+	my $gicv = $kvm ? 'host' : 'max';
+    if ( $conf->{gicversion} ) {
+        $gicv = $conf->{gicversion};
+    }
+
+	if ($arch eq 'aarch64'){
+		push @$machineFlags, "type=${machine_type_min},gic-version=${gicv}";
+    }else{
+    	push @$machineFlags, "type=${machine_type_min}";
+    }
+
+    if ($conf->{'amd-sev'} && ($arch eq 'x86_64')) {
 	push @$devices, '-object', get_amd_sev_object($conf->{'amd-sev'}, $conf->{bios});
 	push @$machineFlags, 'confidential-guest-support=sev0';
     }
@@ -4163,6 +4265,12 @@ sub vm_deviceplug {
 
 	my $machine_type = PVE::QemuServer::Machine::qemu_machine_pxe($vmid, $conf);
 	my $machine_version = PVE::QemuServer::Machine::extract_version($machine_type);
+
+	#loongarch64 and riscv64 qemu is special, we get machine_version from the current qemu version
+	if ( $arch eq 'loongarch64'|| $arch eq 'riscv64' ) {
+		$machine_version = extract_version($machine_type, kvm_user_version());
+	}
+
 	my $use_old_bios_files = undef;
 	($use_old_bios_files, $machine_type) = qemu_use_old_bios_files($machine_type);
 
@@ -4853,10 +4961,10 @@ sub vmconfig_hotplug_pending {
 		if ($defaults->{tablet}) {
 		    vm_deviceplug($storecfg, $conf, $vmid, 'tablet', $arch, $machine_type);
 		    vm_deviceplug($storecfg, $conf, $vmid, 'keyboard', $arch, $machine_type)
-			if $arch eq 'aarch64';
+			if $arch ne 'x86_64';
 		} else {
 		    vm_deviceunplug($vmid, $conf, 'tablet');
-		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch eq 'aarch64';
+		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch ne 'x86_64';
 		}
 	    } elsif ($opt =~ m/^usb(\d+)$/) {
 		my $index = $1;
@@ -4918,10 +5026,10 @@ sub vmconfig_hotplug_pending {
 		if ($value == 1) {
 		    vm_deviceplug($storecfg, $conf, $vmid, 'tablet', $arch, $machine_type);
 		    vm_deviceplug($storecfg, $conf, $vmid, 'keyboard', $arch, $machine_type)
-			if $arch eq 'aarch64';
+			if $arch ne 'x86_64';
 		} elsif ($value == 0) {
 		    vm_deviceunplug($vmid, $conf, 'tablet');
-		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch eq 'aarch64';
+		    vm_deviceunplug($vmid, $conf, 'keyboard') if $arch ne 'x86_64';
 		}
 	    } elsif ($opt =~ m/^usb(\d+)$/) {
 		my $index = $1;

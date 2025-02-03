@@ -7,6 +7,8 @@ use PVE::QemuServer::Helpers;
 use PVE::QemuServer::MetaInfo;
 use PVE::QemuServer::Monitor;
 use PVE::JSONSchema qw(get_standard_option parse_property_string print_property_string);
+use PVE::Tools qw(get_host_arch);
+
 
 # Bump this for VM HW layout changes during a release (where the QEMU machine
 # version stays the same)
@@ -59,6 +61,8 @@ sub print_machine {
 my $default_machines = {
     x86_64 => 'pc',
     aarch64 => 'virt',
+    riscv64 => 'virt',
+    loongarch64 => 'virt',
 };
 
 sub default_machine_for_arch {
@@ -241,7 +245,7 @@ sub get_vm_machine {
 	    }
 	    $machine = windows_get_pinned_machine_version($machine, $base_version, $kvmversion);
 	}
-	$arch //= 'x86_64';
+	$arch //= get_host_arch();
 	$machine ||= default_machine_for_arch($arch);
 	my $pvever = get_pve_version($kvmversion);
 	$machine .= "+pve$pvever";
