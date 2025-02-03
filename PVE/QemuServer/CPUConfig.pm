@@ -18,6 +18,7 @@ get_cpu_options
 get_cpu_bitness
 is_native_arch
 get_amd_sev_object
+get_default_cpu_type
 );
 
 # under certain race-conditions, this module might be loaded before pve-cluster
@@ -156,6 +157,27 @@ my $cpu_vendor_list = {
     qemu32 => 'default',
     qemu64 => 'default',
     max => 'default',
+
+    # Arm
+    'cortex-a35' => 'ARM',
+    'cortex-a53' => 'ARM',
+    'cortex-a55' => 'ARM',
+    'cortex-a57' => 'ARM',
+    'cortex-a72' => 'ARM',
+    'cortex-a76' => 'ARM',
+    'neoverse-n1' => 'ARM',
+    'neoverse-n2' => 'ARM',
+    'neoverse-v1' => 'ARM',
+    'Kunpeng-920' => 'ARM',
+
+    # LoongArch
+    'la464_loongarch_cpu' => 'LoongARCH',
+    'la464' => 'LoongARCH',
+    'la132' => 'LoongARCH',
+
+    # RISCV
+    'rv64' => 'RISCV', 
+
 };
 
 my @supported_cpu_flags = (
@@ -191,7 +213,7 @@ my $cpu_fmt = {
 	    ." Only valid for custom CPU model definitions, default models will always report themselves to the guest OS.",
 	type => 'string',
 	enum => [ sort { lc("$a") cmp lc("$b") } keys %$cpu_vendor_list ],
-	default => 'kvm64',
+	default => 'max',
 	optional => 1,
     },
     hidden => {
@@ -576,6 +598,11 @@ sub get_cpu_options {
 	    or die "Cannot parse cpu description: $cpu_prop_str\n";
 
 	$cputype = $cpu->{cputype};
+
+	if ( $cputype eq 'la464_loongarch_cpu' ) {
+	    $cputype = 'la464';
+	}
+
 	if (my $model = $builtin_models->{$cputype}) {
 	    $cputype = $model->{'reported-model'};
 	    $builtin_cpu->{flags} = $model->{'flags'};
@@ -628,15 +655,12 @@ sub get_cpu_options {
 
     # $cputype is the "reported-model" for custom types, so we can just look up
     # the vendor in the default list
-    my $cpu_vendor = $cpu_vendor_list->{$cputype};
+    my $cpu_vendor = $cpu_vendor_list->{$cputype} if $arch eq 'x86_64';
     if ($cpu_vendor) {
-	$pve_forced_flags->{'vendor'} = {
-	    value => $cpu_vendor,
-	} if $cpu_vendor ne 'default';
-    } elsif ($arch ne 'aarch64') {
-	die "internal error"; # should not happen
-    }
-
+	    $pve_forced_flags->{'vendor'} = {
+        value => $cpu_vendor,
+    } if $cpu_vendor ne 'default';
+    } 
     my $cpu_str = $cputype;
 
     # will be resolved in parameter order
@@ -769,8 +793,14 @@ sub get_cpu_from_running_vm {
 sub get_default_cpu_type {
     my ($arch, $kvm) = @_;
 
-    my $cputype = $kvm ? 'kvm64' : 'qemu64';
-    $cputype = 'cortex-a57' if $arch eq 'aarch64';
+    # if !kvm ,cpu will set to max for all arch
+    my $cputype = 'max';
+    if ($kvm){
+    $cputype = 'host' if $arch eq 'x86_64';
+    $cputype = 'host' if $arch eq 'aarch64';
+    $cputype = 'rv64' if $arch eq 'riscv64';
+    $cputype = 'la464' if $arch eq 'loongarch64';
+    }
 
     return $cputype;
 }
@@ -802,7 +832,9 @@ sub get_cpu_bitness {
     }
 
     return $cputypes_32bit->{$cputype} ? 32 : 64 if $arch eq 'x86_64';
-    return 64 if $arch eq 'aarch64';
+    if ($arch eq 'aarch64' || $arch eq 'loongarch64' || $arch eq 'riscv64') {
+        return 64;
+    }
 
     die "unsupported architecture '$arch'\n";
 }

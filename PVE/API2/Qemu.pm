@@ -17,7 +17,7 @@ use PVE::CGroup;
 use PVE::Cluster qw (cfs_read_file cfs_write_file);;
 use PVE::RRD;
 use PVE::SafeSyslog;
-use PVE::Tools qw(extract_param);
+use PVE::Tools qw(extract_param get_host_arch);
 use PVE::Exception qw(raise raise_param_exc raise_perm_exc);
 use PVE::Storage;
 use PVE::JSONSchema qw(get_standard_option);
@@ -28,7 +28,7 @@ use PVE::GuestImport;
 use PVE::QemuConfig;
 use PVE::QemuServer;
 use PVE::QemuServer::Cloudinit;
-use PVE::QemuServer::CPUConfig;
+use PVE::QemuServer::CPUConfig qw(get_default_cpu_type);
 use PVE::QemuServer::Drive qw(checked_volume_format checked_parse_volname);
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::ImportDisk;
@@ -664,6 +664,7 @@ my $memoryoptions = {
 
 my $hwtypeoptions = {
     'acpi' => 1,
+	'arch' => 1,
     'hotplug' => 1,
     'kvm' => 1,
     'machine' => 1,
@@ -687,6 +688,7 @@ my $generaloptions = {
     'name' => 1,
     'onboot' => 1,
     'ostype' => 1,
+	'gicversion' =>1,
     'protection' => 1,
     'reboot' => 1,
     'startdate' => 1,
@@ -1239,9 +1241,42 @@ __PACKAGE__->register_method({
 			$conf->{smbios1} = PVE::QemuServer::generate_smbios1_uuid();
 		    }
 
-		    if ((!defined($conf->{vmgenid}) || $conf->{vmgenid} eq '1') && $arch ne 'aarch64') {
+			# set default bios to ovmf
+			if (!$conf->{bios}){
+				$conf->{bios} = 'ovmf';
+			}
+
+			# set default arch for vm
+			my $hostarch = get_host_arch();
+			if (!$conf->{arch}) {
+				$conf->{arch} = $hostarch;
+			}
+
+		    # We check the status of the kvm
+		    # if it is a different architecture, the kvm will be disabled in vm config.
+		    my $kvm = $conf->{kvm} // 1;
+		    if ($conf->{arch} ne $hostarch) {
+		    	$kvm = 0;
+		    }
+		    $conf->{kvm} = $kvm;
+
+		    if (!$conf->{cpu}) {
+			$conf->{cpu} = get_default_cpu_type($arch,$kvm);
+		    }
+
+		    if ((!defined($conf->{vmgenid}) || $conf->{vmgenid} eq '1') && $arch eq 'x86_64') {
 			$conf->{vmgenid} = PVE::QemuServer::generate_uuid();
 		    }
+
+			# We detect the value of machine
+			# and if not, force it to be specified
+			if (!$conf->{machine}){
+				if ($conf->{arch} eq 'x86_64'){
+					$conf->{machine} = 'pc';
+				}else{
+					$conf->{machine} = 'virt';
+				}
+			}
 
 		    # always pin Windows' machine version on create, they get confused too easily
 		    my $machine_string = PVE::QemuServer::Machine::check_and_pin_machine_string(
