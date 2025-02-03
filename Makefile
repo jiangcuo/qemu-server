@@ -47,6 +47,10 @@ $(DSC): $(BUILDDIR)
 sbuild: $(DSC)
 	sbuild $(DSC)
 
+.PHONY: test
+test:
+	PVE_GENERATING_DOCS=1 perl -I. ./qm verifyapi
+
 .PHONY: upload
 upload: UPLOAD_DIST ?= $(DEB_DISTRIBUTION)
 upload: $(DEB)
