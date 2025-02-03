@@ -4159,6 +4159,16 @@ sub config_to_command {
     	push @$machineFlags, "type=${machine_type_min}";
     }
 
+    if (my $viommu = $machine_conf->{viommu}) {
+	if ($viommu eq 'intel' && ($arch eq 'x86_64')) {
+	    unshift @$devices, '-device', 'intel-iommu,intremap=on,caching-mode=on';
+	    push @$machineFlags, 'kernel-irqchip=split';
+	} elsif ($viommu eq 'virtio') {
+	    push @$devices, '-device', 'virtio-iommu-pci';
+	}
+    }
+
+
     if ($conf->{'amd-sev'} && ($arch eq 'x86_64')) {
 	push @$devices, '-object', get_amd_sev_object($conf->{'amd-sev'}, $conf->{bios});
 	push @$machineFlags, 'confidential-guest-support=sev0';
