@@ -383,6 +383,14 @@ qemu-server (8.3.6+port) bookworm; urgency=medium
 
  -- Jiangcuo <Jiangcuo@lierfang.com>  Mon, 03 Feb 2025 13:56:49 +0800
 
+qemu-server (8.3.6+port) bookworm; urgency=medium
+
+  * Update to Port version
+   
+  * Make the x86_64 code more compliant with the upstream version
+
+ -- Jiangcuo <Jiangcuo@lierfang.com>  Mon, 03 Feb 2025 13:56:49 +0800
+
 qemu-server (8.3.6) bookworm; urgency=medium
 
   * api: do not set an empty machine option when pinning
