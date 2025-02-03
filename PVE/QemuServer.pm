@@ -4095,8 +4095,19 @@ sub config_to_command {
 	}
     }
 
+	my $gicv = $kvm ? 'host' : 'max';
+    if ( $conf->{gicversion} ) {
+        $gicv = $conf->{gicversion};
+    }
 
-    if ($conf->{'amd-sev'} && ($arch eq 'x86_64')) {
+	if ($arch eq 'aarch64'){
+		push @$machineFlags, "type=${machine_type_min},gic-version=${gicv}";
+    }else{
+    	push @$machineFlags, "type=${machine_type_min}";
+    }
+
+
+    if ($conf->{'amd-sev'}  && ($arch eq 'x86_64')) {
 	push @$devices, '-object', get_amd_sev_object($conf->{'amd-sev'}, $conf->{bios});
 	push @$machineFlags, 'confidential-guest-support=sev0';
     }

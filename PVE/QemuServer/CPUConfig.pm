@@ -213,7 +213,7 @@ my $cpu_fmt = {
 	    ." Only valid for custom CPU model definitions, default models will always report themselves to the guest OS.",
 	type => 'string',
 	enum => [ sort { lc("$a") cmp lc("$b") } keys %$cpu_vendor_list ],
-	default => 'kvm64',
+	default => 'max',
 	optional => 1,
     },
     hidden => {
@@ -794,12 +794,13 @@ sub get_default_cpu_type {
     my ($arch, $kvm) = @_;
 
     # if !kvm ,cpu will set to max for all arch
-    my %cpu_map = (
-        'x86_64'      => $kvm ? 'kvm64' : 'qemu64',
-        'aarch64'     => $kvm ? 'host' : 'max',
-        'riscv64'     => $kvm ? 'rv64' : 'max',
-        'loongarch64' => $kvm ? 'la464' : 'max',
-    );
+    my $cputype = 'max';
+    if ($kvm){
+    $cputype = 'host' if $arch eq 'x86_64';
+    $cputype = 'host' if $arch eq 'aarch64';
+    $cputype = 'rv64' if $arch eq 'riscv64';
+    $cputype = 'la464' if $arch eq 'loongarch64';
+    }
 
     return $cpu_map{$arch} // 'max';
 }
