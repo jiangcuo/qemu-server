@@ -4106,8 +4106,7 @@ sub config_to_command {
     	push @$machineFlags, "type=${machine_type_min}";
     }
 
-
-    if ($conf->{'amd-sev'}  && ($arch eq 'x86_64')) {
+    if ($conf->{'amd-sev'} && ($arch eq 'x86_64')) {
 	push @$devices, '-object', get_amd_sev_object($conf->{'amd-sev'}, $conf->{bios});
 	push @$machineFlags, 'confidential-guest-support=sev0';
     }
