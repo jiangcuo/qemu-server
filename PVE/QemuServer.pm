@@ -3620,13 +3620,16 @@ sub config_to_command {
 	push $cmd->@*, '-drive', $var_drive_str;
     }
 
-    if ($q35) { # tell QEMU to load q35 config early
+    if ($q35 && $arch eq 'x86_64') { # tell QEMU to load q35 config early
 	# we use different pcie-port hardware for qemu >= 4.0 for passthrough
 	if (min_version($machine_version, 4, 0)) {
 	    push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35-4.0.cfg';
 	} else {
 	    push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35.cfg';
 	}
+    }
+	if ($arch ne 'x86_64') { 
+        unshift @$devices, '-readconfig', '/usr/share/qemu-server/pve-port.cfg';
     }
 
     if (defined(my $fixups = qemu_created_version_fixups($conf, $forcemachine, $kvmver))) {
@@ -4059,9 +4062,6 @@ sub config_to_command {
 		}
 		}
 	}
-	if ($arch ne 'x86_64') { 
-        unshift @$devices, '-readconfig', '/usr/share/qemu-server/pve-port.cfg';
-    }
 
     if (!$kvm) {
 	push @$machineFlags, 'accel=tcg';
@@ -4075,15 +4075,6 @@ sub config_to_command {
 
     PVE::QemuServer::Machine::assert_valid_machine_property($machine_conf);
 
-    if (my $viommu = $machine_conf->{viommu}) {
-	if ($viommu eq 'intel' && ($arch eq 'x86_64')) {
-	    unshift @$devices, '-device', 'intel-iommu,intremap=on,caching-mode=on';
-	    push @$machineFlags, 'kernel-irqchip=split';
-	} elsif ($viommu eq 'virtio') {
-	    push @$devices, '-device', 'virtio-iommu-pci';
-	}
-    }
-
 	my $gicv = $kvm ? 'host' : 'max';
     if ( $conf->{gicversion} ) {
         $gicv = $conf->{gicversion};
@@ -4094,6 +4085,16 @@ sub config_to_command {
     }else{
     	push @$machineFlags, "type=${machine_type_min}";
     }
+
+    if (my $viommu = $machine_conf->{viommu}) {
+	if ($viommu eq 'intel' && ($arch eq 'x86_64')) {
+	    unshift @$devices, '-device', 'intel-iommu,intremap=on,caching-mode=on';
+	    push @$machineFlags, 'kernel-irqchip=split';
+	} elsif ($viommu eq 'virtio') {
+	    push @$devices, '-device', 'virtio-iommu-pci';
+	}
+    }
+
 
     if ($conf->{'amd-sev'} && ($arch eq 'x86_64')) {
 	push @$devices, '-object', get_amd_sev_object($conf->{'amd-sev'}, $conf->{bios});
