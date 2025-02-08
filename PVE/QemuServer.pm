@@ -563,6 +563,27 @@ EODESC
 	description => "Enable/disable KVM hardware virtualization.",
 	default => 1,
     },
+    noboot => {
+    optional => 1,
+    type => 'boolean',
+    description => "Enable/disable VM start.",
+    default => 0,
+    },
+    kernel =>{
+    type => 'string', format => 'pve-volume-id',
+    description => "microvm or linux direct boot kernel",
+    optional => 1,
+    },
+    initrd =>{
+    type => 'string', format => 'pve-volume-id',
+    description => "microvm or linux direct boot initd",
+    optional => 1,
+	},
+    append =>{
+    type => 'string',
+    description => "linux kernel append",
+    optional => 1,
+	},
     tdf => {
 	optional => 1,
 	type => 'boolean',
@@ -3748,6 +3769,14 @@ sub config_to_command {
     push $machineFlags->@*, 'acpi=off' if defined($conf->{acpi}) && $conf->{acpi} == 0 && $arch ne 'loongarch64';
 
     push @$cmd, '-no-reboot' if  defined($conf->{reboot}) && $conf->{reboot} == 0;
+
+	push @$cmd, '--kernel',get_drive_path($conf->{kernel}) if $conf->{kernel};
+
+	push @$cmd, '--initrd',get_drive_path($conf->{initrd}) if $conf->{initrd};
+
+	push @$cmd, '--append', $conf->{append} if $conf->{append};
+
+	die "noboot flag set, vm can't boot!\n" if $conf->{noboot};
 
     if ($vga->{type} && $vga->{type} !~ m/^serial\d+$/ && $vga->{type} ne 'none'){
 	
@@ -8931,5 +8960,17 @@ sub delete_ifaces_ipams_ips {
 	}
     }
 }
+sub get_drive_path {
+    my ($drive) = @_;
+    my $cfg = PVE::Storage::config();
+    my $path = PVE::Storage::path($cfg, $drive);
+
+    if (-e $path) {
+        return $path;
+    } else {
+        die "Custom file not found at $path\n";
+    }
+}
+
 
 1;
