@@ -246,7 +246,7 @@ my $vga_fmt = {
 	default => 'std',
 	optional => 1,
 	default_key => 1,
-	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio virtio-gl vmware ramfb)],
+	enum => [qw(cirrus qxl qxl2 qxl3 qxl4 none serial0 serial1 serial2 serial3 std virtio virtio-gl vmware ramfb mdev)],
     },
     memory => {
 	description => "Sets the VGA memory (in MiB). Has no effect with serial display.",
@@ -1785,6 +1785,7 @@ my $vga_map = {
     'virtio' => 'virtio-vga',
     'virtio-gl' => 'virtio-gpu-gl',
 	'ramfb' => 'ramfb',
+    'mdev' => 'mdev',
 };
 
 sub print_vga_device {
