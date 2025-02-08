@@ -47,6 +47,12 @@ EODESCR
 	description => "The ID of a cluster wide mapping. Either this or the default-key 'host'"
 	    ." must be set.",
     },
+    ramfb => {
+    type => 'boolean',
+    description =>  "Show mdev device's ramfb",
+    optional => 1,
+    default => 0,
+    },
     rombar => {
 	type => 'boolean',
 	description =>  "Specify whether or not the device's ROM will be visible in the"
@@ -853,6 +859,11 @@ sub print_hostpci_devices {
 	    my $mf_addr = $multifunction ? ".$j" : '';
 	    $devicestr .= ",id=${id}${mf_addr}${pciaddr}${mf_addr}";
 
+	    my $mdevtype = $d->{mdev} // undef;
+	    if ($mdevtype =~ /^(.*?)-/) {
+			$mdevtype = $1;
+	    }
+
 	    if ($j == 0) {
 		$devicestr .= ',rombar=0' if defined($d->{rombar}) && !$d->{rombar};
 		$devicestr .= "$xvga";
@@ -862,6 +873,15 @@ sub print_hostpci_devices {
 		for my $option (qw(vendor-id device-id sub-vendor-id sub-device-id)) {
 		    $devicestr .= ",x-pci-$option=$d->{$option}" if $d->{$option};
 		}
+	    }
+
+	    if ($mdevtype && $vga->{type} eq 'mdev'){
+		    $devicestr .= ",display=on";
+		    if ($mdevtype eq "i915"){
+			    $devicestr .= ",x-igd-opregion=on" ;
+		    }
+		    $devicestr .= ",ramfb=on" if defined($d->{ramfb});
+		    $devicestr .= ",driver=vfio-pci-nohotplug";
 	    }
 
 
