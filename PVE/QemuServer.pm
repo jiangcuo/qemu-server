@@ -3780,8 +3780,10 @@ sub config_to_command {
     if ($vga->{type} eq 'ramfb'){
         push @$devices, '-device', 'ramfb';
     }else{
+	if ($vga->{type} ne 'mdev'){
 	push @$devices, '-device', print_vga_device(
 	    $conf, $vga, $arch, $machine_version, $machine_type, undef, $qxlnum, $bridges);
+	} 
 	}
 	push @$cmd, '-display', 'egl-headless,gl=core' if $vga->{type} eq 'virtio-gl'; # VIRGL
 
