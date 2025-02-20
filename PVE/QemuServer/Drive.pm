@@ -147,6 +147,7 @@ my $MAX_IDE_DISKS = 4;
 my $MAX_SCSI_DISKS = 31;
 my $MAX_VIRTIO_DISKS = 16;
 our $MAX_SATA_DISKS = 6;
+my $MAX_NVME_DISKS = 16;
 our $MAX_UNUSED_DISKS = 256;
 our $NEW_DISK_RE = qr!^(([^/:\s]+):)?(\d+(\.\d+)?)$!;
 
@@ -350,6 +351,34 @@ my %wwn_fmt = (
     },
 );
 
+my %nvme_sub_fmt = (
+    max_ioqpairs => {
+	type => 'integer',
+	format_description => 'max_ioqpairs',
+	description => "Set the maximum number of allowed I/O queue pairs. This replaces the deprecated num_queues parameter.",
+	optional => 1,
+    },
+    msix_qsize => {
+	type => 'integer',
+	format_description => 'msix_qsize',
+	description => "The number of MSI-X vectors that the device should support.",
+	optional => 1,
+    },
+    mdts => {
+	type => 'integer',
+	format_description => 'mdts',
+	description => "Set the Maximum Data Transfer Size of the device.",
+	optional => 1,
+    },
+    'use-intel-id' => {
+	type => 'boolean',
+	format_description => 'mdts',
+	description => "Set the Maximum Data Transfer Size of the device.",
+	optional => 1,
+    default => 1,
+    },
+);
+
 my $add_throttle_desc = sub {
     my ($key, $type, $what, $unit, $longunit, $minimum) = @_;
     my $d = {
@@ -426,6 +455,20 @@ my $scsidesc = {
     description => "Use volume as SCSI hard disk or CD-ROM (n is 0 to " . ($MAX_SCSI_DISKS - 1) . ").",
 };
 PVE::JSONSchema::register_standard_option("pve-qm-scsi", $scsidesc);
+
+my $nvme_fmt = {
+    %drivedesc_base,
+    %iothread_fmt,
+    %readonly_fmt,
+    %nvme_sub_fmt,
+};
+my $nvmedesc = {
+    optional => 1,
+    type => 'string', format => $nvme_fmt,
+    description => "Use volume as NVME disk or CD-ROM (n is 0 to " . ($MAX_NVME_DISKS - 1) . ").",
+};
+PVE::JSONSchema::register_standard_option("pve-qm-nvme", $nvmedesc);
+
 
 my $sata_fmt = {
     %drivedesc_base,
@@ -627,6 +670,11 @@ for (my $i = 0; $i < $MAX_SCSI_DISKS; $i++)  {
     $drivedesc_hash_with_alloc->{"scsi$i"} = $desc_with_alloc->('scsi', $scsidesc);
 }
 
+for (my $i = 0; $i < $MAX_NVME_DISKS; $i++)  {
+    $drivedesc_hash->{"nvme$i"} = $nvmedesc;
+    $drivedesc_hash_with_alloc->{"nvme$i"} = $desc_with_alloc->('nvme', $nvmedesc);
+}
+
 for (my $i = 0; $i < $MAX_VIRTIO_DISKS; $i++)  {
     $drivedesc_hash->{"virtio$i"} = $virtiodesc;
     $drivedesc_hash_with_alloc->{"virtio$i"} = $desc_with_alloc->('virtio', $virtiodesc);
@@ -653,6 +701,7 @@ sub valid_drive_names {
             (map { "scsi$_" } (0 .. ($MAX_SCSI_DISKS - 1))),
             (map { "virtio$_" } (0 .. ($MAX_VIRTIO_DISKS - 1))),
             (map { "sata$_" } (0 .. ($MAX_SATA_DISKS - 1))),
+             (map { "nvme$_" } (0 .. ($MAX_NVME_DISKS - 1))),
             'efidisk0',
             'tpmstate0');
 }
