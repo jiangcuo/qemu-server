@@ -1493,7 +1493,12 @@ sub print_drivedevice_full {
     } elsif ($drive->{interface} eq 'usb') {
 	die "implement me";
 	#  -device ide-drive,bus=ide.1,unit=0,drive=drive-ide0-1-0,id=ide0-1-0
-    } else {
+    } elsif ($drive->{interface} eq 'nvme') {
+		my $maxdev = ($drive->{interface} eq 'nvme') ? $PVE::QemuServer::Drive::MAX_NVME_DISKS : 6;
+		$device = "nvme,id=$drive_id";
+		$device .= ",drive=drive-$drive_id";
+		$device .= ",use-intel-id=on",
+	}else {
 	die "unsupported interface type";
     }
 
@@ -1502,7 +1507,10 @@ sub print_drivedevice_full {
     if (my $serial = $drive->{serial}) {
 	$serial = URI::Escape::uri_unescape($serial);
 	$device .= ",serial=$serial";
-    }
+    } elsif ($drive->{interface} eq 'nvme') {
+		$serial = "lierfang$drive_id";
+		$device .= ",serial=$serial";
+	}
 
 
     return $device;
@@ -5529,7 +5537,7 @@ sub vmconfig_update_disk {
 	}
     }
 
-    die "skip\n" if !$hotplug || $opt =~ m/(ide|sata)(\d+)/;
+    die "skip\n" if !$hotplug || $opt =~ m/(ide|sata|nvme)(\d+)/;
     # hotplug new disks
     PVE::Storage::activate_volumes($storecfg, [$drive->{file}]) if $drive->{file} !~ m|^/dev/.+|;
     vm_deviceplug($storecfg, $conf, $vmid, $opt, $drive, $arch, $machine_type);
