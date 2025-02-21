@@ -700,6 +700,7 @@ my $generaloptions = {
     'startup' => 1,
     'tdf' => 1,
     'template' => 1,
+	'snapshot' => 1,
 };
 
 my $vmpoweroptions = {
@@ -1421,6 +1422,7 @@ __PACKAGE__->register_method({
 	    { subdir => 'migrate' },
 	    { subdir => 'resize' },
 	    { subdir => 'move' },
+		{ subdir => 'clonedisk' },
 	    { subdir => 'rrd' },
 	    { subdir => 'rrddata' },
 	    { subdir => 'monitor' },
@@ -2285,6 +2287,104 @@ my $vm_config_perm_list = [
     ];
 
 __PACKAGE__->register_method({
+    name => 'create_linkclone_vmdisk',
+    path => '{vmid}/clonedisk',
+    method => 'POST',
+    description => "Create linkclone disk",
+    permissions => {
+	check => ['perm', '/vms/{vmid}', $vm_config_perm_list, any => 1],
+    },
+    parameters => {
+	additionalProperties => 0,
+	properties => {
+		node => get_standard_option('pve-node'),
+	    vmid => get_standard_option('pve-vmid', { completion => \&PVE::QemuServer::complete_vmid }),
+	    targetvm => get_standard_option('pve-vmid', {
+			completion => \&PVE::Cluster::complete_next_vmid,
+			description => 'VMID for the clone.' }
+		),
+		disk => {
+	        type => 'string',
+			description => "The disk you want to move.",
+			enum => [PVE::QemuServer::Drive::valid_drive_names_with_unused()],
+	    },
+		delete => {
+			type => 'boolean',
+			description => "Delete the original disk after successful copy. By default the"
+		    ." original disk is kept as unused disk.",
+			optional => 1,
+			default => 1,
+	    },
+		targetdisk => {
+	        type => 'string',
+			description => "The config key the disk will be moved to on the target VM"
+		    ." (for example, ide0 or scsi1). Default is the source disk key.",
+			enum => [PVE::QemuServer::Drive::valid_drive_names_with_unused()],
+			optional => 1,
+	    },
+		snapname => get_standard_option('pve-snapshot-name', {
+        }),
+	    },
+    },
+    returns => {
+		type => 'string',
+    },
+    code => sub {
+		my ($param) = @_;
+		my $vmid = $param->{vmid};
+		my $node = $param->{node};
+		my $targetvm = $param->{targetvm};
+		my $disk = $param->{disk};
+		my $delete = $param->{delete};
+		my $targetdisk = $param->{targetdisk} // $disk ;
+		my $snapname = $param->{snapname} ;
+		my $storecfg = PVE::Storage::config();
+		# check vm esists
+		my $vmlist = PVE::Cluster::get_vmlist()->{ids};
+		die "could not find target VM ${vmid}\n" if !exists($vmlist->{$vmid});
+		die "could not find target VM ${targetvm}\n" if !exists($vmlist->{$targetvm});
+		my $running = PVE::QemuServer::check_running($targetvm);
+
+		die "Could clone disk to running vm ${targetvm}\n" if $running;
+		my $targetvmconf = PVE::QemuConfig->load_config($targetvm);
+		my $targetdrive = PVE::QemuServer::parse_drive($targetdisk, $targetvmconf->{$targetdisk});
+		my $old_volid = $targetdrive->{file};
+		# remove old disk
+		if ($delete){
+			die "you can't clone a cdrom\n" if PVE::QemuServer::drive_is_cdrom($targetdrive, 1);
+			if ($old_volid){
+			my ($oldstoreid, $oldvolname) = PVE::Storage::parse_volume_id($old_volid);
+				eval { PVE::Storage::vdisk_free($storecfg, $old_volid) };
+				die  "old storage delete failed: $@" if $@;
+			};
+		}
+
+		my $conf = PVE::QemuConfig->load_config($vmid);
+
+		my $drive = PVE::QemuServer::parse_drive($disk, $conf->{$disk});
+		my $void = $drive->{file};
+		my ($storeid, $volname) = PVE::Storage::parse_volume_id($void);
+
+		my $clone_vm = sub {
+			my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
+
+			my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
+
+			PVE::Storage::activate_storage($storecfg, $storeid);
+			# lock shared storage
+			return $plugin->cluster_lock_storage($storeid, $scfg->{shared}, undef, sub {
+			my $isBase = 1;
+			my $volname = $plugin->clone_image_pxvirt($scfg, $storeid, $volname, $targetvm, $snapname,$isBase);
+			return "$storeid:$volname";
+			});
+		};
+
+		$targetvmconf->{$targetdisk} = $clone_vm->();
+		PVE::QemuConfig->write_config($targetvm, $targetvmconf);
+		return "ok";
+    }});
+
+__PACKAGE__->register_method({
     name => 'update_vm_async',
     path => '{vmid}/config',
     method => 'POST',
@@ -3069,6 +3169,12 @@ __PACKAGE__->register_method({
 		description => "CIDR of the (sub) network that is used for migration.",
 		optional => 1,
 	    },
+		skiptemplate => {
+		description => "force start for template",
+		type => 'boolean',
+		default => '0',
+		optional => 1,
+	    },
 	    machine => get_standard_option('pve-qemu-machine'),
 	    'force-cpu' => {
 		description => "Override QEMU's -cpu argument with the given string.",
@@ -3098,6 +3204,7 @@ __PACKAGE__->register_method({
 	my $vmid = extract_param($param, 'vmid');
 	my $timeout = extract_param($param, 'timeout');
 	my $machine = extract_param($param, 'machine');
+	my $skiptemplate = extract_param($param, 'skiptemplate');
 
 	my $get_root_param = sub {
 	    my $value = extract_param($param, $_[0]);
@@ -3192,6 +3299,7 @@ __PACKAGE__->register_method({
 		    forcemachine => $machine,
 		    timeout => $timeout,
 		    forcecpu => $force_cpu,
+			skiptemplate => $skiptemplate,
 		};
 
 		PVE::QemuServer::vm_start($storecfg, $vmid, $params, $migrate_opts);
