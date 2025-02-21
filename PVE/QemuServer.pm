@@ -372,6 +372,12 @@ my $confdesc = {
 	description => "Allow reboot. If set to '0' the VM exit on reboot.",
 	default => 1,
     },
+    snapshot => {
+	optional => 1,
+	type => 'boolean',
+	description => "Allow reboot. If set to '0' the VM exit on reboot.",
+	default => 0,
+    },
     lock => {
 	optional => 1,
 	type => 'string',
@@ -4170,7 +4176,8 @@ sub config_to_command {
 	print "activating and using '$vmstate' as vmstate\n";
     }
 
-    if (PVE::QemuConfig->is_template($conf)) {
+    my $snap = $conf->{snapshot};
+    if (PVE::QemuConfig->is_template($conf) ||$snap) {
 	# needed to workaround base volumes being read-only
 	push @$cmd, '-snapshot';
     }
