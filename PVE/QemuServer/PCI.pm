@@ -51,7 +51,7 @@ EODESCR
     type => 'boolean',
     description =>  "Show mdev device's ramfb",
     optional => 1,
-    default => 0,
+    default => 1,
     },
     rombar => {
 	type => 'boolean',
@@ -880,7 +880,7 @@ sub print_hostpci_devices {
 		    if ($mdevtype eq "i915"){
 			    $devicestr .= ",x-igd-opregion=on" ;
 		    }
-		    $devicestr .= ",ramfb=on" if defined($d->{ramfb});
+		    $devicestr .= ",ramfb=on" if $d->{ramfb};
 		    $devicestr .= ",driver=vfio-pci-nohotplug";
 	    }
 
