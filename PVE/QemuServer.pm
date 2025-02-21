@@ -411,11 +411,17 @@ my $confdesc = {
 	description => "Memory properties.",
 	format => $PVE::QemuServer::Memory::memory_fmt
     },
-	gicversion => {
+    gicversion => {
     optional => 1,
     type => 'string',
     description => "Set virt gic-version",
     enum => [qw(host 2 3 4 max)],
+    },
+    virtualization => {
+    optional => 1,
+    type => 'boolean',
+    description => "Enable/disable nest virtualization on arm.",
+	default => 0,
     },
     'amd-sev' => {
 	description => "Secure Encrypted Virtualization (SEV) features by AMD CPUs",
@@ -4133,28 +4139,12 @@ sub config_to_command {
         $gicv = $conf->{gicversion};
     }
 
-	if ($arch eq 'aarch64'){
-		push @$machineFlags, "type=${machine_type_min},gic-version=${gicv}";
-    }else{
-    	push @$machineFlags, "type=${machine_type_min}";
-    }
-
-    if (my $viommu = $machine_conf->{viommu}) {
-	if ($viommu eq 'intel' && ($arch eq 'x86_64')) {
-	    unshift @$devices, '-device', 'intel-iommu,intremap=on,caching-mode=on';
-	    push @$machineFlags, 'kernel-irqchip=split';
-	} elsif ($viommu eq 'virtio') {
-	    push @$devices, '-device', 'virtio-iommu-pci';
-	}
-    }
-
-	my $gicv = $kvm ? 'host' : 'max';
-    if ( $conf->{gicversion} ) {
-        $gicv = $conf->{gicversion};
-    }
-
-	if ($arch eq 'aarch64'){
-		push @$machineFlags, "type=${machine_type_min},gic-version=${gicv}";
+    if ($arch eq 'aarch64'){
+		if ($conf->{virtualization}){
+			push @$machineFlags, "type=${machine_type_min},gic-version=${gicv},virtualization=on";
+		}else{
+			push @$machineFlags, "type=${machine_type_min},gic-version=${gicv}";
+		}
     }else{
     	push @$machineFlags, "type=${machine_type_min}";
     }
