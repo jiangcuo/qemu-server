@@ -1,3 +1,19 @@
+qemu-server (8.3.8+port1) bookworm; urgency=medium
+
+  * config: add arm virtualization support
+
+  * config: add nvme disk support
+
+  * api: Add clone single disk for vdi solution
+
+  * api: add uuid support
+
+  * config: add vgpu ramfb dispaly
+
+  * config: Add linux kernel direct boot and noboot flag
+
+ -- Jiangcuo <jiangcuo@ierfang.com>  Fri, 21 Feb 2025 19:22:15 +0800
+
 qemu-server (8.3.8) bookworm; urgency=medium
 
   * resume: error out if VM is a template
