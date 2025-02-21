@@ -563,6 +563,11 @@ EODESC
 	description => "Enable/disable KVM hardware virtualization.",
 	default => 1,
     },
+    uuid => {
+    optional => 1,
+    type => 'string',
+    description => "Set uuid.",
+    },
     noboot => {
     optional => 1,
     type => 'boolean',
@@ -2913,6 +2918,8 @@ sub vmstatus {
 	    $d->{disk} = 0;
 	    $d->{maxdisk} = 0;
 	}
+
+	$d->{uuid} = $conf->{uuid} || generate_vm_uuid($vmid,0);
 
 	$d->{cpus} = ($conf->{sockets} || $defaults->{sockets})
 	    * ($conf->{cores} || $defaults->{cores});
@@ -5902,11 +5909,7 @@ sub vm_start_nolock {
 
 	    # nvidia grid needs the uuid of the mdev as qemu parameter
 	    if (!defined($uuid) && $chosen_mdev->{vendor} =~ m/^(0x)?10de$/) {
-		if (defined($conf->{smbios1})) {
-		    my $smbios_conf = parse_smbios1($conf->{smbios1});
-		    $uuid = $smbios_conf->{uuid} if defined($smbios_conf->{uuid});
-		}
-		$uuid = PVE::QemuServer::PCI::generate_mdev_uuid($vmid, $index) if !defined($uuid);
+			$uuid = $conf->{uuid} // PVE::QemuServer::PCI::generate_mdev_uuid($vmid, $index);
 	    }
 	}
 	push @$cmd, '-uuid', $uuid if defined($uuid);
@@ -6253,7 +6256,7 @@ sub cleanup_pci_devices {
     foreach my $key (keys %$conf) {
 	next if $key !~ m/^hostpci(\d+)$/;
 	my $hostpciindex = $1;
-	my $uuid = PVE::SysFSTools::generate_mdev_uuid($vmid, $hostpciindex);
+	my $uuid = $conf->{uuid} // PVE::SysFSTools::generate_mdev_uuid($vmid, $hostpciindex);
 	my $d = parse_hostpci($conf->{$key});
 	if ($d->{mdev}) {
 	    # NOTE: avoid PVE::SysFSTools::pci_cleanup_mdev_device as it requires PCI ID and we
@@ -8956,6 +8959,11 @@ sub create_ifaces_ipams_ips {
             warn $@ if $@;
         }
     }
+}
+
+sub generate_vm_uuid {
+    my ($vmid, $index) = @_;
+    return sprintf("%08d-0000-0000-0000-%012d", $index, $vmid);
 }
 
 sub delete_ifaces_ipams_ips {

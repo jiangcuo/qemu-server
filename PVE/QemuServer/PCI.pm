@@ -842,7 +842,7 @@ sub print_hostpci_devices {
 
 	my $sysfspath;
 	if ($d->{mdev}) {
-	    my $uuid = generate_mdev_uuid($vmid, $i);
+	    my $uuid = $conf->{uuid} // generate_mdev_uuid($vmid, $i);
 	    $sysfspath = "/sys/bus/mdev/devices/$uuid";
 	}
 
@@ -895,7 +895,7 @@ sub print_hostpci_devices {
 
 sub prepare_pci_device {
     my ($vmid, $pciid, $index, $device) = @_;
-
+	my $conf = PVE::QemuConfig->load_config($vmid);
     my $info = PVE::SysFSTools::pci_device_info("$pciid");
     die "cannot prepare PCI pass-through, IOMMU not present\n" if !PVE::SysFSTools::check_iommu_support();
     die "no pci device info for device '$pciid'\n" if !$info;
@@ -903,7 +903,7 @@ sub prepare_pci_device {
     if ($device->{nvidia}) {
 	# nothing to do
     } elsif (my $mdev = $device->{mdev}) {
-	my $uuid = generate_mdev_uuid($vmid, $index);
+	my $uuid = $conf->{uuid} // generate_mdev_uuid($vmid, $index);
 	PVE::SysFSTools::pci_create_mdev_device($pciid, $uuid, $mdev);
     } else {
 	die "can't unbind/bind PCI group to VFIO '$pciid'\n"
