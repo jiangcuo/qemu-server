@@ -694,6 +694,7 @@ my $generaloptions = {
     'ostype' => 1,
 	'gicversion' =>1,
     'protection' => 1,
+    'uuid' => 1,
     'reboot' => 1,
     'startdate' => 1,
     'startup' => 1,
@@ -1006,6 +1007,11 @@ __PACKAGE__->register_method({
 		    type => 'string', format => 'pve-poolid',
 		    description => "Add the VM to the specified pool.",
 		},
+		uuid =>{
+		    optional => 1,
+		    type => 'string',
+		    description => "Set uuid.",
+		},
 		bwlimit => {
 		    description => "Override I/O bandwidth limit (in KiB/s).",
 		    optional => 1,
@@ -1237,6 +1243,10 @@ __PACKAGE__->register_method({
 			$conf->{boot} = PVE::QemuServer::print_bootorder($devs);
 		    }
 
+		    if (!$conf->{uuid}) {
+			$conf->{uuid} = PVE::QemuServer::generate_uuid();
+		    }
+
 		    my $vga = PVE::QemuServer::parse_vga($conf->{vga});
 		    PVE::QemuServer::assert_clipboard_config($vga);
 
@@ -1415,6 +1425,7 @@ __PACKAGE__->register_method({
 	    { subdir => 'rrddata' },
 	    { subdir => 'monitor' },
 	    { subdir => 'agent' },
+	    { subdir => 'showcmd'},
 	    { subdir => 'snapshot' },
 	    { subdir => 'spiceproxy' },
 	    { subdir => 'sendkey' },
@@ -4004,6 +4015,9 @@ __PACKAGE__->register_method({
 		$newconf->{vmgenid} = PVE::QemuServer::generate_uuid();
 	    }
 
+		# auto generate a new uuid only if the option was set for template
+		$newconf->{uuid} = PVE::QemuServer::generate_uuid();
+
 	    delete $newconf->{template};
 
 	    if ($param->{name}) {
@@ -6330,4 +6344,29 @@ __PACKAGE__->register_method({
 	return { socket => $socket };
     }});
 
+__PACKAGE__->register_method ({
+    name => 'showcmd',
+    path => '{vmid}/showcmd',
+    method => 'GET',
+    description => "Show command line which is used to start the VM (debug info).",
+       parameters => {
+       additionalProperties => 0,
+       properties => {
+           node => get_standard_option('pve-node'),
+           vmid => get_standard_option('pve-vmid')
+       },
+    },
+    permissions => {
+        check => ['perm', '/vms/{vmid}', [ 'VM.Audit' ]],
+    },
+    returns => {
+        type => "string"
+    },
+    code => sub {
+        my ($param) = @_;
+
+         my $storecfg = PVE::Storage::config();
+        my $cmdline = PVE::QemuServer::vm_commandline($storecfg, $param->{vmid}, $param->{snapshot});
+        return "$cmdline";
+    }});
 1;

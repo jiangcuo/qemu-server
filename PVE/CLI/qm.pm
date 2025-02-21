@@ -781,6 +781,7 @@ __PACKAGE__->register_method ({
 	    # order matters, as do_import() will load_config() internally
 	    $conf->{vmgenid} = PVE::QemuServer::generate_uuid();
 	    $conf->{smbios1} = PVE::QemuServer::generate_smbios1_uuid();
+		$conf->{uuid} = PVE::QemuServer::generate_uuid();
 	    PVE::QemuConfig->write_config($vmid, $conf);
 
 	    foreach my $disk (@{ $parsed->{disks} }) {
@@ -1124,11 +1125,13 @@ our $cmddef = {
 	my $vmlist = shift;
 	exit 0 if (!scalar(@$vmlist));
 
-	printf "%10s %-20s %-12s %-10s %-10s %12s %-10s\n",
-	qw(VMID NAME ARCH STATUS MEM(MB) BOOTDISK(GB) PID);
+	printf "%10s %-20s %-40s %-12s %-10s %-10s %12s %-10s\n",
+	qw(VMID NAME uuid ARCH STATUS MEM(MB) BOOTDISK(GB) PID);
 
 	foreach my $rec (sort { $a->{vmid} <=> $b->{vmid} } @$vmlist) {
-	    printf "%10s %-20s %-12s %-10s %-10s %12.2f %-10s\n", $rec->{vmid}, $rec->{name}, $rec->{arch},
+	    printf "%10s %-20s %-40s %-12s %-10s %-10s %12.2f %-10s\n", $rec->{vmid}, $rec->{name},
+	        $rec->{uuid},
+	        $rec->{arch},
 	        $rec->{qmpstatus} || $rec->{status},
 	        ($rec->{maxmem} || 0)/(1024*1024),
 	        ($rec->{maxdisk} || 0)/(1024*1024*1024),
