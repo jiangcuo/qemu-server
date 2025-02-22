@@ -1201,6 +1201,7 @@ our $cmddef = {
     disk => {
 	import => [ __PACKAGE__, 'importdisk', ['vmid', 'source', 'storage']],
 	'move' => [ "PVE::API2::Qemu", 'move_vm_disk', ['vmid', 'disk', 'storage'], { %node }, $upid_exit ],
+	'clone' => [ "PVE::API2::Qemu", 'create_linkclone_vmdisk', ['vmid'], { %node } ],
 	rescan => [ __PACKAGE__, 'rescan', []],
 	resize => [ "PVE::API2::Qemu", 'resize_vm', ['vmid', 'disk', 'size'], { %node } ],
 	unlink => [ "PVE::API2::Qemu", 'unlink', ['vmid'], { %node } ],

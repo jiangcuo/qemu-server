@@ -2335,7 +2335,7 @@ __PACKAGE__->register_method({
 		my $node = $param->{node};
 		my $targetvm = $param->{targetvm};
 		my $disk = $param->{disk};
-		my $delete = $param->{delete};
+		my $delete = $param->{delete} // 1;
 		my $targetdisk = $param->{targetdisk} // $disk ;
 		my $snapname = $param->{snapname} ;
 		my $storecfg = PVE::Storage::config();
