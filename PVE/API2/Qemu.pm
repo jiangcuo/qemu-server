@@ -2293,14 +2293,24 @@ __PACKAGE__->register_method({
     method => 'POST',
     description => "Create linkclone disk",
     permissions => {
-	check => ['perm', '/vms/{vmid}', $vm_config_perm_list, any => 1],
+		description => "You need 'VM.Clone' permissions on /vms/{vmid}, and 'VM.Allocate' permissions " .
+	    "on /vms/{newid} (or on the VM pool /pool/{pool}). You also need " .
+	    "'Datastore.AllocateSpace' on any used storage and 'SDN.Use' on any used bridge/vnet",
+	check =>
+	[ 'and',
+	  ['perm', '/vms/{vmid}', [ 'VM.Clone' ]],
+	  [ 'or',
+	    [ 'perm', '/vms/{newid}', ['VM.Allocate']],
+	    [ 'perm', '/pool/{pool}', ['VM.Allocate'], require_param => 'pool'],
+	  ],
+	]
     },
     parameters => {
 	additionalProperties => 0,
 	properties => {
 		node => get_standard_option('pve-node'),
 	    vmid => get_standard_option('pve-vmid', { completion => \&PVE::QemuServer::complete_vmid }),
-	    targetvm => get_standard_option('pve-vmid', {
+	    'target-vmid' => get_standard_option('pve-vmid', {
 			completion => \&PVE::Cluster::complete_next_vmid,
 			description => 'VMID for the clone.' }
 		),
@@ -2316,7 +2326,7 @@ __PACKAGE__->register_method({
 			optional => 1,
 			default => 1,
 	    },
-		targetdisk => {
+		'target-disk' => {
 	        type => 'string',
 			description => "The config key the disk will be moved to on the target VM"
 		    ." (for example, ide0 or scsi1). Default is the source disk key.",
@@ -2334,10 +2344,10 @@ __PACKAGE__->register_method({
 		my ($param) = @_;
 		my $vmid = $param->{vmid};
 		my $node = $param->{node};
-		my $targetvm = $param->{targetvm};
+		my $targetvm = $param->{'target-vm'};
 		my $disk = $param->{disk};
 		my $delete = $param->{delete} // 1;
-		my $targetdisk = $param->{targetdisk} // $disk ;
+		my $targetdisk = $param->{'target-disk'} // $disk ;
 		my $snapname = $param->{snapname} ;
 		my $storecfg = PVE::Storage::config();
 		# check vm esists
