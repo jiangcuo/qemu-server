@@ -700,6 +700,7 @@ my $generaloptions = {
     'startup' => 1,
     'tdf' => 1,
     'template' => 1,
+	'pxvditemplate' => 1,
 	'snapshot' => 1,
 };
 
@@ -2549,6 +2550,9 @@ __PACKAGE__->register_method({
 	    my $conf = PVE::QemuConfig->load_config($vmid);
 	    PVE::QemuConfig->check_protection($conf, "can't remove VM $vmid");
 
+	    # pxvditemplate can't destroy.
+	    # We do not detect base disk like template VMS, and simply refuse to delete them.
+	    die "can't remove pxvditemplate VM $vmid " if $conf->{pxvditemplate};
 	    my $ha_managed = PVE::HA::Config::service_is_configured("vm:$vmid");
 
 	    if (!$param->{purge}) {

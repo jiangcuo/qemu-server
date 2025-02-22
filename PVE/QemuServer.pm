@@ -654,6 +654,12 @@ EODESC
 	description => "Enable/disable Template.",
 	default => 0,
     },
+    pxvditemplate => {
+	optional => 1,
+	type => 'boolean',
+	description => "Enable/disable pxvdi Template.",
+	default => 0,
+    },
     args => {
 	optional => 1,
 	type => 'string',
@@ -2960,6 +2966,7 @@ sub vmstatus {
 
         $d->{template} = 1 if PVE::QemuConfig->is_template($conf);
 
+	$d->{pxvditemplate} = 1 if $conf->{pxvditemplate};
 	$d->{serial} = 1 if conf_has_serial($conf);
 	$d->{lock} = $conf->{lock} if $conf->{lock};
 	$d->{tags} = $conf->{tags} if defined($conf->{tags});
