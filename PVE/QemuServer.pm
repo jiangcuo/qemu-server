@@ -8407,7 +8407,13 @@ sub clone_disk {
     print "($drive->{file})\n";
 
     if (!$full) {
-	$newvolid = PVE::Storage::vdisk_clone($storecfg,  $drive->{file}, $newvmid, $snapname);
+	    my $conf = PVE::QemuConfig->load_config($vmid);
+		# When vm is pxvditemplate. We can force use linkclone.
+		if ($conf->{pxvditemplate}){
+            $newvolid = PVE::Storage::vdisk_clone_pxvirt($storecfg,  $drive->{file}, $newvmid, $snapname);
+        } else {
+            $newvolid = PVE::Storage::vdisk_clone($storecfg,  $drive->{file}, $newvmid, $snapname);
+        }
 	push @$newvollist, $newvolid;
     } else {
 	my ($src_storeid) = PVE::Storage::parse_volume_id($drive->{file});

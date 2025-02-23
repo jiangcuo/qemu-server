@@ -1423,7 +1423,7 @@ __PACKAGE__->register_method({
 	    { subdir => 'migrate' },
 	    { subdir => 'resize' },
 	    { subdir => 'move' },
-		{ subdir => 'clonedisk' },
+	    { subdir => 'clonedisk' },
 	    { subdir => 'rrd' },
 	    { subdir => 'rrddata' },
 	    { subdir => 'monitor' },
@@ -2371,28 +2371,9 @@ __PACKAGE__->register_method({
 		}
 
 		my $conf = PVE::QemuConfig->load_config($vmid);
-
 		my $drive = PVE::QemuServer::parse_drive($disk, $conf->{$disk});
-		my $void = $drive->{file};
-		my ($storeid, $volname) = PVE::Storage::parse_volume_id($void);
-
-		my $clone_vm = sub {
-			my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
-
-			my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
-
-			PVE::Storage::activate_storage($storecfg, $storeid);
-			# lock shared storage
-			return $plugin->cluster_lock_storage($storeid, $scfg->{shared}, undef, sub {
-			my $isBase = 1;
-			my $volname = $plugin->clone_image_pxvirt($scfg, $storeid, $volname, $targetvm, $snapname,$isBase);
-			return "$storeid:$volname";
-			});
-		};
-
-		$targetvmconf->{$targetdisk} = $clone_vm->();
+		$targetvmconf->{$targetdisk} = PVE::Storage::vdisk_clone_pxvirt($storecfg, $drive->{file}, $targetvm, $snapname);
 		PVE::QemuConfig->write_config($targetvm, $targetvmconf);
-		return "ok";
     }});
 
 __PACKAGE__->register_method({
