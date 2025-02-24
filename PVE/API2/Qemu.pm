@@ -2292,6 +2292,7 @@ __PACKAGE__->register_method({
     path => '{vmid}/clonedisk',
     method => 'POST',
     description => "Create linkclone disk",
+	proxyto => 'node',
     permissions => {
 		description => "You need 'VM.Clone' permissions on /vms/{vmid}, and 'VM.Allocate' permissions " .
 	    "on /vms/{newid} (or on the VM pool /pool/{pool}). You also need " .
