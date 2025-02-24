@@ -2344,7 +2344,7 @@ __PACKAGE__->register_method({
 		my ($param) = @_;
 		my $vmid = $param->{vmid};
 		my $node = $param->{node};
-		my $targetvm = $param->{'target-vm'};
+		my $targetvm = $param->{'target-vmid'};
 		my $disk = $param->{disk};
 		my $delete = $param->{delete} // 1;
 		my $targetdisk = $param->{'target-disk'} // $disk ;
