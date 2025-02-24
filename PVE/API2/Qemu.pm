@@ -3968,6 +3968,11 @@ __PACKAGE__->register_method({
 		minimum => '0',
 		default => 'clone limit from datacenter or storage config',
 	    },
+		uuid =>{
+		    optional => 1,
+		    type => 'string',
+		    description => "vm uuid.",
+		},
         },
     },
     returns => {
@@ -3988,6 +3993,7 @@ __PACKAGE__->register_method({
 	my $storage = extract_param($param, 'storage');
 	my $format = extract_param($param, 'format');
 	my $target = extract_param($param, 'target');
+	my $uuid = extract_param($param, 'uuid');
 
         my $localnode = PVE::INotify::nodename();
 
@@ -4119,9 +4125,10 @@ __PACKAGE__->register_method({
 	    }
 
 		# auto generate a new uuid only if the option was set for template
-		$newconf->{uuid} = PVE::QemuServer::generate_uuid();
+		$newconf->{uuid} = $uuid // PVE::QemuServer::generate_uuid();
 
 	    delete $newconf->{template};
+		delete $newconf->{pxvditemplate};
 
 	    if ($param->{name}) {
 		$newconf->{name} = $param->{name};
