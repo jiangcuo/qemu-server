@@ -2293,6 +2293,7 @@ __PACKAGE__->register_method({
     method => 'POST',
     description => "Create linkclone disk",
 	proxyto => 'node',
+	protected => 1,
     permissions => {
 		description => "You need 'VM.Clone' permissions on /vms/{vmid}, and 'VM.Allocate' permissions " .
 	    "on /vms/{newid} (or on the VM pool /pool/{pool}). You also need " .
@@ -2343,6 +2344,10 @@ __PACKAGE__->register_method({
     },
     code => sub {
 		my ($param) = @_;
+		my $rpcenv = PVE::RPCEnvironment::get();
+
+		my $authuser = $rpcenv->get_user();
+
 		my $vmid = $param->{vmid};
 		my $node = $param->{node};
 		my $targetvm = $param->{'target-vmid'};
@@ -2361,20 +2366,27 @@ __PACKAGE__->register_method({
 		my $targetvmconf = PVE::QemuConfig->load_config($targetvm);
 		my $targetdrive = PVE::QemuServer::parse_drive($targetdisk, $targetvmconf->{$targetdisk});
 		my $old_volid = $targetdrive->{file};
-		# remove old disk
-		if ($delete){
-			die "you can't clone a cdrom\n" if PVE::QemuServer::drive_is_cdrom($targetdrive, 1);
-			if ($old_volid){
-			my ($oldstoreid, $oldvolname) = PVE::Storage::parse_volume_id($old_volid);
-				eval { PVE::Storage::vdisk_free($storecfg, $old_volid) };
-				die  "old storage delete failed: $@" if $@;
-			};
-		}
+		die "you can't clone a cdrom\n" if PVE::QemuServer::drive_is_cdrom($targetdrive, 1);
+		my $worker = sub {
+			my $upid = shift;
+			# remove old disk
+			if ($delete && $old_volid){
+				eval {
+					syslog('info', "destroy $old_volid $upid\n");
+					PVE::Storage::vdisk_free($storecfg, $old_volid);
+				};
+				warn  "old storage delete failed: $@" if $@;
+			}
 
-		my $conf = PVE::QemuConfig->load_config($vmid);
-		my $drive = PVE::QemuServer::parse_drive($disk, $conf->{$disk});
-		$targetvmconf->{$targetdisk} = PVE::Storage::vdisk_clone_pxvirt($storecfg, $drive->{file}, $targetvm, $snapname);
-		PVE::QemuConfig->write_config($targetvm, $targetvmconf);
+			syslog('info', "clone $vmid $disk to $targetvm $targetdisk $upid\n");
+			my $conf = PVE::QemuConfig->load_config($vmid);
+			my $drive = PVE::QemuServer::parse_drive($disk, $conf->{$disk});
+			$targetvmconf->{$targetdisk} = PVE::Storage::vdisk_clone_pxvirt($storecfg, $drive->{file}, $targetvm, $snapname);
+			PVE::QemuConfig->write_config($targetvm, $targetvmconf);
+		};
+
+		my $upid = $rpcenv->fork_worker('qmclonedisk' , $vmid, $authuser, $worker);
+		return $upid;
     }});
 
 __PACKAGE__->register_method({
