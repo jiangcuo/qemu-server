@@ -1822,7 +1822,7 @@ my $update_vm_api  = sub {
 
     my $skiplock = extract_param($param, 'skiplock');
     raise_param_exc({ skiplock => "Only root may use this option." })
-	if $skiplock && $authuser ne 'root@pam';
+	if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
     my $delete_str = extract_param($param, 'delete');
 
@@ -2045,7 +2045,7 @@ my $update_vm_api  = sub {
 		} elsif ($opt =~ m/^serial\d+$/) {
 		    if ($val eq 'socket') {
 			$rpcenv->check_vm_perm($authuser, $vmid, undef, ['VM.Config.HWType']);
-		    } elsif ($authuser ne 'root@pam') {
+		    } elsif ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser)) {
 			die "only root can delete '$opt' config for real devices\n";
 		    }
 		    PVE::QemuConfig->add_to_pending_delete($conf, $opt, $force);
@@ -2128,7 +2128,7 @@ my $update_vm_api  = sub {
 		} elsif ($opt =~ m/^serial\d+/) {
 		    if ((!defined($conf->{$opt}) || $conf->{$opt} eq 'socket') && $param->{$opt} eq 'socket') {
 			$rpcenv->check_vm_perm($authuser, $vmid, undef, ['VM.Config.HWType']);
-		    } elsif ($authuser ne 'root@pam') {
+		    } elsif ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser)) {
 			die "only root can modify '$opt' config for real devices\n";
 		    }
 		    $conf->{pending}->{$opt} = $param->{$opt};
@@ -2330,7 +2330,7 @@ __PACKAGE__->register_method({
 	    },
 		'target-disk' => {
 	        type => 'string',
-			description => "The config key the disk will be moved to on the target VM"
+			description => "The config key the disk will be link clone  to on the target VM"
 		    ." (for example, ide0 or scsi1). Default is the source disk key.",
 			enum => [PVE::QemuServer::Drive::valid_drive_names_with_unused()],
 			optional => 1,
@@ -2547,7 +2547,7 @@ __PACKAGE__->register_method({
 
 	my $skiplock = $param->{skiplock};
 	raise_param_exc({ skiplock => "Only root may use this option." })
-	    if $skiplock && $authuser ne 'root@pam';
+	    if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	my $early_checks = sub {
 	    # test if VM exists
@@ -3217,7 +3217,7 @@ __PACKAGE__->register_method({
 	my $get_root_param = sub {
 	    my $value = extract_param($param, $_[0]);
 	    raise_param_exc({ "$_[0]" => "Only root may use this option." })
-		if $value && $authuser ne 'root@pam';
+		if $value && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 	    return $value;
 	};
 
@@ -3371,15 +3371,15 @@ __PACKAGE__->register_method({
 
 	my $skiplock = extract_param($param, 'skiplock');
 	raise_param_exc({ skiplock => "Only root may use this option." })
-	    if $skiplock && $authuser ne 'root@pam';
+	    if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	my $keepActive = extract_param($param, 'keepActive');
 	raise_param_exc({ keepActive => "Only root may use this option." })
-	    if $keepActive && $authuser ne 'root@pam';
+	    if $keepActive && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	my $migratedfrom = extract_param($param, 'migratedfrom');
 	raise_param_exc({ migratedfrom => "Only root may use this option." })
-	    if $migratedfrom && $authuser ne 'root@pam';
+	    if $migratedfrom && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	my $overrule_shutdown = extract_param($param, 'overrule-shutdown');
 
@@ -3459,7 +3459,7 @@ __PACKAGE__->register_method({
 
 	my $skiplock = extract_param($param, 'skiplock');
 	raise_param_exc({ skiplock => "Only root may use this option." })
-	    if $skiplock && $authuser ne 'root@pam';
+	    if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	die "VM $vmid not running\n" if !PVE::QemuServer::check_running($vmid);
 
@@ -3527,11 +3527,11 @@ __PACKAGE__->register_method({
 
 	my $skiplock = extract_param($param, 'skiplock');
 	raise_param_exc({ skiplock => "Only root may use this option." })
-	    if $skiplock && $authuser ne 'root@pam';
+	    if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	my $keepActive = extract_param($param, 'keepActive');
 	raise_param_exc({ keepActive => "Only root may use this option." })
-	    if $keepActive && $authuser ne 'root@pam';
+	    if $keepActive && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	my $storecfg = PVE::Storage::config();
 
@@ -3682,7 +3682,7 @@ __PACKAGE__->register_method({
 
 	my $skiplock = extract_param($param, 'skiplock');
 	raise_param_exc({ skiplock => "Only root may use this option." })
-	    if $skiplock && $authuser ne 'root@pam';
+	    if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	die "VM $vmid not running\n" if !PVE::QemuServer::check_running($vmid);
 
@@ -3761,13 +3761,13 @@ __PACKAGE__->register_method({
 
 	my $skiplock = extract_param($param, 'skiplock');
 	raise_param_exc({ skiplock => "Only root may use this option." })
-	    if $skiplock && $authuser ne 'root@pam';
+	    if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	# nocheck is used as part of migration when config file might be still
 	# be on source node
 	my $nocheck = extract_param($param, 'nocheck');
 	raise_param_exc({ nocheck => "Only root may use this option." })
-	    if $nocheck && $authuser ne 'root@pam';
+	    if $nocheck && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	my $to_disk_suspended;
 	eval {
@@ -3835,7 +3835,7 @@ __PACKAGE__->register_method({
 
 	my $skiplock = extract_param($param, 'skiplock');
 	raise_param_exc({ skiplock => "Only root may use this option." })
-	    if $skiplock && $authuser ne 'root@pam';
+	    if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	PVE::QemuServer::vm_sendkey($vmid, $skiplock, $param->{key});
 
@@ -4313,7 +4313,7 @@ __PACKAGE__->register_method({
 	    }),
 	    disk => {
 	        type => 'string',
-		description => "The disk you want to move.",
+		description => "The disk you want to clone.",
 		enum => [PVE::QemuServer::Drive::valid_drive_names_with_unused()],
 	    },
             storage => get_standard_option('pve-storage-id', {
@@ -4994,14 +4994,14 @@ __PACKAGE__->register_method({
 	my $vmid = extract_param($param, 'vmid');
 
 	raise_param_exc({ force => "Only root may use this option." })
-	    if $param->{force} && $authuser ne 'root@pam';
+	    if $param->{force} && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	raise_param_exc({ migration_type => "Only root may use this option." })
-	    if $param->{migration_type} && $authuser ne 'root@pam';
+	    if $param->{migration_type} && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	# allow root only until better network permissions are available
 	raise_param_exc({ migration_network => "Only root may use this option." })
-	    if $param->{migration_network} && $authuser ne 'root@pam';
+	    if $param->{migration_network} && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
 	# test if VM exists
 	my $conf = PVE::QemuConfig->load_config($vmid);
@@ -5351,7 +5351,7 @@ __PACKAGE__->register_method({
 
 	my $skiplock = extract_param($param, 'skiplock');
         raise_param_exc({ skiplock => "Only root may use this option." })
-            if $skiplock && $authuser ne 'root@pam';
+            if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
         my $storecfg = PVE::Storage::config();
 
