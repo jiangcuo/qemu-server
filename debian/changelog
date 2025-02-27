@@ -1,3 +1,13 @@
+qemu-server (8.3.8+port2) bookworm; urgency=medium
+
+  * fix: improve clonedisk method
+
+  * api: Add pxvdi template support
+  
+  * api: Elevate the API key permissions for root@pam
+
+ -- Lierfang Support Team <itsupport@lierfang.com>  Thu, 27 Feb 2025 15:41:29 +0800
+
 qemu-server (8.3.8+port1) bookworm; urgency=medium
 
   * config: add arm virtualization support
