@@ -63,6 +63,7 @@ my $default_machines = {
     aarch64 => 'virt',
     riscv64 => 'virt',
     loongarch64 => 'virt',
+    ppc64 => 'pseries',
 };
 
 sub default_machine_for_arch {

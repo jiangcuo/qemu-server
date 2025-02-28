@@ -749,7 +749,7 @@ EODESCR
 	description => "Virtual processor architecture. Defaults to the host.",
 	optional => 1,
 	type => 'string',
-	enum => [qw(x86_64 aarch64 loongarch64 riscv64)],
+	enum => [qw(x86_64 aarch64 loongarch64 riscv64 ppc64)],
     },
     smbios1 => {
 	description => "Specify SMBIOS type 1 fields.",
@@ -3508,7 +3508,7 @@ my sub get_vga_properties {
     $vga->{type} = 'qxl' if $qxlnum;
 
     if (!$vga->{type}) {
-	if ($arch ne 'x86_64') {
+	if ($arch ne 'x86_64' && $arch ne 'ppc64') {
 	    $vga->{type} = 'virtio';
 	} elsif (min_version($machine_version, 2, 9)) {
 	    $vga->{type} = (!$winversion || $winversion >= 6) ? 'std' : 'cirrus';
@@ -3643,7 +3643,7 @@ sub config_to_command {
 
     push @$cmd, '-daemonize';
 
-    if ($conf->{smbios1}) {
+    if ($conf->{smbios1} && $arch ne 'ppc64') {
 	my $smbios_conf = parse_smbios1($conf->{smbios1});
 	if ($smbios_conf->{base64}) {
 	    # Do not pass base64 flag to qemu
@@ -3666,7 +3666,7 @@ sub config_to_command {
 	}
     }
 
-    if ($conf->{bios} && $conf->{bios} eq 'ovmf') {
+    if ($conf->{bios} && $conf->{bios} eq 'ovmf' && $arch ne 'ppc64') {
 	die "OVMF (UEFI) BIOS is not supported on 32-bit CPU types\n"
 	    if !$forcecpu && get_cpu_bitness($conf->{cpu}, $arch) == 32;
 
@@ -3684,7 +3684,7 @@ sub config_to_command {
 	    push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35.cfg';
 	}
     }
-	if ($arch ne 'x86_64') { 
+	if ($arch ne 'x86_64' && $arch ne 'ppc64' ) { 
         unshift @$devices, '-readconfig', '/usr/share/qemu-server/pve-port.cfg';
     }
 

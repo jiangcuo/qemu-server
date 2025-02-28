@@ -26,6 +26,7 @@ my $arch_to_qemu_binary = {
     x86_64 => '/usr/bin/qemu-system-x86_64',
     loongarch64 => '/usr/bin/qemu-system-loongarch64',
     riscv64 => '/usr/bin/qemu-system-riscv64',
+    ppc64    => '/usr/bin/qemu-system-ppc64',
 };
 sub get_command_for_arch($) {
     my ($arch) = @_;
