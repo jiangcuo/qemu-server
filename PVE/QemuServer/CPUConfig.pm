@@ -177,6 +177,10 @@ my $cpu_vendor_list = {
 
     # RISCV
     'rv64' => 'RISCV', 
+    'power10' => 'POWER',
+    'power9' => 'POWER',
+    'power8' => 'POWER',
+    'power11' => 'POWER',
 
 };
 
@@ -799,6 +803,8 @@ sub get_default_cpu_type {
         'aarch64'     => $kvm ? 'host' : 'max',
         'riscv64'     => $kvm ? 'rv64' : 'max',
         'loongarch64' => $kvm ? 'la464' : 'max',
+        'ppc64' => $kvm ? 'power10' : 'power10',
+
     );
 
     return $cpu_map{$arch} // 'max';
@@ -831,7 +837,7 @@ sub get_cpu_bitness {
     }
 
     return $cputypes_32bit->{$cputype} ? 32 : 64 if $arch eq 'x86_64';
-    if ($arch eq 'aarch64' || $arch eq 'loongarch64' || $arch eq 'riscv64') {
+    if ($arch eq 'aarch64' || $arch eq 'loongarch64' || $arch eq 'riscv64' || $arch eq 'ppc64') {
         return 64;
     }
 
