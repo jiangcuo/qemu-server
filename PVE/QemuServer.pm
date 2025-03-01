@@ -749,7 +749,7 @@ EODESCR
 	description => "Virtual processor architecture. Defaults to the host.",
 	optional => 1,
 	type => 'string',
-	enum => [qw(x86_64 aarch64 loongarch64 riscv64 ppc64)],
+	enum => [qw(x86_64 aarch64 loongarch64 riscv64 ppc64 s390x)],
     },
     smbios1 => {
 	description => "Specify SMBIOS type 1 fields.",
@@ -1526,6 +1526,7 @@ sub print_drivedevice_full {
     }
 
     $device .= ",bootindex=$drive->{bootindex}" if $drive->{bootindex};
+    $device .= ",loadparm=$drive->{bootindex}" if $arch eq 's390x';
 
     if (my $serial = $drive->{serial}) {
 	$serial = URI::Escape::uri_unescape($serial);
@@ -3456,7 +3457,7 @@ sub query_understood_cpu_flags {
 my sub should_disable_smm {
     my ($conf, $vga, $machine) = @_;
 
-    return if $machine =~ m/^virt/; # there is no smm flag that could be disabled
+    return if $machine =~ m/^(virt|s390-ccw-virtio|pseries)/; # there is no smm flag that could be disabled
 
     return (!defined($conf->{bios}) || $conf->{bios} eq 'seabios') &&
 	$vga->{type} && $vga->{type} =~ m/^(serial\d+|none)$/;
@@ -3643,7 +3644,7 @@ sub config_to_command {
 
     push @$cmd, '-daemonize';
 
-    if ($conf->{smbios1} && $arch ne 'ppc64') {
+    if ($conf->{smbios1} && $arch ne 'ppc64' && $arch ne 's390x') {
 	my $smbios_conf = parse_smbios1($conf->{smbios1});
 	if ($smbios_conf->{base64}) {
 	    # Do not pass base64 flag to qemu
@@ -3684,7 +3685,7 @@ sub config_to_command {
 	    push @$devices, '-readconfig', '/usr/share/qemu-server/pve-q35.cfg';
 	}
     }
-	if ($arch ne 'x86_64' && $arch ne 'ppc64' ) { 
+	if ($arch ne 'x86_64' && $arch ne 'ppc64' && $arch ne 's390x' ) {
         unshift @$devices, '-readconfig', '/usr/share/qemu-server/pve-port.cfg';
     }
 
@@ -3799,7 +3800,7 @@ sub config_to_command {
     }
     push @$cmd, '-nodefaults';
 
-    push @$cmd, '-boot', "menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg";
+    push @$cmd, '-boot', "menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg" if $arch ne 's390x';
 
     push $machineFlags->@*, 'acpi=off' if defined($conf->{acpi}) && $conf->{acpi} == 0 && $arch ne 'loongarch64';
 
@@ -3906,7 +3907,7 @@ sub config_to_command {
 
     assert_clipboard_config($vga);
     my $is_spice = $qxlnum || $vga->{type} =~ /^(virtio|mdev)/;
-
+	$is_spice = 0 if $arch eq 's390x';
     if ($is_spice || ($vga->{'clipboard'} && $vga->{'clipboard'} eq 'vnc')) {
 	if ($qxlnum > 1) {
 	    if ($winversion){
@@ -3963,7 +3964,7 @@ sub config_to_command {
 	my $pciaddr = print_pci_addr("balloon0", $bridges, $arch, $machine_type);
 	my $ballooncmd = "virtio-balloon-pci,id=balloon0$pciaddr";
 	$ballooncmd .= ",free-page-reporting=on" if min_version($machine_version, 6, 2);
-	push @$devices, '-device', $ballooncmd;
+	push @$devices, '-device', $ballooncmd if $arch ne 's390x';
     }
 
     if ($conf->{watchdog}) {
@@ -4014,7 +4015,6 @@ sub config_to_command {
 
 	    my $pciaddr = print_pci_addr("$controller_prefix$controller", $bridges, $arch, $machine_type);
 	    my $scsihw_type = $scsihw =~ m/^virtio-scsi-single/ ? "virtio-scsi-pci" : $scsihw;
-
 	    my $iothread = '';
 	    if($conf->{scsihw} && $conf->{scsihw} eq "virtio-scsi-single" && $drive->{iothread}){
 		$iothread .= ",iothread=iothread-$controller_prefix$controller";
@@ -4030,8 +4030,13 @@ sub config_to_command {
 		$queues = ",num_queues=$drive->{queues}";
 	    }
 
-	    push @$devices, '-device', "$scsihw_type,id=$controller_prefix$controller$pciaddr$iothread$queues"
-		if !$scsicontroller->{$controller};
+		if (!$scsicontroller->{$controller}){
+			if ($arch eq 's390x'){
+			push @$devices, '-device', "virtio-scsi,id=$controller_prefix$controller$iothread$queues"
+			}else{
+			push @$devices, '-device', "$scsihw_type,id=$controller_prefix$controller$pciaddr$iothread$queues"
+			}
+		}
 	    $scsicontroller->{$controller}=1;
 	}
 
