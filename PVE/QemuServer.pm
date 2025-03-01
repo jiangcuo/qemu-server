@@ -1526,7 +1526,7 @@ sub print_drivedevice_full {
     }
 
     $device .= ",bootindex=$drive->{bootindex}" if $drive->{bootindex};
-    $device .= ",loadparm=$drive->{bootindex}" if $arch eq 's390x';
+    $device .= ",loadparm=$drive->{bootindex}" if ($arch eq 's390x' && $drive->{bootindex});
 
     if (my $serial = $drive->{serial}) {
 	$serial = URI::Escape::uri_unescape($serial);
