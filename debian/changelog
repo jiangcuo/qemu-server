@@ -1,3 +1,9 @@
+qemu-server (8.3.8+port3) bookworm; urgency=medium
+
+  * Add s390x ppc64le emulated support
+
+ -- Lierfang Support Team <itsupport@lierfang.com>  Sat, 01 Mar 2025 18:19:28 +0800
+
 qemu-server (8.3.8+port2) bookworm; urgency=medium
 
   * fix: improve clonedisk method
