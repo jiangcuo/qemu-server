@@ -148,7 +148,7 @@ my $check_storage_access = sub {
 	} elsif ($isCDROM && ($volid eq 'cdrom')) {
 	    $rpcenv->check($authuser, "/", ['Sys.Console']);
 	} elsif (!$isCDROM && ($volid =~ $PVE::QemuServer::Drive::NEW_DISK_RE)) {
-	    my ($storeid, $size) = ($2 || $default_storage, $3);
+	    my $storeid = $2 || $default_storage;
 	    die "no storage ID specified (and no default storage)\n" if !$storeid;
 	    $rpcenv->check($authuser, "/storage/$storeid", ['Datastore.AllocateSpace']);
 	    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
@@ -4023,13 +4023,15 @@ __PACKAGE__->register_method({
 	    my $storecfg = PVE::Storage::config();
 
 	    if ($storage) {
-		# check if storage is enabled on local node
-		PVE::Storage::storage_check_enabled($storecfg, $storage);
+		# check if storage is enabled on local node and supports vm images
+		my $scfg = PVE::Storage::storage_check_enabled($storecfg, $storage);
+		raise_param_exc({ storage => "storage '$storage' does not support vm images" })
+		    if !$scfg->{content}->{images};
+
 		if ($target) {
 		    # check if storage is available on target node
 		    PVE::Storage::storage_check_enabled($storecfg, $storage, $target);
 		    # clone only works if target storage is shared
-		    my $scfg = PVE::Storage::storage_config($storecfg, $storage);
 		    die "can't clone to non-shared storage '$storage'\n"
 			if !$scfg->{shared};
 		}
@@ -4408,6 +4410,10 @@ __PACKAGE__->register_method({
 
 	    die "you can't move to the same storage with same format\n"
 		if $oldstoreid eq $storeid && (!$format || !$oldfmt || $oldfmt eq $format);
+
+	    my $scfg = PVE::Storage::storage_check_enabled($storecfg, $storeid);
+	    raise_param_exc({ storage => "storage '$storeid' does not support vm images" })
+		if !$scfg->{content}->{images};
 
 	    # this only checks snapshots because $disk is passed!
 	    my $snapshotted = PVE::QemuServer::Drive::is_volume_in_use(
