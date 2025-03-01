@@ -27,6 +27,8 @@ my $arch_to_qemu_binary = {
     loongarch64 => '/usr/bin/qemu-system-loongarch64',
     riscv64 => '/usr/bin/qemu-system-riscv64',
     ppc64    => '/usr/bin/qemu-system-ppc64',
+    s390x    => '/usr/bin/qemu-system-s390x',
+
 };
 sub get_command_for_arch($) {
     my ($arch) = @_;

@@ -804,7 +804,7 @@ sub get_default_cpu_type {
         'riscv64'     => $kvm ? 'rv64' : 'max',
         'loongarch64' => $kvm ? 'la464' : 'max',
         'ppc64' => $kvm ? 'power10' : 'power10',
-
+        's390x' => $kvm ? 'max' : 'max',
     );
 
     return $cpu_map{$arch} // 'max';
@@ -837,7 +837,7 @@ sub get_cpu_bitness {
     }
 
     return $cputypes_32bit->{$cputype} ? 32 : 64 if $arch eq 'x86_64';
-    if ($arch eq 'aarch64' || $arch eq 'loongarch64' || $arch eq 'riscv64' || $arch eq 'ppc64') {
+    if ($arch eq 'aarch64' || $arch eq 'loongarch64' || $arch eq 'riscv64' || $arch eq 'ppc64' || $arch eq 's390x') {
         return 64;
     }
 

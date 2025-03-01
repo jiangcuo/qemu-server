@@ -21,7 +21,7 @@ my $machine_fmt = {
 	default_key => 1,
 	description => "Specifies the QEMU machine type.",
 	type => 'string',
-	pattern => '(pc|pc(-i440fx)?-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|q35|pc-q35-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|virt(?:-\d+(\.\d+)+)?(\+pve\d+)?)',
+	pattern => '(pc|pc(-i440fx)?-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|q35|pc-q35-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|(virt|s390-ccw-virtio|pseries)(?:-\d+(\.\d+)+)?(\+pve\d+)?)',
 	maxLength => 40,
 	format_description => 'machine type',
 	optional => 1,
@@ -64,6 +64,7 @@ my $default_machines = {
     riscv64 => 'virt',
     loongarch64 => 'virt',
     ppc64 => 'pseries',
+    s390x => 's390-ccw-virtio',
 };
 
 sub default_machine_for_arch {
