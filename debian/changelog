@@ -1,3 +1,11 @@
+qemu-server (8.3.8+port4) bookworm; urgency=medium
+
+  * Add lierfang bootsplash.
+
+  * Update dependencies pve-edk2-firmware version to 4.2024.11-4
+
+ -- Lierfang Support Team <itsupport@lierfang.com>  Thu, 13 Mar 2025 13:46:29 +0800
+
 qemu-server (8.3.8+port3) bookworm; urgency=medium
 
   * Add s390x ppc64le emulated support
