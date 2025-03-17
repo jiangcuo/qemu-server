@@ -6,7 +6,11 @@ use strict;
 use PVE::JSONSchema;
 use PVE::Mapping::PCI;
 use PVE::SysFSTools;
-use PVE::Tools;
+use PVE::Tools qw(dir_glob_foreach run_command);
+use PVE::JSONSchema qw(get_standard_option parse_property_string);
+use Cwd 'realpath';
+use File::Basename;
+
 
 use base 'Exporter';
 
@@ -46,6 +50,18 @@ EODESCR
 	format => 'pve-configid',
 	description => "The ID of a cluster wide mapping. Either this or the default-key 'host'"
 	    ." must be set.",
+    },
+	mac => get_standard_option('mac-addr', {
+	description => "MAC address. That address must be unique within your network. This is"
+	    ." automatically generated if not specified.",
+    },
+	optional => 1,
+	),
+	tag => {
+	type => 'integer',
+	minimum => 1, maximum => 4094,
+	description => 'VLAN tag to apply to packets on this interface.',
+	optional => 1,
     },
     ramfb => {
     type => 'boolean',
@@ -900,6 +916,12 @@ sub prepare_pci_device {
     die "cannot prepare PCI pass-through, IOMMU not present\n" if !PVE::SysFSTools::check_iommu_support();
     die "no pci device info for device '$pciid'\n" if !$info;
 
+	if ($device->{mac}){
+		my $mac = $device->{mac};
+		my $vlan = $device->{tag};
+		pci_set_sriov_device($pciid,$mac,$vlan);
+	}
+
     if ($device->{nvidia}) {
 	# nothing to do
     } elsif (my $mdev = $device->{mdev}) {
@@ -1043,5 +1065,52 @@ sub reserve_pci_usage {
     });
     die $@ if $@;
 }
+
+sub pci_set_sriov_device {
+    my ($pciid,$mac,$vlan) = @_;
+    if (! -d "/sys/bus/pci/devices/$pciid/physfn") {
+        return
+    }
+
+    my $regex = qr/^virtfn(\d+)$/;
+    my $pfpath = "/sys/bus/pci/devices/$pciid/physfn";
+    dir_glob_foreach($pfpath,$regex,sub {
+        my ($name) = @_;
+		my $vfpath = "$pfpath/$name";
+        my $pciid2 = basename(realpath($vfpath));
+        return if $pciid2 ne $pciid;
+        if ($name =~ $regex) {
+            my $vf_num = $1;
+            my $regex2 = qr/(?:eth\d+|en[^:.]+|ib[^:.]+)/;
+            dir_glob_foreach("$pfpath/net",$regex2,sub {
+				my ($pfname) = @_;
+				$vlan = 0 if !$vlan;
+				my $cmd = [
+					'ip',
+					'link',
+					'set',
+					$pfname,
+					'vf',
+					$vf_num,
+					'mac',
+					$mac,
+					'trust',
+					'on',
+					'spoofchk',
+					'off',
+					'vlan',
+					$vlan
+					];
+				my $rc = PVE::Tools::run_command($cmd, noerr => 1, quiet => 0);
+				warn "$rc" if $rc;
+            }
+            )
+        } else {
+            return
+        }
+        }
+    )
+}
+
 
 1;
