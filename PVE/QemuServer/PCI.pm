@@ -876,7 +876,7 @@ sub print_hostpci_devices {
 	    $devicestr .= ",id=${id}${mf_addr}${pciaddr}${mf_addr}";
 
 	    my $mdevtype = $d->{mdev} // undef;
-	    if ($mdevtype =~ /^(.*?)-/) {
+	    if (defined($mdevtype) && $mdevtype =~ /^(.*?)-/) {
 			$mdevtype = $1;
 	    }
 
