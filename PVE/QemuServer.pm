@@ -2968,6 +2968,7 @@ sub vmstatus {
         $d->{template} = 1 if PVE::QemuConfig->is_template($conf);
 
 	$d->{pxvditemplate} = 1 if $conf->{pxvditemplate};
+	$d->{snapshot} = 1 if $conf->{snapshot};
 	$d->{serial} = 1 if conf_has_serial($conf);
 	$d->{lock} = $conf->{lock} if $conf->{lock};
 	$d->{tags} = $conf->{tags} if defined($conf->{tags});
