@@ -150,13 +150,6 @@ my $cpu_vendor_list = {
     'EPYC-Milan-v2' => 'AuthenticAMD',
     'EPYC-Genoa' => 'AuthenticAMD',
 
-    # generic types, use vendor from host node
-    host => 'default',
-    kvm32 => 'default',
-    kvm64 => 'default',
-    qemu32 => 'default',
-    qemu64 => 'default',
-    max => 'default',
 
     # Arm
     'cortex-a35' => 'ARM',
@@ -181,6 +174,14 @@ my $cpu_vendor_list = {
     'power9' => 'POWER',
     'power8' => 'POWER',
     'power11' => 'POWER',
+
+    # generic types, use vendor from host node
+    host => 'default',
+    kvm32 => 'default',
+    kvm64 => 'default',
+    qemu32 => 'default',
+    qemu64 => 'default',
+    max => 'default',
 
 };
 
