@@ -1,3 +1,15 @@
+qemu-server (8.3.8+port5) bookworm; urgency=medium
+
+  * fix Use of uninitialized value $mdevtype
+
+  * add snapshot flag in vmstatus
+
+  * move qemu cpu type to last line
+
+  * Add sriov device mac support
+
+ -- Lierfang Support Team <itsupport@lierfang.com>  Tue, 18 Mar 2025 14:28:41 +0800
+
 qemu-server (8.3.8+port4) bookworm; urgency=medium
 
   * Add lierfang bootsplash.
