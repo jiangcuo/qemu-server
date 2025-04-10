@@ -3668,6 +3668,11 @@ sub config_to_command {
 	}
     }
 
+	# We need to set the uuid to the vm on vdi solution
+	if ($conf->{uuid} && $arch ne 'ppc64' && $arch ne 's390x'){
+	    push @$cmd, '-smbios', "type=2,serial=$conf->{uuid}";
+	}
+
     if ($conf->{bios} && $conf->{bios} eq 'ovmf' && $arch ne 'ppc64') {
 	die "OVMF (UEFI) BIOS is not supported on 32-bit CPU types\n"
 	    if !$forcecpu && get_cpu_bitness($conf->{cpu}, $arch) == 32;
