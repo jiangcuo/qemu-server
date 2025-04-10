@@ -90,6 +90,13 @@ $mapping_pci_module->mock(
     },
 );
 
+our $mapping_dir_module = Test::MockModule->new("PVE::Mapping::Dir");
+$mapping_dir_module->mock(
+    config => sub {
+	return {};
+    },
+);
+
 our $ha_config_module = Test::MockModule->new("PVE::HA::Config");
 $ha_config_module->mock(
     vm_is_ha_managed => sub {
@@ -129,6 +136,9 @@ our $qemu_server_module = Test::MockModule->new("PVE::QemuServer");
 $qemu_server_module->mock(
     clear_reboot_request => sub {
 	return 1;
+    },
+    vm_stop_cleanup => sub {
+	return;
     },
     get_efivars_size => sub {
 	 return 128 * 1024;

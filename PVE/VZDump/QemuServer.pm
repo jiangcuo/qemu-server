@@ -3,12 +3,15 @@ package PVE::VZDump::QemuServer;
 use strict;
 use warnings;
 
+use Fcntl qw(:mode);
 use File::Basename;
-use File::Path;
+use File::Path qw(make_path remove_tree);
+use File::stat qw();
 use IO::File;
 use IPC::Open3;
 use JSON;
 use POSIX qw(EINTR EAGAIN);
+use Time::HiRes qw(usleep);
 
 use PVE::Cluster qw(cfs_read_file);
 use PVE::INotify;
@@ -20,7 +23,7 @@ use PVE::QMPClient;
 use PVE::Storage::Plugin;
 use PVE::Storage::PBSPlugin;
 use PVE::Storage;
-use PVE::Tools;
+use PVE::Tools qw(run_command);
 use PVE::VZDump;
 use PVE::Format qw(render_duration render_bytes);
 
@@ -30,6 +33,7 @@ use PVE::QemuServer::Drive qw(checked_volume_format);
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Monitor qw(mon_cmd);
+use PVE::QemuServer::QMPHelpers;
 
 use base qw (PVE::VZDump::Plugin);
 
@@ -232,20 +236,21 @@ sub assemble {
 
     my $found_snapshot;
     my $found_pending;
-    my $found_cloudinit;
+    my $found_special;
     while (defined (my $line = <$conffd>)) {
 	next if $line =~ m/^\#vzdump\#/; # just to be sure
 	next if $line =~ m/^\#qmdump\#/; # just to be sure
 	if ($line =~ m/^\[(.*)\]\s*$/) {
-	    if ($1 =~ m/PENDING/i) {
+	    if ($1 =~ m/^PENDING$/i) {
 		$found_pending = 1;
-	    } elsif ($1 =~ m/special:cloudinit/) {
-		$found_cloudinit = 1;
+	    } elsif ($1 =~ m/^special:.*$/) {
+		$found_special = 1;
 	    } else {
 		$found_snapshot = 1;
 	    }
 	}
-	next if $found_snapshot || $found_pending || $found_cloudinit; # skip all snapshots,pending changes and cloudinit config data
+	# skip all snapshots, pending changes and special sections
+	next if $found_snapshot || $found_pending || $found_special;
 
 	if ($line =~ m/^unused\d+:\s*(\S+)\s*/) {
 	    $self->loginfo("skip unused drive '$1' (not included into backup)");
@@ -266,6 +271,9 @@ sub assemble {
 	}
     }
 
+    if ($found_special) {
+	$self->loginfo("special config section found (not included into backup)");
+    }
     if ($found_snapshot) {
 	$self->loginfo("snapshots found (not included into backup)");
     }
@@ -284,6 +292,8 @@ sub archive {
 
     if ($self->{vzdump}->{opts}->{pbs}) {
 	$self->archive_pbs($task, $vmid);
+    } elsif ($self->{vzdump}->{'backup-provider'}) {
+	$self->archive_external($task, $vmid);
     } else {
 	$self->archive_vma($task, $vmid, $filename, $comp);
     }
@@ -310,6 +320,10 @@ my $bitmap_action_to_human = sub {
 	}
     } elsif ($action eq "invalid") {
 	return "existing bitmap was invalid and has been cleared";
+    } elsif ($action eq "missing-recreated") {
+	# Lie about the TPM state, because it is newly attached each time.
+	return "created new" if $info->{drive} eq 'drive-tpmstate0-backup';
+	return "expected bitmap was missing and has been recreated";
     } else {
 	return "unknown";
     }
@@ -529,39 +543,59 @@ sub get_and_check_pbs_encryption_config {
     die "internal error - unhandled case for getting & checking PBS encryption ($keyfile, $master_keyfile)!";
 }
 
+# Helper is intended to be called from allocate_fleecing_images() only. Otherwise, fleecing volids
+# have already been recorded in the configuration and PVE::QemuConfig::cleanup_fleecing_images()
+# should be used instead.
 my sub cleanup_fleecing_images {
-    my ($self, $disks) = @_;
+    my ($self, $vmid, $disks) = @_;
+
+    my $failed = [];
 
     for my $di ($disks->@*) {
 	if (my $volid = $di->{'fleece-volid'}) {
 	    eval { PVE::Storage::vdisk_free($self->{storecfg}, $volid); };
-	    $self->log('warn', "error removing fleecing image '$volid' - $@") if $@;
+	    if (my $err = $@) {
+		$self->log('warn', "error removing fleecing image '$volid' - $err");
+		push $failed->@*, $volid;
+	    }
 	}
     }
+
+    PVE::QemuConfig::record_fleecing_images($vmid, $failed);
 }
 
 my sub allocate_fleecing_images {
-    my ($self, $disks, $vmid, $fleecing_storeid, $format) = @_;
+    my ($self, $disks, $vmid, $fleecing_storeid, $format, $all_images) = @_;
 
     die "internal error - no fleecing storage specified\n" if !$fleecing_storeid;
 
-    # TODO what about potential left-over images from a failed attempt? Just
-    # auto-remove? While unlikely, could conflict with manually created image from user...
+    my $fleece_volids = [];
 
     eval {
 	my $n = 0; # counter for fleecing image names
 
 	for my $di ($disks->@*) {
-	    next if $di->{virtdev} =~ m/^(?:tpmstate|efidisk)\d$/; # too small to be worth it
+	    # EFI/TPM are usually too small to be worth it, but it's required for external providers
+	    next if !$all_images && $di->{virtdev} =~ m/^(?:tpmstate|efidisk)\d$/;
 	    if ($di->{type} eq 'block' || $di->{type} eq 'file') {
 		my $scfg = PVE::Storage::storage_config($self->{storecfg}, $fleecing_storeid);
 		my $name = "vm-$vmid-fleece-$n";
 		$name .= ".$format" if $scfg->{path};
 
-		my $size = PVE::Tools::convert_size($di->{size}, 'b' => 'kb');
+		my $size;
+		if ($format ne 'raw') {
+		    # Since non-raw images cannot be attached with an explicit 'size' parameter to
+		    # QEMU later, pass the exact size to the storage layer. This makes qcow2
+		    # fleecing images work for non-1KiB-aligned source images.
+		    $size = $di->{'block-node-size'}/1024;
+		} else {
+		    $size = PVE::Tools::convert_size($di->{'block-node-size'}, 'b' => 'kb');
+		}
 
 		$di->{'fleece-volid'} = PVE::Storage::vdisk_alloc(
 		    $self->{storecfg}, $fleecing_storeid, $vmid, $format, $name, $size);
+
+		push $fleece_volids->@*, $di->{'fleece-volid'};
 
 		$n++;
 	    } else {
@@ -570,9 +604,11 @@ my sub allocate_fleecing_images {
 	}
     };
     if (my $err = $@) {
-	cleanup_fleecing_images($self, $disks);
+	cleanup_fleecing_images($self, $vmid, $disks);
 	die $err;
     }
+
+    PVE::QemuConfig::record_fleecing_images($vmid, $fleece_volids);
 }
 
 my sub detach_fleecing_images {
@@ -607,7 +643,7 @@ my sub attach_fleecing_images {
 	    my $drive = "file=$path,if=none,id=$devid,format=$format,discard=unmap";
 	    # Specify size explicitly, to make it work if storage backend rounded up size for
 	    # fleecing image when allocating.
-	    $drive .= ",size=$di->{size}" if $format eq 'raw';
+	    $drive .= ",size=$di->{'block-node-size'}" if $format eq 'raw';
 	    $drive =~ s/\\/\\\\/g;
 	    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"", 60);
 	    die "attaching fleecing image $volid failed - $ret\n" if $ret !~ m/OK/s;
@@ -616,7 +652,7 @@ my sub attach_fleecing_images {
 }
 
 my sub check_and_prepare_fleecing {
-    my ($self, $vmid, $fleecing_opts, $disks, $is_template, $qemu_support) = @_;
+    my ($self, $vmid, $fleecing_opts, $disks, $is_template, $qemu_support, $all_images) = @_;
 
     # Even if the VM was started specifically for fleecing, it's possible that the VM is resumed and
     # then starts doing IO. For VMs that are not resumed the fleecing images will just stay empty,
@@ -624,7 +660,7 @@ my sub check_and_prepare_fleecing {
 
     my $use_fleecing = $fleecing_opts && $fleecing_opts->{enabled} && !$is_template;
 
-    if ($use_fleecing && !defined($qemu_support->{'backup-fleecing'})) {
+    if ($use_fleecing && !$qemu_support->{'backup-fleecing'}) {
 	$self->log(
 	    'warn',
 	    "running QEMU version does not support backup fleecing - continuing without",
@@ -632,12 +668,22 @@ my sub check_and_prepare_fleecing {
 	$use_fleecing = 0;
     }
 
+    # clean up potential left-overs from a previous attempt
+    eval {
+	PVE::QemuConfig::cleanup_fleecing_images(
+	    $vmid, $self->{storecfg}, sub { $self->log($_[0], $_[1]); });
+    };
+    $self->log('warn', "attempt to clean up left-over fleecing images failed - $@") if $@;
+
     if ($use_fleecing) {
+	$self->query_block_node_sizes($vmid, $disks);
+
 	my ($default_format, $valid_formats) = PVE::Storage::storage_default_format(
 	    $self->{storecfg}, $fleecing_opts->{storage});
 	my $format = scalar(grep { $_ eq 'qcow2' } $valid_formats->@*) ? 'qcow2' : 'raw';
 
-	allocate_fleecing_images($self, $disks, $vmid, $fleecing_opts->{storage}, $format);
+	allocate_fleecing_images(
+	    $self, $disks, $vmid, $fleecing_opts->{storage}, $format, $all_images);
 	attach_fleecing_images($self, $disks, $vmid, $format);
     }
 
@@ -721,14 +767,14 @@ sub archive_pbs {
 
 	# pve-qemu supports it since 5.2.0-1 (PVE 6.4), so safe to die since PVE 8
 	die "master key configured but running QEMU version does not support master keys\n"
-	    if !defined($qemu_support->{'pbs-masterkey'}) && defined($master_keyfile);
+	    if !$qemu_support->{'pbs-masterkey'} && defined($master_keyfile);
 
 	$attach_tpmstate_drive->($self, $task, $vmid);
 
 	my $is_template = PVE::QemuConfig->is_template($self->{vmlist}->{$vmid});
 
 	$task->{'use-fleecing'} = check_and_prepare_fleecing(
-	    $self, $vmid, $opts->{fleecing}, $task->{disks}, $is_template, $qemu_support);
+	    $self, $vmid, $opts->{fleecing}, $task->{disks}, $is_template, $qemu_support, 0);
 
 	my $fs_frozen = $self->qga_fs_freeze($task, $vmid);
 
@@ -901,7 +947,7 @@ sub archive_vma {
 	$attach_tpmstate_drive->($self, $task, $vmid);
 
 	$task->{'use-fleecing'} = check_and_prepare_fleecing(
-	    $self, $vmid, $opts->{fleecing}, $task->{disks}, $is_template, $qemu_support);
+	    $self, $vmid, $opts->{fleecing}, $task->{disks}, $is_template, $qemu_support, 0);
 
 	my $outfh;
 	if ($opts->{stdout}) {
@@ -1038,6 +1084,31 @@ sub qga_fs_thaw {
     $self->logerr($@) if $@;
 }
 
+# The size for fleecing images needs to be exactly the same size as QEMU sees. E.g. EFI disk can bex
+# attached with a smaller size then the underyling image on the storage.
+sub query_block_node_sizes {
+    my ($self, $vmid, $disks) = @_;
+
+    my $block_info = mon_cmd($vmid, "query-block");
+    $block_info = { map { $_->{device} => $_ } $block_info->@* };
+
+    for my $diskinfo ($disks->@*) {
+	my $drive_key = $diskinfo->{virtdev};
+	$drive_key .= "-backup" if $drive_key eq 'tpmstate0';
+	my $block_node_size =
+	    eval { $block_info->{"drive-$drive_key"}->{inserted}->{image}->{'virtual-size'}; };
+	if (!$block_node_size) {
+	    $self->loginfo(
+		"could not determine block node size of drive '$drive_key' - using fallback");
+	    $block_node_size = $diskinfo->{size}
+		or die "could not determine size of drive '$drive_key'\n";
+	}
+	$diskinfo->{'block-node-size'} = $block_node_size;
+    }
+
+    return;
+}
+
 # we need a running QEMU/KVM process for backup, starts a paused (prelaunch)
 # one if VM isn't already running
 sub enforce_vm_running_for_backup {
@@ -1111,13 +1182,96 @@ sub snapshot {
     # nothing to do
 }
 
+my sub cleanup_file_handles {
+    my ($self, $file_handles) = @_;
+
+    for my $file_handle ($file_handles->@*) {
+	close($file_handle) or $self->log('warn', "unable to close file handle - $!");
+    }
+}
+
+my sub cleanup_nbd_mounts {
+    my ($self, $info) = @_;
+
+    for my $mount_point (keys $info->%*) {
+	my $pid_file = delete($info->{$mount_point}->{'pid-file'});
+	unlink($pid_file) or $self->log('warn', "unable to unlink '$pid_file' - $!");
+	# Do a lazy unmount, because the target might still be busy even if the file handle was
+	# already closed.
+	eval { run_command(['fusermount', '-z', '-u', $mount_point ]); };
+	if (my $err = $@) {
+	    delete $info->{$mount_point};
+	    $self->log('warn', "unable to unmount NBD backup source '$mount_point' - $err");
+	}
+    }
+
+    # Wait for the unmount before cleaning up child PIDs to avoid 'nbdfuse' processes being
+    # interrupted by the signals issued there.
+    my $waited;
+    my $wait_limit = 50; # 5 seconds
+    for ($waited = 0; $waited < $wait_limit && scalar(keys $info->%*); $waited++) {
+	for my $mount_point (keys $info->%*) {
+	    delete($info->{$mount_point}) if !-e $info->{$mount_point}->{'virtual-file'};
+	    eval { remove_tree($mount_point); };
+	}
+	usleep(100_000);
+    }
+    # just informational, remaining child processes will be killed afterwards
+    $self->loginfo("unable to gracefully cleanup NBD fuse mounts") if scalar(keys $info->%*) != 0;
+}
+
+my sub cleanup_child_processes {
+    my ($self, $cpids) = @_;
+
+    my $waited;
+    my $wait_limit = 5;
+    for ($waited = 0; $waited < $wait_limit && scalar(keys $cpids->%*); $waited++) {
+	for my $cpid (keys $cpids->%*) {
+	    delete($cpids->{$cpid}) if waitpid($cpid, POSIX::WNOHANG) > 0;
+	}
+	if ($waited == 0) {
+	    kill 15, $_ for keys $cpids->%*;
+	}
+	sleep 1;
+    }
+    if ($waited == $wait_limit && scalar(keys $cpids->%*)) {
+	kill 9, $_ for keys $cpids->%*;
+	sleep 1;
+	for my $cpid (keys $cpids->%*) {
+	    delete($cpids->{$cpid}) if waitpid($cpid, POSIX::WNOHANG) > 0;
+	}
+	$self->log('warn', "unable to collect child process '$_'") for keys $cpids->%*;
+    }
+}
+
 sub cleanup {
     my ($self, $task, $vmid) = @_;
 
     # If VM was started only for backup, it is already stopped now.
     if (PVE::QemuServer::Helpers::vm_running_locally($vmid)) {
+	if ($task->{cleanup}->{'nbd-stop'}) {
+	    eval { PVE::QemuServer::QMPHelpers::nbd_stop($vmid); };
+	    $self->logerr($@) if $@;
+	}
+
+	if (my $info = $task->{cleanup}->{'backup-access-teardown'}) {
+	    my $params = {
+		'target-id' => $info->{'target-id'},
+		timeout => 60,
+		success => $info->{success} ? JSON::true : JSON::false,
+	    };
+
+	    $self->loginfo("tearing down backup-access");
+	    eval { mon_cmd($vmid, "backup-access-teardown", $params->%*) };
+	    $self->logerr($@) if $@;
+	}
+
 	$detach_tpmstate_drive->($task, $vmid);
-	detach_fleecing_images($task->{disks}, $vmid) if $task->{'use-fleecing'};
+	if ($task->{'use-fleecing'}) {
+	    detach_fleecing_images($task->{disks}, $vmid);
+	    PVE::QemuConfig::cleanup_fleecing_images(
+		$vmid, $self->{storecfg}, sub { $self->log($_[0], $_[1]); });
+	}
     }
 
     cleanup_fleecing_images($self, $task->{disks}) if $task->{'use-fleecing'};
@@ -1125,6 +1279,331 @@ sub cleanup {
     if ($self->{qmeventd_fh}) {
 	close($self->{qmeventd_fh});
     }
+
+    cleanup_file_handles($self, $task->{cleanup}->{'file-handles'})
+	if $task->{cleanup}->{'file-handles'};
+
+    cleanup_nbd_mounts($self, $task->{cleanup}->{'nbd-mounts'})
+	if $task->{cleanup}->{'nbd-mounts'};
+
+    cleanup_child_processes($self, $task->{cleanup}->{'child-pids'})
+	if $task->{cleanup}->{'child-pids'};
+
+    if (my $dir = $task->{'backup-access-root-dir'}) {
+	eval { remove_tree($dir) };
+	$self->log('warn', "unable to cleanup directory $dir - $@") if $@;
+    }
+}
+
+my sub virtual_file_backup_prepare {
+    my ($self, $vmid, $task, $device_name, $size, $nbd_path, $bitmap_name) = @_;
+
+    my $cleanup = $task->{cleanup};
+
+    my $nbd_uri = "nbd+unix:///${device_name}?socket=${nbd_path}";
+
+    my $error_fh;
+    my $next_dirty_region;
+
+    # If there is no dirty bitmap, it can be treated as if there's a full dirty one. The output of
+    # nbdinfo is a list of tuples with offset, length, type, description. The first bit of 'type' is
+    # set when the bitmap is dirty, see QEMU's docs/interop/nbd.txt
+    my $dirty_bitmap = [];
+    if ($bitmap_name) {
+	my $input = IO::File->new();
+	my $info = IO::File->new();
+	$error_fh = IO::File->new();
+	my $nbdinfo_cmd = ["nbdinfo", $nbd_uri, "--map=qemu:dirty-bitmap:${bitmap_name}"];
+	my $cpid = open3($input, $info, $error_fh, $nbdinfo_cmd->@*)
+	    or die "failed to spawn nbdinfo child - $!\n";
+	$cleanup->{'child-pids'}->{$cpid} = 1;
+
+	$next_dirty_region = sub {
+	    my ($offset, $length, $type);
+	    do {
+		my $line = <$info>;
+		return if !$line;
+		die "unexpected output from nbdinfo - $line\n"
+		    if $line !~ m/^\s*(\d+)\s*(\d+)\s*(\d+)/; # also untaints
+		($offset, $length, $type) = ($1, $2, $3);
+	    } while (($type & 0x1) == 0); # not dirty
+	    return ($offset, $length);
+	};
+    } else {
+	my $done = 0;
+	$next_dirty_region = sub {
+	    return if $done;
+	    $done = 1;
+	    return (0, $size);
+	};
+    }
+
+    my $mount_point = $task->{'backup-access-root-dir'}
+	."/${vmid}-nbd.backup-access.${device_name}.$$";
+    make_path($mount_point) or die "unable to create directory $mount_point\n";
+    $cleanup->{'nbd-mounts'}->{$mount_point} = {};
+
+    # Note that nbdfuse requires "$dir/$file". A single name would be treated as a dir and the file
+    # would be named "$dir/nbd" then
+    my $virtual_file = "${mount_point}/${device_name}";
+    $cleanup->{'nbd-mounts'}->{$mount_point}->{'virtual-file'} = $virtual_file;
+
+    my $pid_file = "${mount_point}.pid";
+    PVE::Tools::file_set_contents($pid_file, '', 0600);
+    $cleanup->{'nbd-mounts'}->{$mount_point}->{'pid-file'} = $pid_file;
+
+    my $cpid = fork() // die "fork failed: $!\n";
+    if (!$cpid) {
+	# By default, access will be restricted to the current user, because the allow_other fuse
+	# mount option is not used.
+	eval {
+	    run_command(
+		["nbdfuse", '--pidfile', $pid_file, $virtual_file, $nbd_uri],
+		logfunc => sub { $self->loginfo("nbdfuse '$virtual_file': $_[0]") },
+	    );
+	};
+	if (my $err = $@) {
+	    eval { $self->loginfo($err); };
+	    POSIX::_exit(1);
+	}
+	POSIX::_exit(0);
+    }
+    $cleanup->{'child-pids'}->{$cpid} = 1;
+
+    my ($virtual_file_ready, $waited) = (0, 0);
+    while (!$virtual_file_ready && $waited < 30) { # 3 seconds
+	my $pid = PVE::Tools::file_read_firstline($pid_file);
+	if ($pid) {
+	    $virtual_file_ready = 1;
+	} else {
+	    usleep(100_000);
+	    $waited++;
+	}
+    }
+    die "timeout setting up virtual file '$virtual_file'" if !$virtual_file_ready;
+
+    $self->loginfo("provided NBD export as a virtual file '$virtual_file'");
+
+    # NOTE O_DIRECT, because each block should be read exactly once and also because fuse will try
+    # to read ahead otherwise, which would produce warning messages if the next block is not
+    # mapped/allocated for the NBD export in case of incremental backup. Open as writable to support
+    # discard.
+    my $fh = IO::File->new($virtual_file, O_RDWR | O_DIRECT)
+	or die "unable to open backup source '$virtual_file' - $!\n";
+    push $cleanup->{'file-handles'}->@*, $fh;
+
+    return ($fh, $next_dirty_region);
+}
+
+my sub backup_access_to_volume_info {
+    my ($self, $vmid, $task, $backup_access_info, $mechanism, $nbd_path) = @_;
+
+    my $bitmap_action_to_status = {
+	'not-used' => 'none',
+	'not-used-removed' => 'none',
+	'new' => 'new',
+	'used' => 'reuse',
+	'invalid' => 'new',
+	'missing-recreated' => 'new',
+    };
+
+    my $volumes = {};
+
+    for my $info ($backup_access_info->@*) {
+	my $bitmap_status = 'none';
+	my $bitmap_name;
+	if (my $bitmap_action = $info->{'bitmap-action'}) {
+	    $bitmap_status = $bitmap_action_to_status->{$bitmap_action}
+		or die "got unexpected bitmap action '$bitmap_action'\n";
+
+	    $bitmap_name = $info->{'bitmap-name'} or die "bitmap-name is not present\n";
+	}
+
+	my ($device, $size) = $info->@{qw(device size)};
+
+	$volumes->{$device}->{'bitmap-mode'} = $bitmap_status;
+	$volumes->{$device}->{size} = $size;
+
+	if ($mechanism eq 'file-handle') {
+	    my ($fh, $next_dirty_region) = virtual_file_backup_prepare(
+		$self, $vmid, $task, $device, $size, $nbd_path, $bitmap_name);
+	    $volumes->{$device}->{'file-handle'} = $fh;
+	    $volumes->{$device}->{'next-dirty-region'} = $next_dirty_region;
+	} elsif ($mechanism eq 'nbd') {
+	    $volumes->{$device}->{'nbd-path'} = $nbd_path;
+	    $volumes->{$device}->{'bitmap-name'} = $bitmap_name;
+	} else {
+	    die "internal error - unkown mechanism '$mechanism'";
+	}
+    }
+
+    return $volumes;
+}
+
+sub archive_external {
+    my ($self, $task, $vmid) = @_;
+
+    $task->{'backup-access-root-dir'} = "/run/qemu-server/${vmid}.backup-access.$$/";
+    make_path($task->{'backup-access-root-dir'})
+	or die "unable to create directory $task->{'backup-access-root-dir'}\n";
+    chmod(0700, $task->{'backup-access-root-dir'})
+	or die "unable to chmod directory $task->{'backup-access-root-dir'}\n";
+
+    my $guest_config = PVE::Tools::file_get_contents("$task->{tmpdir}/qemu-server.conf");
+    my $firewall_file = "$task->{tmpdir}/qemu-server.fw";
+
+    my $opts = $self->{vzdump}->{opts};
+
+    my $backup_provider = $self->{vzdump}->{'backup-provider'};
+
+    $self->loginfo("starting external backup via " . $backup_provider->provider_name());
+
+    my $starttime = time();
+
+    $self->enforce_vm_running_for_backup($vmid);
+    $self->{qmeventd_fh} = PVE::QemuServer::register_qmeventd_handle($vmid);
+
+    eval {
+	$SIG{INT} = $SIG{TERM} = $SIG{QUIT} = $SIG{HUP} = $SIG{PIPE} = sub {
+	    die "interrupted by signal\n";
+	};
+
+	my $qemu_support = mon_cmd($vmid, "query-proxmox-support");
+
+	if (!$qemu_support->{'backup-access-api'}) {
+	    die "backups access API required for external provider backup is not supported by"
+		." the running QEMU version. Please make sure you've installed the latest "
+		." version and the VM has been restarted.\n";
+	}
+
+	$attach_tpmstate_drive->($self, $task, $vmid);
+
+	my $is_template = PVE::QemuConfig->is_template($self->{vmlist}->{$vmid});
+
+	my $fleecing = check_and_prepare_fleecing(
+	    $self, $vmid, $opts->{fleecing}, $task->{disks}, $is_template, $qemu_support, 1);
+	die "cannot setup backup access without fleecing\n" if !$fleecing;
+
+	$task->{'use-fleecing'} = 1;
+
+	my $target_id = "snapshot-access:$opts->{storage}";
+
+	my $mechanism = $backup_provider->backup_get_mechanism($vmid, 'qemu');
+	die "mechanism '$mechanism' requested by backup provider is not supported for VMs\n"
+	    if $mechanism ne 'file-handle' && $mechanism ne 'nbd';
+
+	$self->loginfo("using backup mechanism '$mechanism'");
+
+	if ($mechanism eq 'file-handle') {
+	    # For mechanism 'file-handle', the nbdfuse binary is required. Also, the bitmap needs
+	    # to be passed to the provider. The bitmap cannot be dumped via QMP and doing it via
+	    # qemu-img is experimental, so use nbdinfo. Both are in libnbd-bin.
+	    die "need 'nbdfuse' binary from package libnbd-bin\n" if !-e "/usr/bin/nbdfuse";
+	}
+
+	my $devices = {};
+	for my $di ($task->{disks}->@*) {
+	    my $device_name = $di->{qmdevice};
+	    die "implement me (type '$di->{type}')"
+		if $di->{type} ne 'block' && $di->{type} ne 'file';
+	    $devices->{$device_name}->{size} = $di->{'block-node-size'};
+	}
+
+	my $incremental_info = $backup_provider->backup_vm_query_incremental($vmid, $devices);
+
+	my $qmp_devices = [];
+	for my $device (sort keys $devices->%*) {
+	    my $qmp_device = { device => $device };
+	    if (defined(my $mode = $incremental_info->{$device})) {
+		if ($mode eq 'new' || $mode eq 'use' || $mode eq 'none') {
+		    $qmp_device->{'bitmap-mode'} = $mode;
+		} else {
+		    die "invalid incremental mode '$mode' returned by backup provider plugin\n";
+		}
+	    }
+	    push($qmp_devices->@*, $qmp_device);
+	}
+
+	my $params = {
+	    'target-id' => $target_id,
+	    devices => $qmp_devices,
+	    timeout => 60,
+	};
+
+	my $fs_frozen = $self->qga_fs_freeze($task, $vmid);
+
+	$self->loginfo("setting up snapshot-access for backup");
+
+	$task->{cleanup}->{'backup-access-teardown'} = { 'target-id' => $target_id, success => 0 };
+
+	my $backup_access_info = eval { mon_cmd($vmid, "backup-access-setup", $params->%*) };
+	my $qmperr = $@;
+
+	if ($fs_frozen) {
+	    $self->qga_fs_thaw($vmid);
+	}
+
+	die $qmperr if $qmperr;
+
+	$self->resume_vm_after_job_start($task, $vmid);
+
+	my $bitmap_info = mon_cmd($vmid, 'query-pbs-bitmap-info');
+	for my $info (sort { $a->{drive} cmp $b->{drive} } $bitmap_info->@*) {
+	    my $text = $bitmap_action_to_human->($self, $info);
+	    my $drive = $info->{drive};
+	    $drive =~ s/^drive-//; # for consistency
+	    $self->loginfo("$drive: dirty-bitmap status: $text");
+	}
+
+	$self->loginfo("starting NBD server");
+
+	my $nbd_path = "$task->{'backup-access-root-dir'}/${vmid}-nbd.backup-access";
+	mon_cmd(
+	    $vmid, "nbd-server-start", addr => { type => 'unix', data => { path => $nbd_path } } );
+	$task->{cleanup}->{'nbd-stop'} = 1;
+
+	for my $info ($backup_access_info->@*) {
+	    $self->loginfo("adding NBD export for $info->{device}");
+
+	    my $export_params = {
+		id => $info->{device},
+		'node-name' => $info->{'node-name'},
+		writable => JSON::true, # for discard
+		type => "nbd",
+		name => $info->{device}, # NBD export name
+	    };
+
+	    if ($info->{'bitmap-name'}) {
+		$export_params->{bitmaps} = [{
+		    node => $info->{'bitmap-node-name'},
+		    name => $info->{'bitmap-name'},
+		}];
+	    }
+
+	    mon_cmd($vmid, "block-export-add", $export_params->%*);
+	}
+
+	my $volumes = backup_access_to_volume_info(
+	    $self, $vmid, $task, $backup_access_info, $mechanism, $nbd_path);
+
+	my $param = {};
+	$param->{'bandwidth-limit'} = $opts->{bwlimit} * 1024 if $opts->{bwlimit};
+	$param->{'firewall-config'} = PVE::Tools::file_get_contents($firewall_file)
+	    if -e $firewall_file;
+
+	$backup_provider->backup_vm($vmid, $guest_config, $volumes, $param);
+    };
+    my $err = $@;
+
+    if ($err) {
+	$self->logerr($err);
+	$self->resume_vm_after_job_start($task, $vmid);
+    } else {
+	$task->{cleanup}->{'backup-access-teardown'}->{success} = 1;
+    }
+    $self->restore_vm_power_state($vmid);
+
+    die $err if $err;
 }
 
 1;

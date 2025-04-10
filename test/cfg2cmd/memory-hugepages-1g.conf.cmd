@@ -4,7 +4,7 @@
   -no-shutdown \
   -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
   -mon 'chardev=qmp,mode=control' \
-  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect=5' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
   -mon 'chardev=qmp-event,mode=control' \
   -pidfile /var/run/qemu-server/8006.pid \
   -daemonize \
@@ -19,6 +19,8 @@
   -numa 'node,nodeid=0,cpus=0-1,memdev=ram-node0' \
   -object 'memory-backend-file,id=ram-node1,size=4096M,mem-path=/run/hugepages/kvm/1048576kB,share=on,prealloc=yes' \
   -numa 'node,nodeid=1,cpus=2-3,memdev=ram-node1' \
+  -global 'PIIX4_PM.disable_s3=1' \
+  -global 'PIIX4_PM.disable_s4=1' \
   -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pci.0,addr=0x1e' \
   -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pci.0,addr=0x1f' \
   -device 'vmgenid,guid=c773c261-d800-4348-9f5d-167fadd53cf8' \
@@ -27,4 +29,4 @@
   -device 'VGA,id=vga,bus=pci.0,addr=0x2' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
-  -machine 'type=pc+pve0'
+  -machine 'type=pc+pve1'

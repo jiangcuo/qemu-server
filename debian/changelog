@@ -1,3 +1,104 @@
+qemu-server (8.3.12) bookworm; urgency=medium
+
+  * virtiofs: drop unsafe and problematic writeback option completely fow now.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 08 Apr 2025 17:30:49 +0200
+
+qemu-server (8.3.11) bookworm; urgency=medium
+
+  * handle various deprecations of options in upstream QEMU 9.2.
+
+  * parse config: skip unknown sections and warn about their presence.
+
+  * parse config: warn about duplicate sections.
+
+  * vzdump: skip all special sections inside guest config.
+
+  * fix #5440: vzdump: better cleanup fleecing images after hard errors using
+    a new "fleecing" special config section where the allocated fleecing
+    images get recorded. This record will be used to clean them up on any
+    error.
+
+  * migration: attempt to clean up potential left-over fleecing images.
+
+  * vm-network-scripts: move scripts to '/usr/libexec', keep old locations for
+    now to avoid a race condition on package upgrade.
+
+  * qmeventd: go back to extracting VMID from command line instead of cgroup
+    file to address sporadic errors when trying to query the VMID from an
+    exited process.
+
+  * fix #1027: add support for shared mounts using Virtiofs.
+
+  * block live-migration, snapshot (with RAM) and hibernation if any Virtiofs
+    device is configured.
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 07 Apr 2025 23:35:50 +0200
+
+qemu-server (8.3.10) bookworm; urgency=medium
+
+  * drive: remove ancient and for a long time unsupported 'cow' from formats.
+
+  * confidential virtualization: add AMD SEV-SNP support.
+
+  * allow non-root users to add a virtion RNG (random number generator) device
+    using /dev/u?random or /dev/hwrng as source.
+
+  * config: add S3 and S4 power state properties to machine option.
+
+  * disable S3 and S4 power states for new machine versions, these states are
+    almost never useful for virtual machines and can even cause (hibernation
+    or suspend related) problems.
+
+  * api: qemu machine capabilities: return custom pveX versions and include
+    core changes for them in a new property.
+
+  * backup: allow adding fleecing images also for EFI and TPM
+
+  * backup: keep track of block-node size for fleecing to avoid problems with,
+    e.g., efidisks on some storage types.
+
+  * backup: implement backup and restore operations for external provider
+    storage plugins.
+
+ -- Proxmox Support Team <support@proxmox.com>  Sun, 06 Apr 2025 21:39:19 +0200
+
+qemu-server (8.3.9) bookworm; urgency=medium
+
+  * fix #5284: api: move-disk, clone: assert content type support for target
+    storage to avoid situations where one can clone or move a disk to a
+    storage where it then cannot be used anymore, blocking VM start.
+
+  * disallow deleting the tpmstate and efidisk from configuration while the VM
+    is running to avoid an inconsistent state.
+
+  * api: termproxy/vncproxy: fix 'use of uninitialized value' warning when
+    checking vga type
+
+  * migration: extend clean-up of resources after successful migration, like
+    freeing up PCI mdev usage again.
+
+  * migration blockers: allow mapped devices for offline migration as long as
+    the mapping is also available on the target node.
+
+  * pci passthrough: enable live-migration for PCI passthrough device that are
+    handled by a resource mapping that declared support for live-migration.
+
+  * api: migration preconditions: return detailed info for mapped-resources
+    and deprecated previously returned flat list, it will be removed in a
+    future major release.
+
+  * api: migrate preconditions: include not available mapped resources also
+    for running VMs to improve UX.
+
+  * migration: show amount of traffic for transferring vfio state in progress
+    log.
+
+  * migration: report short summary for transfer traffic stats once migration
+    finished.
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 03 Apr 2025 17:43:04 +0200
+
 qemu-server (8.3.8+port5) bookworm; urgency=medium
 
   * fix Use of uninitialized value $mdevtype
@@ -58,7 +159,8 @@ qemu-server (8.3.8) bookworm; urgency=medium
 
   * config: add special class that prevents writing the configuration
 
-  * fix #6007: template backup: use minimized configuration for handling the full vm start
+  * fix #6007: template backup: use minimized configuration for handling the
+    full vm start
 
   * vzdump: align behavior for vma backup with PBS backup for templates
 

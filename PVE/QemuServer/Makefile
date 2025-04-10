@@ -1,4 +1,5 @@
 SOURCES=PCI.pm		\
+	RNG.pm		\
 	USB.pm		\
 	Memory.pm	\
 	ImportDisk.pm	\
@@ -11,7 +12,8 @@ SOURCES=PCI.pm		\
 	CPUConfig.pm	\
 	CGroup.pm	\
 	Drive.pm	\
-	QMPHelpers.pm
+	QMPHelpers.pm	\
+	Virtiofs.pm
 
 .PHONY: install
 install: ${SOURCES}

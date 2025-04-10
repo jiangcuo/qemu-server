@@ -38,7 +38,9 @@ use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::QemuServer::MetaInfo;
 use PVE::QemuServer::PCI;
 use PVE::QemuServer::QMPHelpers;
+use PVE::QemuServer::RNG;
 use PVE::QemuServer::USB;
+use PVE::QemuServer::Virtiofs qw(max_virtiofs);
 use PVE::QemuMigrate;
 use PVE::RPCEnvironment;
 use PVE::AccessControl;
@@ -125,6 +127,19 @@ my $check_drive_param = sub {
 	}
 
 	PVE::QemuServer::cleanup_drive_path($opt, $storecfg, $drive);
+
+	my $volid = $drive->{file};
+	my ($storeid, $volname) = PVE::Storage::parse_volume_id($volid, 1);
+	if (
+	    $storeid
+	    && $volid !~ $PVE::QemuServer::Drive::NEW_DISK_RE
+	    && defined($volname)
+	    && $volname ne 'cloudinit'
+	) {
+	    my $vtype = (PVE::Storage::parse_volname($storecfg, $volid))[0];
+	    raise_param_exc({ $opt => "explicit 'media=cdrom' is required for iso images"})
+		if $vtype eq 'iso' && !(defined($drive->{media}) && $drive->{media} eq 'cdrom');
+	}
 
 	$extra_checks->($drive) if $extra_checks;
 
@@ -492,8 +507,10 @@ my sub create_disks : prototype($$$$$$$$$$$) {
 				= $import_from_volid->($storecfg, $source, $dest_info, $vollist);
 
 			    # remove extracted volumes after importing
-			    PVE::Storage::vdisk_free($storecfg, $source) if $needs_extraction;
-			    print "cleaned up extracted image $source\n";
+			    if ($needs_extraction) {
+				PVE::Storage::vdisk_free($storecfg, $source);
+				print "cleaned up extracted image $source\n";
+			    }
 			    @$vollist = grep { $_ ne $source } @$vollist;
 			};
 			die "cannot import from '$source' - $@" if $@;
@@ -548,8 +565,13 @@ my sub create_disks : prototype($$$$$$$$$$$) {
 		my $volid;
 		if ($ds eq 'efidisk0') {
 		    my $smm = PVE::QemuServer::Machine::machine_type_is_q35($conf);
+
+		    my $amd_sev_type = PVE::QemuServer::CPUConfig::get_amd_sev_type($conf);
+		    die "SEV-SNP uses consolidated read-only firmware and does not require an EFI disk\n"
+			if $amd_sev_type && $amd_sev_type eq 'snp';
+
 		    ($volid, $size) = PVE::QemuServer::create_efidisk(
-			$storecfg, $storeid, $vmid, $fmt, $arch, $disk, $smm);
+			$storecfg, $storeid, $vmid, $fmt, $arch, $disk, $smm, $amd_sev_type);
 		} elsif ($ds eq 'tpmstate0') {
 		    # swtpm can only use raw volumes, and uses a fixed size
 		    $size = PVE::Tools::convert_size(PVE::QemuServer::Drive::TPMSTATE_DISK_SIZE, 'b' => 'kb');
@@ -674,6 +696,7 @@ my $hwtypeoptions = {
     'vga' => 1,
     'watchdog' => 1,
     'audio0' => 1,
+    'rng0' => 1,
 };
 
 my $generaloptions = {
@@ -810,6 +833,48 @@ my sub check_vm_create_hostpci_perm {
     return 1;
 };
 
+my sub check_rng_perm {
+    my ($rpcenv, $authuser, $vmid, $pool, $opt, $value) = @_;
+
+    return 1 if $authuser eq 'root@pam';
+
+    $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.HWType']);
+
+    my $device = PVE::JSONSchema::parse_property_string('pve-qm-rng', $value);
+    if ($device->{source} && $device->{source} eq '/dev/hwrng') {
+	$rpcenv->check_full($authuser, "/mapping/hwrng", ['Mapping.Use']);
+    }
+
+    return 1;
+}
+
+my sub check_dir_perm {
+    my ($rpcenv, $authuser, $vmid, $pool, $opt, $value) = @_;
+
+    return 1 if $authuser eq 'root@pam';
+
+    $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.Disk']);
+
+    my $virtiofs = PVE::JSONSchema::parse_property_string('pve-qm-virtiofs', $value);
+    $rpcenv->check_full($authuser, "/mapping/dir/$virtiofs->{dirid}", ['Mapping.Use']);
+
+    return 1;
+};
+
+my sub check_vm_create_dir_perm {
+    my ($rpcenv, $authuser, $vmid, $pool, $param) = @_;
+
+    return 1 if $authuser eq 'root@pam';
+
+    for (my $i = 0; $i < max_virtiofs(); $i++) {
+	my $opt = "virtiofs$i";
+	next if !$param->{$opt};
+	check_dir_perm($rpcenv, $authuser, $vmid, $pool, $opt, $param->{$opt});
+    }
+
+    return 1;
+};
+
 my $check_vm_modify_config_perm = sub {
     my ($rpcenv, $authuser, $vmid, $pool, $key_list) = @_;
 
@@ -820,7 +885,7 @@ my $check_vm_modify_config_perm = sub {
 	# else, as there the permission can be value dependent
 	next if PVE::QemuServer::is_valid_drivename($opt);
 	next if $opt eq 'cdrom';
-	next if $opt =~ m/^(?:unused|serial|usb|hostpci)\d+$/;
+	next if $opt =~ m/^(?:unused|serial|usb|hostpci|virtiofs)\d+$/;
 	next if $opt eq 'tags';
 
 
@@ -934,7 +999,7 @@ __PACKAGE__->register_method({
 	return $res;
     }});
 
-my $parse_restore_archive = sub {
+my $classify_restore_archive = sub {
     my ($storecfg, $archive) = @_;
 
     my ($archive_storeid, $archive_volname) = PVE::Storage::parse_volume_id($archive, 1);
@@ -946,6 +1011,22 @@ my $parse_restore_archive = sub {
 	$res->{volid} = $archive;
 	if ($scfg->{type} eq 'pbs') {
 	    $res->{type} = 'pbs';
+	    return $res;
+	}
+	if (PVE::Storage::storage_has_feature($storecfg, $archive_storeid, 'backup-provider')) {
+	    my $log_function = sub {
+		my ($log_level, $message) = @_;
+		my $prefix = $log_level eq 'err' ? 'ERROR' : uc($log_level);
+		print "$prefix: $message\n";
+	    };
+	    my $backup_provider = PVE::Storage::new_backup_provider(
+		$storecfg,
+		$archive_storeid,
+		$log_function,
+	    );
+
+	    $res->{type} = 'external';
+	    $res->{'backup-provider'} = $backup_provider;
 	    return $res;
 	}
     }
@@ -1113,7 +1194,7 @@ __PACKAGE__->register_method({
 		    'backup',
 		);
 
-		$archive = $parse_restore_archive->($storecfg, $archive);
+		$archive = $classify_restore_archive->($storecfg, $archive);
 	    }
 	}
 
@@ -1128,6 +1209,9 @@ __PACKAGE__->register_method({
 	    &$check_vm_create_serial_perm($rpcenv, $authuser, $vmid, $pool, $param);
 	    check_vm_create_usb_perm($rpcenv, $authuser, $vmid, $pool, $param);
 	    check_vm_create_hostpci_perm($rpcenv, $authuser, $vmid, $pool, $param);
+	    check_rng_perm($rpcenv, $authuser, $vmid, $pool, 'rng0', $param->{rng0})
+		if $param->{rng0};
+	    check_vm_create_dir_perm($rpcenv, $authuser, $vmid, $pool, $param);
 
 	    PVE::QemuServer::check_bridge_access($rpcenv, $authuser, $param);
 	    &$check_cpu_model_access($rpcenv, $authuser, $param);
@@ -1172,7 +1256,15 @@ __PACKAGE__->register_method({
 			PVE::QemuServer::check_restore_permissions($rpcenv, $authuser, $merged);
 		    }
 		}
-		if ($archive->{type} eq 'file' || $archive->{type} eq 'pipe') {
+		if (my $backup_provider = $archive->{'backup-provider'}) {
+		    PVE::QemuServer::restore_external_archive(
+			$backup_provider,
+			$archive->{volid},
+			$vmid,
+			$authuser,
+			$restore_options,
+		    );
+		} elsif ($archive->{type} eq 'file' || $archive->{type} eq 'pipe') {
 		    die "live-restore is only compatible with backup images from a Proxmox Backup Server\n"
 			if $live_restore;
 		    PVE::QemuServer::restore_file_archive($archive->{path} // '-', $vmid, $authuser, $restore_options);
@@ -1707,7 +1799,7 @@ __PACKAGE__->register_method({
 	my $vmid = $param->{vmid};
 	my $conf = PVE::QemuConfig->load_config($vmid);
 
-	my $ci = $conf->{cloudinit};
+	my $ci = $conf->{'special-sections'}->{cloudinit};
 
 	$conf->{cipassword} = '**********' if exists $conf->{cipassword};
 	$ci->{cipassword} = '**********' if exists $ci->{cipassword};
@@ -2058,6 +2150,14 @@ my $update_vm_api  = sub {
 		    check_hostpci_perm($rpcenv, $authuser, $vmid, undef, $opt, $val);
 		    PVE::QemuConfig->add_to_pending_delete($conf, $opt, $force);
 		    PVE::QemuConfig->write_config($vmid, $conf);
+		} elsif ($opt =~ m/^rng\d+$/) {
+		    check_rng_perm($rpcenv, $authuser, $vmid, undef, $opt, $val);
+		    PVE::QemuConfig->add_to_pending_delete($conf, $opt, $force);
+		    PVE::QemuConfig->write_config($vmid, $conf);
+		} elsif ($opt =~ m/^virtiofs\d$/) {
+		    check_dir_perm($rpcenv, $authuser, $vmid, undef, $opt, $val);
+		    PVE::QemuConfig->add_to_pending_delete($conf, $opt, $force);
+		    PVE::QemuConfig->write_config($vmid, $conf);
 		} elsif ($opt eq 'tags') {
 		    assert_tag_permissions($vmid, $val, '', $rpcenv, $authuser);
 		    delete $conf->{$opt};
@@ -2147,6 +2247,18 @@ my $update_vm_api  = sub {
 			check_hostpci_perm($rpcenv, $authuser, $vmid, undef, $opt, $oldvalue);
 		    }
 		    check_hostpci_perm($rpcenv, $authuser, $vmid, undef, $opt, $param->{$opt});
+		    $conf->{pending}->{$opt} = $param->{$opt};
+		} elsif ($opt =~ m/^rng\d+$/) {
+		    if (my $oldvalue = $conf->{$opt}) {
+			check_rng_perm($rpcenv, $authuser, $vmid, undef, $opt, $oldvalue);
+		    }
+		    check_rng_perm($rpcenv, $authuser, $vmid, undef, $opt, $param->{$opt});
+		    $conf->{pending}->{$opt} = $param->{$opt};
+		} elsif ($opt =~ m/^virtiofs\d$/) {
+		    if (my $oldvalue = $conf->{$opt}) {
+			check_dir_perm($rpcenv, $authuser, $vmid, undef, $opt, $oldvalue);
+		    }
+		    check_dir_perm($rpcenv, $authuser, $vmid, undef, $opt, $param->{$opt});
 		    $conf->{pending}->{$opt} = $param->{$opt};
 		} elsif ($opt eq 'tags') {
 		    assert_tag_permissions($vmid, $conf->{$opt}, $param->{$opt}, $rpcenv, $authuser);
@@ -2731,7 +2843,7 @@ __PACKAGE__->register_method({
 	my $serial;
 	if ($conf->{vga}) {
 	    my $vga = PVE::QemuServer::parse_vga($conf->{vga});
-	    $serial = $vga->{type} if $vga->{type} =~ m/^serial\d+$/;
+	    $serial = $vga->{type} if defined($vga->{type}) && $vga->{type} =~ m/^serial\d+$/;
 	}
 
 	my $authpath = "/vms/$vmid";
@@ -2881,7 +2993,7 @@ __PACKAGE__->register_method({
 	if (!defined($serial)) {
 	    if ($conf->{vga}) {
 		my $vga = PVE::QemuServer::parse_vga($conf->{vga});
-		$serial = $vga->{type} if $vga->{type} =~ m/^serial\d+$/;
+		$serial = $vga->{type} if defined($vga->{type}) && $vga->{type} =~ m/^serial\d+$/;
 	    }
 	}
 
@@ -4777,6 +4889,8 @@ __PACKAGE__->register_method({
 	},
     },
     returns => {
+	# TODO 9.x: rework the api call to return more sensible structures
+	# e.g. a simple list of nodes with their blockers and/or notices to show
 	type => "object",
 	properties => {
 	    running => {
@@ -4790,7 +4904,7 @@ __PACKAGE__->register_method({
 		    description => "An allowed node",
 		},
 		optional => 1,
-		description => "List nodes allowed for offline migration, only passed if VM is offline"
+		description => "List of nodes allowed for migration.",
 	    },
 	    not_allowed_nodes => {
 		type => 'object',
@@ -4806,7 +4920,7 @@ __PACKAGE__->register_method({
 			},
 		    },
 		},
-		description => "List not allowed nodes with additional information, only passed if VM is offline"
+		description => "List of not allowed nodes with additional information.",
 	    },
 	    local_disks => {
 		type => 'array',
@@ -4839,15 +4953,20 @@ __PACKAGE__->register_method({
 		    type => 'string',
 		    description => "A local resource",
 		},
-		description => "List local resources e.g. pci, usb"
+		description => "List local resources (e.g. pci, usb) that block migration."
 	    },
+	    # FIXME: remove with 9.0
 	    'mapped-resources' => {
 		type => 'array',
 		items => {
 		    type => 'string',
 		    description => "A mapped resource",
 		},
-		description => "List of mapped resources e.g. pci, usb"
+		description => "List of mapped resources e.g. pci, usb. Deprecated, use 'mapped-resource-info' instead."
+	    },
+	    'mapped-resource-info' => {
+		type => 'object',
+		description => "Object of mapped resources with additional information such if they're live migratable.",
 	    },
 	},
     },
@@ -4879,40 +4998,44 @@ __PACKAGE__->register_method({
 
 	my ($local_resources, $mapped_resources, $missing_mappings_by_node) =
 	    PVE::QemuServer::check_local_resources($vmconf, $res->{running}, 1);
-	delete $missing_mappings_by_node->{$localnode};
 
 	my $vga = PVE::QemuServer::parse_vga($vmconf->{vga});
 	if ($res->{running} && $vga->{'clipboard'} && $vga->{'clipboard'} eq 'vnc') {
 	    push $local_resources->@*, "clipboard=vnc";
 	}
 
-	# if vm is not running, return target nodes where local storage/mapped devices are available
-	# for offline migration
-	if (!$res->{running}) {
-	    $res->{allowed_nodes} = [];
-	    my $checked_nodes = PVE::QemuServer::check_local_storage_availability($vmconf, $storecfg);
-	    delete $checked_nodes->{$localnode};
+	$res->{allowed_nodes} = [];
+	$res->{not_allowed_nodes} = {};
 
-	    foreach my $node (keys %$checked_nodes) {
-		my $missing_mappings = $missing_mappings_by_node->{$node};
-		if (scalar($missing_mappings->@*)) {
-		    $checked_nodes->{$node}->{'unavailable-resources'} = $missing_mappings;
-		    next;
-		}
+	my $storage_nodehash = PVE::QemuServer::check_local_storage_availability($vmconf, $storecfg);
 
-		if (!defined($checked_nodes->{$node}->{unavailable_storages})) {
-		    push @{$res->{allowed_nodes}}, $node;
-		}
+	my $nodelist = PVE::Cluster::get_nodelist();
+	for my $node ($nodelist->@*) {
+	    next if $node eq $localnode;
 
+	    # extract missing storage info
+	    if (my $storage_info = $storage_nodehash->{$node}) {
+		$res->{not_allowed_nodes}->{$node} = $storage_info;
 	    }
-	    $res->{not_allowed_nodes} = $checked_nodes;
+
+	    # extract missing mappings info
+	    my $missing_mappings = $missing_mappings_by_node->{$node};
+	    if (scalar($missing_mappings->@*)) {
+		$res->{not_allowed_nodes}->{$node}->{'unavailable-resources'} = $missing_mappings;
+	    }
+
+	    # if nothing came up, add it to the allowed nodes
+	    if (scalar($res->{not_allowed_nodes}->{$node}->%*) == 0) {
+		push $res->{allowed_nodes}->@*, $node;
+	    }
 	}
 
 	my $local_disks = &$check_vm_disks_local($storecfg, $vmconf, $vmid);
-	$res->{local_disks} = [ values %$local_disks ];;
+	$res->{local_disks} = [ values %$local_disks ];
 
 	$res->{local_resources} = $local_resources;
-	$res->{'mapped-resources'} = $mapped_resources;
+	$res->{'mapped-resources'} = [ sort keys $mapped_resources->%* ];
+	$res->{'mapped-resource-info'} = $mapped_resources;
 
 	return $res;
 
@@ -6134,8 +6257,24 @@ __PACKAGE__->register_method({
 		    # not handled by update_vm_api
 		    my $vmgenid = delete $new_conf->{vmgenid};
 		    my $meta = delete $new_conf->{meta};
-		    my $cloudinit = delete $new_conf->{cloudinit}; # this is informational only
+
+		    my $special_sections = delete $new_conf->{'special-sections'} // {};
+
+		    # fleecing state is specific to source side
+		    delete $special_sections->{fleecing};
+
 		    $new_conf->{skip_cloud_init} = 1; # re-use image from source side
+
+		    # TODO PVE 10 - remove backwards-compat handling?
+		    my $cloudinit = delete $new_conf->{cloudinit};
+		    if ($cloudinit) {
+			if ($special_sections->{cloudinit}) {
+			    warn "config has duplicate special 'cloudinit' sections - skipping"
+				." legacy variant\n";
+			} else {
+			    $special_sections->{cloudinit} = $cloudinit;
+			}
+		    }
 
 		    $new_conf->{vmid} = $state->{vmid};
 		    $new_conf->{node} = $node;
@@ -6158,7 +6297,7 @@ __PACKAGE__->register_method({
 		    $conf->{lock} = 'migrate';
 		    $conf->{vmgenid} = $vmgenid if defined($vmgenid);
 		    $conf->{meta} = $meta if defined($meta);
-		    $conf->{cloudinit} = $cloudinit if defined($cloudinit);
+		    $conf->{'special-sections'} = $special_sections;
 		    PVE::QemuConfig->write_config($state->{vmid}, $conf);
 
 		    $state->{lock} = 'migrate';

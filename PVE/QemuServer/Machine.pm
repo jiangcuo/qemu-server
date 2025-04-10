@@ -10,10 +10,35 @@ use PVE::JSONSchema qw(get_standard_option parse_property_string print_property_
 use PVE::Tools qw(get_host_arch);
 
 
-# Bump this for VM HW layout changes during a release (where the QEMU machine
-# version stays the same)
+# The PVE machine versions allow rolling out (incompatibel) changes to the hardware layout and/or
+# the QEMU command of a VM without requiring a newer QEMU upstream machine version.
+#
+# To use this find the newest available QEMU machine version, add and entry in this hash if it does
+# not already exists and then bump the higherst version, or introduce a new one starting at 1, as
+# the upstream version is counted as having a PVE revision of 0.
+# Additionally you must describe in short what the basic changes done with such a new PVE machine
+# revision in the respective subhash, use the full version including the pve one as key there.
+#
+# NOTE: Do not overuse this. one or two changes per upstream machine can be fine, if needed. But
+# most of the time it's better to batch more together and if there is no time pressure then wait a
+# few weeks/months until the next QEMU machine revision is ready. As it will get confusing otherwise
+# and we lazily use some simple ascii sort when processing these, so more than 10 per entry require
+# changes but should be avoided in the first place.
+# TODO: add basic test to ensure the keys are correct and there's a change entry for each version.
 our $PVE_MACHINE_VERSION = {
-    '4.1' => 2,
+    '4.1' => {
+	highest => 2,
+	revisions => {
+	    '+pve1' => 'Introduction of pveX versioning, no changes.',
+	    '+pve2' => 'Increases the number of SCSI drives supported.',
+	},
+    },
+    '9.2' => {
+	highest => 1,
+	revisions => {
+	    '+pve1' => 'Disables S3/S4 power states by default.',
+	},
+    },
 };
 
 my $machine_fmt = {
@@ -31,6 +56,16 @@ my $machine_fmt = {
 	description => "Enable and set guest vIOMMU variant (Intel vIOMMU needs q35 to be set as"
 	    ." machine type).",
 	enum => ['intel', 'virtio'],
+	optional => 1,
+    },
+    'enable-s3' => {
+	type => 'boolean',
+	description => "Enables S3 power state. Defaults to false beginning with machine types 9.2+pve1, true before.",
+	optional => 1,
+    },
+    'enable-s4' => {
+	type => 'boolean',
+	description => "Enables S4 power state. Defaults to false beginning with machine types 9.2+pve1, true before.",
 	optional => 1,
     },
 };
@@ -149,14 +184,24 @@ sub is_machine_version_at_least {
 	extract_version($machine_type), $major, $minor, $pve);
 }
 
+sub get_machine_pve_revisions {
+    my ($machine_version_str) = @_;
+
+    if ($machine_version_str =~ m/^(\d+\.\d+)/) {
+	return $PVE_MACHINE_VERSION->{$1};
+    }
+
+    die "internal error: cannot get pve version for invalid string '$machine_version_str'";
+}
+
 sub get_pve_version {
     my ($verstr) = @_;
 
-    if ($verstr =~ m/^(\d+\.\d+)/) {
-	return $PVE_MACHINE_VERSION->{$1} // 0;
+    if (my $pve_machine = get_machine_pve_revisions($verstr)) {
+	return $pve_machine->{highest} || die "internal error - machine version '$verstr' missing 'highest'";
     }
 
-    die "internal error: cannot get pve version for invalid string '$verstr'";
+    return 0;
 }
 
 sub can_run_pve_machine_version {
@@ -206,6 +251,11 @@ sub windows_get_pinned_machine_version {
     my $pin_version = $base_version;
     if (!defined($base_version) || !can_run_pve_machine_version($base_version, $kvmversion)) {
 	$pin_version = get_installed_machine_version($kvmversion);
+	# pin to the current pveX version to make use of most current features if > 0
+	my $pvever = get_pve_version($pin_version);
+	if ($pvever > 0) {
+	    $pin_version .= "+pve$pvever";
+	}
     }
     if (!$machine || $machine eq 'pc') {
 	$machine = "pc-i440fx-$pin_version";
@@ -225,7 +275,6 @@ sub get_vm_machine {
 
     my $machine_conf = parse_machine($conf->{machine});
     my $machine = $forcemachine || $machine_conf->{type};
-
     if (!$machine || $machine =~ m/^(?:pc|q35|virt)$/) {
 	my $kvmversion = PVE::QemuServer::Helpers::kvm_user_version();
 	# we must pin Windows VMs without a specific version and no meta info about creation QEMU to
@@ -247,7 +296,7 @@ sub get_vm_machine {
 	    }
 	    $machine = windows_get_pinned_machine_version($machine, $base_version, $kvmversion);
 	}
-	$arch //= get_host_arch();
+	$arch //= 'x86_64';
 	$machine ||= default_machine_for_arch($arch);
 	my $pvever = get_pve_version($kvmversion);
 	$machine .= "+pve$pvever";
@@ -282,6 +331,38 @@ sub check_and_pin_machine_string {
 
     assert_valid_machine_property($machine_conf);
     return print_machine($machine_conf);
+}
+
+# disable s3/s4 by default for 9.2+pve1 machine types
+# returns an arrayref of cmdline options for qemu or undef
+sub get_power_state_flags {
+    my ($machine_conf, $version_guard) = @_;
+
+    my $object = $machine_conf->{type} && ($machine_conf->{type} =~ m/q35/) ? "ICH9-LPC" : "PIIX4_PM";
+
+    my $default = 1;
+    if ($version_guard->(9, 2, 1)) {
+	$default = 0;
+    }
+
+    my $s3 = $machine_conf->{'enable-s3'} // $default;
+    my $s4 = $machine_conf->{'enable-s4'} // $default;
+
+    my $options = [];
+
+    # they're enabled by default in QEMU, so only add the flags to disable them
+    if (!$s3) {
+	push $options->@*, '-global', "${object}.disable_s3=1";
+    }
+    if (!$s4) {
+	push $options->@*, '-global', "${object}.disable_s4=1";
+    }
+
+    if (scalar($options->@*)) {
+	return $options;
+    }
+
+    return;
 }
 
 1;

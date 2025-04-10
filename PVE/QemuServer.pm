@@ -33,6 +33,7 @@ use PVE::Exception qw(raise raise_param_exc);
 use PVE::Format qw(render_duration render_bytes);
 use PVE::GuestHelpers qw(safe_string_ne safe_num_ne safe_boolean_ne);
 use PVE::HA::Config;
+use PVE::Mapping::Dir;
 use PVE::Mapping::PCI;
 use PVE::Mapping::USB;
 use PVE::INotify;
@@ -53,7 +54,7 @@ use PVE::QemuConfig::NoWrite;
 use PVE::QemuServer::Helpers qw(config_aware_timeout min_version kvm_user_version windows_version);
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CGroup;
-use PVE::QemuServer::CPUConfig qw(print_cpu_device get_cpu_options get_cpu_bitness is_native_arch get_amd_sev_object);
+use PVE::QemuServer::CPUConfig qw(print_cpu_device get_cpu_options get_cpu_bitness is_native_arch get_amd_sev_object get_amd_sev_type);
 use PVE::QemuServer::Drive qw(is_valid_drivename checked_volume_format drive_is_cloudinit drive_is_cdrom drive_is_read_only parse_drive print_drive);
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Memory qw(get_current_memory);
@@ -61,7 +62,9 @@ use PVE::QemuServer::MetaInfo;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::PCI qw(print_pci_addr print_pcie_addr print_pcie_root_port parse_hostpci);
 use PVE::QemuServer::QMPHelpers qw(qemu_deviceadd qemu_devicedel qemu_objectadd qemu_objectdel);
+use PVE::QemuServer::RNG qw(parse_rng print_rng_device_commandline print_rng_object_commandline);
 use PVE::QemuServer::USB;
+use PVE::QemuServer::Virtiofs qw(max_virtiofs start_all_virtiofsd);
 
 my $have_sdn;
 eval {
@@ -88,6 +91,13 @@ my $OVMF = {
 	'4m-ms' => [
 	    "$EDK2_FW_BASE/OVMF_CODE_4M.secboot.fd",
 	    "$EDK2_FW_BASE/OVMF_VARS_4M.ms.fd",
+	],
+	'4m-sev' => [
+	    "$EDK2_FW_BASE/OVMF_CVM_CODE_4M.fd",
+	    "$EDK2_FW_BASE/OVMF_CVM_VARS_4M.fd",
+	],
+	'4m-snp' => [
+	    "$EDK2_FW_BASE/OVMF_CVM_4M.fd",
 	],
 	# FIXME: These are legacy 2MB-sized images that modern OVMF doesn't supports to build
 	# anymore. how can we deperacate this sanely without breaking existing instances, or using
@@ -307,39 +317,6 @@ my $spice_enhancements_fmt = {
 	default => 'off',
 	optional => 1,
 	description => "Enable video streaming. Uses compression for detected video streams."
-    },
-};
-
-my $rng_fmt = {
-    source => {
-	type => 'string',
-	enum => ['/dev/urandom', '/dev/random', '/dev/hwrng'],
-	default_key => 1,
-	description => "The file on the host to gather entropy from. In most cases '/dev/urandom'"
-	    ." should be preferred over '/dev/random' to avoid entropy-starvation issues on the"
-	    ." host. Using urandom does *not* decrease security in any meaningful way, as it's"
-	    ." still seeded from real entropy, and the bytes provided will most likely be mixed"
-	    ." with real entropy on the guest as well. '/dev/hwrng' can be used to pass through"
-	    ." a hardware RNG from the host.",
-    },
-    max_bytes => {
-	type => 'integer',
-	description => "Maximum bytes of entropy allowed to get injected into the guest every"
-	    ." 'period' milliseconds. Prefer a lower value when using '/dev/random' as source. Use"
-	    ." `0` to disable limiting (potentially dangerous!).",
-	optional => 1,
-
-	# default is 1 KiB/s, provides enough entropy to the guest to avoid boot-starvation issues
-	# (e.g. systemd etc...) while allowing no chance of overwhelming the host, provided we're
-	# reading from /dev/urandom
-	default => 1024,
-    },
-    period => {
-	type => 'integer',
-	description => "Every 'period' milliseconds the entropy-injection quota is reset, allowing"
-	    ." the guest to retrieve another 'max_bytes' of entropy.",
-	optional => 1,
-	default => 1000,
     },
 };
 
@@ -820,7 +797,7 @@ EODESCR
     },
     rng0 => {
 	type => 'string',
-	format => $rng_fmt,
+	format => 'pve-qm-rng',
 	description => "Configure a VirtIO-based Random Number Generator.",
 	optional => 1,
     },
@@ -1058,6 +1035,10 @@ my $netdesc = {
 };
 
 PVE::JSONSchema::register_standard_option("pve-qm-net", $netdesc);
+
+for (my $i = 0; $i < max_virtiofs(); $i++)  {
+    $confdesc->{"virtiofs$i"} = get_standard_option('pve-qm-virtiofs');
+}
 
 my $ipconfig_fmt = {
     ip => {
@@ -1592,6 +1573,7 @@ sub print_drive_commandline_full {
 
     my ($storeid) = PVE::Storage::parse_volume_id($drive->{file}, 1);
     my $scfg = $storeid ? PVE::Storage::storage_config($storecfg, $storeid) : undef;
+    my $vtype = $storeid ? (PVE::Storage::parse_volname($storecfg, $drive->{file}))[0] : undef;
 
     my ($path, $format) = PVE::QemuServer::Drive::get_path_and_format(
 	$storecfg, $vmid, $drive, $live_restore_name);
@@ -1662,6 +1644,9 @@ sub print_drive_commandline_full {
 	    }
 	}
     }
+
+    die "$drive_id: explicit media parameter is required for iso images\n"
+	if !defined($drive->{media}) && defined($vtype) && $vtype eq 'iso';
 
     if (!drive_is_cdrom($drive)) {
 	my $detectzeroes;
@@ -1799,8 +1784,8 @@ sub print_netdev_full {
     my $script = $hotplug ? "pve-bridge-hotplug" : "pve-bridge";
 
     if ($net->{bridge}) {
-	$netdev = "type=tap,id=$netid,ifname=${ifname},script=/var/lib/qemu-server/$script"
-	    .",downscript=/var/lib/qemu-server/pve-bridgedown$vhostparam";
+	$netdev = "type=tap,id=$netid,ifname=${ifname},script=/usr/libexec/qemu-server/$script"
+	    .",downscript=/usr/libexec/qemu-server/pve-bridgedown$vhostparam";
     } else {
         $netdev = "type=user,id=$netid,hostname=$vmname";
     }
@@ -1979,7 +1964,7 @@ sub vmconfig_register_unused_drive {
     if (drive_is_cloudinit($drive)) {
 	eval { PVE::Storage::vdisk_free($storecfg, $drive->{file}) };
 	warn $@ if $@;
-	delete $conf->{cloudinit};
+	delete $conf->{'special-sections'}->{cloudinit};
     } elsif (!drive_is_cdrom($drive)) {
 	my $volid = $drive->{file};
 	if (vm_is_volid_owner($storecfg, $vmid, $volid)) {
@@ -2101,16 +2086,6 @@ sub parse_vga {
     return $res;
 }
 
-sub parse_rng {
-    my ($value) = @_;
-
-    return if !$value;
-
-    my $res = eval { parse_property_string($rng_fmt, $value) };
-    warn $@ if $@;
-    return $res;
-}
-
 sub qemu_created_version_fixups {
     my ($conf, $forcemachine, $kvmver) = @_;
 
@@ -2211,11 +2186,13 @@ sub cloudinit_pending_properties {
 }
 
 sub check_type {
-    my ($key, $value) = @_;
+    my ($key, $value, $schema) = @_;
 
-    die "unknown setting '$key'\n" if !$confdesc->{$key};
+    die "check_type: no schema defined\n" if !$schema;
 
-    my $type = $confdesc->{$key}->{type};
+    die "unknown setting '$key'\n" if !$schema->{$key};
+
+    my $type = $schema->{$key}->{type};
 
     if (!defined($value)) {
 	die "got undefined value\n";
@@ -2236,7 +2213,7 @@ sub check_type {
         return $value if $value =~ m/^(\d+)(\.\d+)?$/;
         die "type check ('number') failed - got '$value'\n";
     } elsif ($type eq 'string') {
-	if (my $fmt = $confdesc->{$key}->{format}) {
+	if (my $fmt = $schema->{$key}->{format}) {
 	    PVE::JSONSchema::check_format($fmt, $value);
 	    return $value;
 	}
@@ -2249,6 +2226,9 @@ sub check_type {
 
 sub destroy_vm {
     my ($storecfg, $vmid, $skiplock, $replacement_conf, $purge_unreferenced) = @_;
+
+    eval { PVE::QemuConfig::cleanup_fleecing_images($vmid, $storecfg) };
+    log_warn("attempt to clean up left-over fleecing images failed - $@") if $@;
 
     my $conf = PVE::QemuConfig->load_config($vmid);
 
@@ -2323,16 +2303,27 @@ sub destroy_vm {
     }
 }
 
+my $fleecing_section_schema = {
+    'fleecing-images' => {
+	type => 'string',
+	format => 'pve-volume-id-list',
+	description => "For internal use only. List of fleecing images allocated during backup."
+	   ." If no backup is running, these are left-overs that failed to be removed.",
+	optional => 1,
+    },
+};
+
 sub parse_vm_config {
     my ($filename, $raw, $strict) = @_;
 
     return if !defined($raw);
 
+    # note that pending, snapshot and special sections are currently skipped when a backup is taken
     my $res = {
 	digest => Digest::SHA::sha1_hex($raw),
 	snapshots => {},
-	pending => {},
-	cloudinit => {},
+	pending => undef,
+	'special-sections' => {},
     };
 
     my $handle_error = sub {
@@ -2359,29 +2350,51 @@ sub parse_vm_config {
 	}
 	$descr = undef;
     };
-    my $section = '';
+
+    my $special_schemas = {
+	cloudinit => $confdesc, # not actually used right now, see below
+	fleecing => $fleecing_section_schema,
+    };
+    my $special_sections_re_string = join('|', keys $special_schemas->%*);
+    my $special_sections_re_1 = qr/($special_sections_re_string)/;
+
+    my $section = { name => '', type => 'main', schema => $confdesc };
 
     my @lines = split(/\n/, $raw);
     foreach my $line (@lines) {
 	next if $line =~ m/^\s*$/;
 
 	if ($line =~ m/^\[PENDING\]\s*$/i) {
-	    $section = 'pending';
+	    $section = { name => 'pending', type => 'pending', schema => $confdesc };
 	    $finish_description->();
-	    $conf = $res->{$section} = {};
+	    $handle_error->("vm $vmid - duplicate section: $section->{name}\n")
+		if defined($res->{$section->{name}});
+	    $conf = $res->{$section->{name}} = {};
 	    next;
-	} elsif ($line =~ m/^\[special:cloudinit\]\s*$/i) {
-	    $section = 'cloudinit';
+	} elsif ($line =~ m/^\[special:$special_sections_re_1\]\s*$/i) {
+	    $section = { name => $1, type => 'special', schema => $special_schemas->{$1} };
 	    $finish_description->();
-	    $conf = $res->{$section} = {};
+	    $handle_error->("vm $vmid - duplicate special section: $section->{name}\n")
+		if defined($res->{'special-sections'}->{$section->{name}});
+	    $conf = $res->{'special-sections'}->{$section->{name}} = {};
 	    next;
 
 	} elsif ($line =~ m/^\[([a-z][a-z0-9_\-]+)\]\s*$/i) {
-	    $section = $1;
+	    $section = { name => $1, type => 'snapshot', schema => $confdesc };
 	    $finish_description->();
-	    $conf = $res->{snapshots}->{$section} = {};
+	    $handle_error->("vm $vmid - duplicate snapshot section: $section->{name}\n")
+		if defined($res->{snapshots}->{$section->{name}});
+	    $conf = $res->{snapshots}->{$section->{name}} = {};
+	    next;
+	} elsif ($line =~ m/^\[([^\]]*)\]\s*$/i) {
+	    my $unknown_section = $1;
+	    $section = undef;
+	    $finish_description->();
+	    $handle_error->("vm $vmid - skipping unknown section: '$unknown_section'\n");
 	    next;
 	}
+
+	next if !defined($section);
 
 	if ($line =~ m/^\#(.*)$/) {
 	    $descr = '' if !defined($descr);
@@ -2400,7 +2413,7 @@ sub parse_vm_config {
 	    $conf->{$key} = $value;
 	} elsif ($line =~ m/^delete:\s*(.*\S)\s*$/) {
 	    my $value = $1;
-	    if ($section eq 'pending') {
+	    if ($section->{name} eq 'pending' && $section->{type} eq 'pending') {
 		$conf->{delete} = $value; # we parse this later
 	    } else {
 		$handle_error->("vm $vmid - property 'delete' is only allowed in [PENDING]\n");
@@ -2408,17 +2421,17 @@ sub parse_vm_config {
 	} elsif ($line =~ m/^([a-z][a-z_\-]*\d*):\s*(.+?)\s*$/) {
 	    my $key = $1;
 	    my $value = $2;
-	    if ($section eq 'cloudinit') {
+	    if ($section->{name} eq 'cloudinit' && $section->{type} eq 'special') {
 		# ignore validation only used for informative purpose
 		$conf->{$key} = $value;
 		next;
 	    }
-	    eval { $value = check_type($key, $value); };
+	    eval { $value = check_type($key, $value, $section->{schema}); };
 	    if ($@) {
 		$handle_error->("vm $vmid - unable to parse value of '$key' - $@");
 	    } else {
 		$key = 'ide2' if $key eq 'cdrom';
-		my $fmt = $confdesc->{$key}->{format};
+		my $fmt = $section->{schema}->{$key}->{format};
 		if ($fmt && $fmt =~ /^pve-qm-(?:ide|scsi|virtio|sata)$/) {
 		    my $v = parse_drive($key, $value);
 		    if (my $volid = filename_to_volume_id($vmid, $v->{file}, $v->{media})) {
@@ -2439,6 +2452,8 @@ sub parse_vm_config {
 
     $finish_description->();
     delete $res->{snapstate}; # just to be sure
+
+    $res->{pending} = {} if !defined($res->{pending});
 
     return $res;
 }
@@ -2470,7 +2485,7 @@ sub write_vm_config {
 
 	foreach my $key (keys %$cref) {
 	    next if $key eq 'digest' || $key eq 'description' || $key eq 'snapshots' ||
-		$key eq 'snapstate' || $key eq 'pending' || $key eq 'cloudinit';
+		$key eq 'snapstate' || $key eq 'pending' || $key eq 'special-sections';
 	    my $value = $cref->{$key};
 	    if ($key eq 'delete') {
 		die "propertry 'delete' is only allowed in [PENDING]\n"
@@ -2478,7 +2493,7 @@ sub write_vm_config {
 		# fixme: check syntax?
 		next;
 	    }
-	    eval { $value = check_type($key, $value); };
+	    eval { $value = check_type($key, $value, $confdesc); };
 	    die "unable to parse value of '$key' - $@" if $@;
 
 	    $cref->{$key} = $value;
@@ -2524,7 +2539,7 @@ sub write_vm_config {
 	}
 
 	foreach my $key (sort keys %$conf) {
-	    next if $key =~ /^(digest|description|pending|cloudinit|snapshots)$/;
+	    next if $key =~ /^(digest|description|pending|snapshots|special-sections)$/;
 	    $raw .= "$key: $conf->{$key}\n";
 	}
 	return $raw;
@@ -2537,9 +2552,10 @@ sub write_vm_config {
 	$raw .= &$generate_raw_config($conf->{pending}, 1);
     }
 
-    if (scalar(keys %{$conf->{cloudinit}}) && PVE::QemuConfig->has_cloudinit($conf)){
-	$raw .= "\n[special:cloudinit]\n";
-	$raw .= &$generate_raw_config($conf->{cloudinit});
+    for my $special (sort keys $conf->{'special-sections'}->%*) {
+	next if $special eq 'cloudinit' && !PVE::QemuConfig->has_cloudinit($conf);
+	$raw .= "\n[special:$special]\n";
+	$raw .= &$generate_raw_config($conf->{'special-sections'}->{$special});
     }
 
     foreach my $snapname (sort keys %{$conf->{snapshots}}) {
@@ -2584,8 +2600,9 @@ sub check_non_migratable_resources {
     my ($conf, $state, $noerr) = @_;
 
     my @blockers = ();
-    if ($state && $conf->{"amd-sev"}) {
-	push @blockers, "amd-sev";
+    if ($state) {
+	push @blockers, "amd-sev" if $conf->{"amd-sev"};
+	push @blockers, "virtiofs" if PVE::QemuServer::Virtiofs::virtiofs_enabled($conf);
     }
 
     if (scalar(@blockers) && !$noerr) {
@@ -2601,7 +2618,7 @@ sub check_local_resources {
     my ($conf, $state, $noerr) = @_;
 
     my @loc_res = ();
-    my $mapped_res = [];
+    my $mapped_res = {};
 
     my @non_migratable_resources = check_non_migratable_resources($conf, $state, $noerr);
     push(@loc_res, @non_migratable_resources);
@@ -2609,6 +2626,7 @@ sub check_local_resources {
     my $nodelist = PVE::Cluster::get_nodelist();
     my $pci_map = PVE::Mapping::PCI::config();
     my $usb_map = PVE::Mapping::USB::config();
+    my $dir_map = PVE::Mapping::Dir::config();
 
     my $missing_mappings_by_node = { map { $_ => [] } @$nodelist };
 
@@ -2620,6 +2638,8 @@ sub check_local_resources {
 		$entry = PVE::Mapping::PCI::get_node_mapping($pci_map, $id, $node);
 	    } elsif ($type eq 'usb') {
 		$entry = PVE::Mapping::USB::get_node_mapping($usb_map, $id, $node);
+	    } elsif ($type eq 'dir') {
+		$entry = PVE::Mapping::Dir::get_node_mapping($dir_map, $id, $node);
 	    }
 	    if (!scalar($entry->@*)) {
 		push @{$missing_mappings_by_node->{$node}}, $key;
@@ -2636,21 +2656,37 @@ sub check_local_resources {
 	if ($k =~ m/^usb/) {
 	    my $entry = parse_property_string('pve-qm-usb', $conf->{$k});
 	    next if $entry->{host} && $entry->{host} =~ m/^spice$/i;
-	    if ($entry->{mapping}) {
-		$add_missing_mapping->('usb', $k, $entry->{mapping});
-		push @$mapped_res, $k;
+	    if (my $name = $entry->{mapping}) {
+		$add_missing_mapping->('usb', $k, $name);
+		$mapped_res->{$k} = { name => $name };
 	    }
 	}
 	if ($k =~ m/^hostpci/) {
 	    my $entry = parse_property_string('pve-qm-hostpci', $conf->{$k});
-	    if ($entry->{mapping}) {
-		$add_missing_mapping->('pci', $k, $entry->{mapping});
-		push @$mapped_res, $k;
+	    if (my $name = $entry->{mapping}) {
+		$add_missing_mapping->('pci', $k, $name);
+		my $mapped_device = { name => $name };
+		$mapped_res->{$k} = $mapped_device;
+
+		if ($pci_map->{ids}->{$name}->{'live-migration-capable'}) {
+		    $mapped_device->{'live-migration'} = 1;
+		    # don't add mapped device with live migration as blocker
+		    next;
+		}
+
+		# don't add mapped devices as blocker for offline migration but still iterate over
+		# all mappings above to collect on which nodes they are available.
+		next if !$state;
 	    }
+	}
+	if ($k =~ m/^virtiofs/) {
+	    my $entry = parse_property_string('pve-qm-virtiofs', $conf->{$k});
+	    $add_missing_mapping->('dir', $k, $entry->{dirid});
+	    $mapped_res->{$k} = { name => $entry->{dirid} };
 	}
 	# sockets are safe: they will recreated be on the target side post-migrate
 	next if $k =~ m/^serial/ && ($conf->{$k} eq 'socket');
-	push @loc_res, $k if $k =~ m/^(usb|hostpci|serial|parallel)\d+$/;
+	push @loc_res, $k if $k =~ m/^(usb|hostpci|serial|parallel|virtiofs)\d+$/;
     }
 
     die "VM uses local resources\n" if scalar @loc_res && !$noerr;
@@ -2896,6 +2932,11 @@ our $vmstatus_return_properties = {
 	type => 'boolean',
 	optional => 1,
 	default => 0,
+    },
+    serial => {
+	description => "Guest has serial device configured.",
+	type => 'boolean',
+	optional => 1,
     },
 };
 
@@ -3312,14 +3353,22 @@ sub vga_conf_has_spice {
     return $1 || 1;
 }
 
-sub get_ovmf_files($$$) {
-    my ($arch, $efidisk, $smm) = @_;
+sub get_ovmf_files($$$$) {
+    my ($arch, $efidisk, $smm, $amd_sev_type) = @_;
 
     my $types = $OVMF->{$arch}
 	or die "no OVMF images known for architecture '$arch'\n";
 
     my $type = 'default';
-	if (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
+    if ($arch eq 'x86_64') {
+	if ($amd_sev_type && $amd_sev_type eq 'snp') {
+	    $type = "4m-snp";
+	    my ($ovmf) = $types->{$type}->@*;
+	    die "EFI base image '$ovmf' not found\n" if ! -f $ovmf;
+	    return ($ovmf);
+	} elsif ($amd_sev_type) {
+	    $type = "4m-sev";
+	} elsif (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
 	    $type = $smm ? "4m" : "4m-no-smm";
 	    $type .= '-ms' if $efidisk->{'pre-enrolled-keys'};
 	} else {
@@ -3469,7 +3518,11 @@ my sub print_ovmf_drive_commandlines {
 
     my $d = $conf->{efidisk0} ? parse_drive('efidisk0', $conf->{efidisk0}) : undef;
 
-    my ($ovmf_code, $ovmf_vars) = get_ovmf_files($arch, $d, $q35);
+    my $amd_sev_type = get_amd_sev_type($conf);
+    die "Attempting to configure SEV-SNP with pflash devices instead of using `-bios`\n"
+	if $amd_sev_type && $amd_sev_type eq 'snp';
+
+    my ($ovmf_code, $ovmf_vars) = get_ovmf_files($arch, $d, $q35, $amd_sev_type);
 
     my $var_drive_str = "if=pflash,unit=1,id=drive-efidisk0";
     if ($d) {
@@ -3551,7 +3604,7 @@ sub config_to_command {
 	$conf = $newconf;
     }
 
-    my ($globalFlags, $machineFlags, $rtcFlags) = ([], [], []);
+    my ($machineFlags, $rtcFlags) = ([], []);
     my $devices = [];
     my $bridges = {};
     my $ostype = $conf->{ostype};
@@ -3637,7 +3690,12 @@ sub config_to_command {
     push @$cmd, '-mon', "chardev=qmp,mode=control";
 
     if (min_version($machine_version, 2, 12)) {
-	push @$cmd, '-chardev', "socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect=5";
+	# QEMU 9.2 introduced a new 'reconnect-ms' option while deprecating the 'reconnect' option
+	my $reconnect_param = "reconnect=5";
+	if (min_version($kvmver, 9, 2)) { # this depends on the binary version
+	    $reconnect_param = "reconnect-ms=5000";
+	}
+	push @$cmd, '-chardev', "socket,id=qmp-event,path=/var/run/qmeventd.sock,$reconnect_param";
 	push @$cmd, '-mon', "chardev=qmp-event,mode=control";
     }
 
@@ -3677,10 +3735,18 @@ sub config_to_command {
 	die "OVMF (UEFI) BIOS is not supported on 32-bit CPU types\n"
 	    if !$forcecpu && get_cpu_bitness($conf->{cpu}, $arch) == 32;
 
-	my ($code_drive_str, $var_drive_str) =
-	    print_ovmf_drive_commandlines($conf, $storecfg, $vmid, $arch, $q35, $version_guard);
-	push $cmd->@*, '-drive', $code_drive_str;
-	push $cmd->@*, '-drive', $var_drive_str;
+	my $amd_sev_type = get_amd_sev_type($conf);
+	if ($amd_sev_type && $amd_sev_type eq 'snp') {
+	    if (defined($conf->{efidisk0})) {
+		log_warn("EFI disks are not supported with SEV-SNP and will be ignored");
+	    }
+	    push $cmd->@*, '-bios', get_ovmf_files($arch, undef, undef, $amd_sev_type);
+	} else {
+	    my ($code_drive_str, $var_drive_str) = print_ovmf_drive_commandlines(
+		$conf, $storecfg, $vmid, $arch, $q35, $version_guard);
+	    push $cmd->@*, '-drive', $code_drive_str;
+	    push $cmd->@*, '-drive', $var_drive_str;
+	}
     }
 
     if ($q35 && $arch eq 'x86_64') { # tell QEMU to load q35 config early
@@ -3853,7 +3919,7 @@ sub config_to_command {
     }
 
     if ($winversion >= 6) {
-	push @$globalFlags, 'kvm-pit.lost_tick_policy=discard';
+	push $cmd->@*, '-global', 'kvm-pit.lost_tick_policy=discard';
 	push @$machineFlags, 'hpet=off';
     }
 
@@ -3871,8 +3937,18 @@ sub config_to_command {
 	push @$cmd, get_cpu_options($conf, $arch, $kvm, $kvm_off, $machine_version, $winversion, $gpu_passthrough);
     }
 
+    my $virtiofs_enabled = PVE::QemuServer::Virtiofs::virtiofs_enabled($conf);
+
     PVE::QemuServer::Memory::config(
-	$conf, $vmid, $sockets, $cores, $hotplug_features->{memory}, $cmd);
+	$conf,
+	$vmid,
+	$sockets,
+	$cores,
+	$hotplug_features->{memory},
+	$virtiofs_enabled,
+	$cmd,
+	$machineFlags,
+    );
 
     push @$cmd, '-S' if $conf->{freeze};
 
@@ -3895,18 +3971,10 @@ sub config_to_command {
 
     my $rng = $conf->{rng0} ? parse_rng($conf->{rng0}) : undef;
     if ($rng && $version_guard->(4, 1, 2)) {
-	check_rng_source($rng->{source});
-
-	my $max_bytes = $rng->{max_bytes} // $rng_fmt->{max_bytes}->{default};
-	my $period = $rng->{period} // $rng_fmt->{period}->{default};
-	my $limiter_str = "";
-	if ($max_bytes) {
-	    $limiter_str = ",max-bytes=$max_bytes,period=$period";
-	}
-
-	my $rng_addr = print_pci_addr("rng0", $bridges, $arch, $machine_type);
-	push @$devices, '-object', "rng-random,filename=$rng->{source},id=rng0";
-	push @$devices, '-device', "virtio-rng-pci,rng=rng0$limiter_str$rng_addr";
+	my $rng_object = print_rng_object_commandline('rng0', $rng);
+	my $rng_device = print_rng_device_commandline('rng0', $rng, $bridges, $arch, $machine_type);
+	push @$devices, '-object', $rng_object;
+	push @$devices, '-device', $rng_device;
     }
 
     my $spice_port;
@@ -4143,6 +4211,9 @@ sub config_to_command {
     if (!$kvm) {
 	push @$machineFlags, 'accel=tcg';
     }
+    my $power_state_flags
+	= PVE::QemuServer::Machine::get_power_state_flags($machine_conf, $version_guard);
+    push $cmd->@*, $power_state_flags->@* if defined($power_state_flags);
 
     push @$machineFlags, 'smm=off' if should_disable_smm($conf, $vga, $machine_type);
 
@@ -4172,10 +4243,11 @@ sub config_to_command {
 	push @$machineFlags, 'confidential-guest-support=sev0';
     }
 
+    PVE::QemuServer::Virtiofs::config($conf, $vmid, $devices);
+
     push @$cmd, @$devices;
     push @$cmd, '-rtc', join(',', @$rtcFlags) if scalar(@$rtcFlags);
     push @$cmd, '-machine', join(',', @$machineFlags) if scalar(@$machineFlags);
-    push @$cmd, '-global', join(',', @$globalFlags) if scalar(@$globalFlags);
 
     if (my $vmstate = $conf->{vmstate}) {
 	my $statepath = PVE::Storage::path($storecfg, $vmstate);
@@ -4197,23 +4269,6 @@ sub config_to_command {
     }
 
     return wantarray ? ($cmd, $vollist, $spice_port, $pci_devices, $conf) : $cmd;
-}
-
-sub check_rng_source {
-    my ($source) = @_;
-
-    # mostly relevant for /dev/hwrng, but doesn't hurt to check others too
-    die "cannot create VirtIO RNG device: source file '$source' doesn't exist\n"
-	if ! -e $source;
-
-    my $rng_current = '/sys/devices/virtual/misc/hw_random/rng_current';
-    if ($source eq '/dev/hwrng' && file_read_firstline($rng_current) eq 'none') {
-	# Needs to abort, otherwise QEMU crashes on first rng access. Note that rng_current cannot
-	# be changed to 'none' manually, so once the VM is past this point, it's no longer an issue.
-	die "Cannot start VM with passed-through RNG device: '/dev/hwrng' exists, but"
-	    ." '$rng_current' is set to 'none'. Ensure that a compatible hardware-RNG is attached"
-	    ." to the host.\n";
-    }
 }
 
 sub spice_port {
@@ -4815,9 +4870,6 @@ sub set_migration_caps {
     my $enabled_cap = {
 	"auto-converge" => 1,
 	"xbzrle" => 1,
-	"x-rdma-pin-all" => 0,
-	"zero-blocks" => 0,
-	"compress" => 0,
 	"dirty-bitmaps" => $dirty_bitmaps,
     };
 
@@ -4943,7 +4995,7 @@ sub vmconfig_hotplug_pending {
 	my ($conf, $opt, $old, $new) = @_;
 	return if !$cloudinit_pending_properties->{$opt};
 
-	my $ci = ($conf->{cloudinit} //= {});
+	my $ci = ($conf->{'special-sections'}->{cloudinit} //= {});
 
 	my $recorded = $ci->{$opt};
 	my %added = map { $_ => 1 } PVE::Tools::split_list(delete($ci->{added}) // '');
@@ -5067,7 +5119,8 @@ sub vmconfig_hotplug_pending {
 		    PVE::Network::SDN::Vnets::del_ips_from_mac($net->{bridge}, $net->{macaddr}, $conf->{name});
 		}
 	    } elsif (is_valid_drivename($opt)) {
-		die "skip\n" if !$hotplug_features->{disk} || $opt =~ m/(ide|sata)(\d+)/;
+		die "skip\n"
+		    if !$hotplug_features->{disk} || $opt =~ m/(efidisk|ide|sata|tpmstate)(\d+)/;
 		vm_deviceunplug($vmid, $conf, $opt);
 		vmconfig_delete_or_detach_drive($vmid, $storecfg, $conf, $opt, $force);
 	    } elsif ($opt =~ m/^memory$/) {
@@ -5333,7 +5386,7 @@ sub vmconfig_apply_pending {
     if ($generate_cloudinit) {
 	if (PVE::QemuServer::Cloudinit::apply_cloudinit_config($conf, $vmid)) {
 	    # After successful generation and if there were changes to be applied, update the
-	    # config to drop the {cloudinit} entry.
+	    # config to drop the 'cloudinit' special section.
 	    PVE::QemuConfig->write_config($vmid, $conf);
 	}
     }
@@ -5764,7 +5817,7 @@ sub vm_start_nolock {
     if (!$migratedfrom) {
 	if (PVE::QemuServer::Cloudinit::apply_cloudinit_config($conf, $vmid)) {
 	    # FIXME: apply_cloudinit_config updates $conf in this case, and it would only drop
-	    # $conf->{cloudinit}, so we could just not do this?
+	    # $conf->{'special-sections'}->{cloudinit}, so we could just not do this?
 	    # But we do it above, so for now let's be consistent.
 	    $conf = PVE::QemuConfig->load_config($vmid); # update/reload
 	}
@@ -5982,6 +6035,8 @@ sub vm_start_nolock {
 	PVE::Tools::run_fork sub {
 	    PVE::Systemd::enter_systemd_scope($vmid, "Proxmox VE VM $vmid", %systemd_properties);
 
+	    my $virtiofs_sockets = start_all_virtiofsd($conf, $vmid);
+
 	    my $tpmpid;
 	    if ((my $tpm = $conf->{tpmstate0}) && !PVE::QemuConfig->is_template($conf)) {
 		# start the TPM emulator so QEMU can connect on start
@@ -5989,6 +6044,8 @@ sub vm_start_nolock {
 	    }
 
 	    my $exitcode = run_command($cmd, %run_params);
+	    eval { PVE::QemuServer::Virtiofs::close_sockets(@$virtiofs_sockets); };
+	    log_warn("closing virtiofs sockets failed - $@") if $@;
 	    if ($exitcode) {
 		if ($tpmpid) {
 		    warn "stopping swtpm instance (pid $tpmpid) due to QEMU startup error\n";
@@ -6299,7 +6356,7 @@ sub cleanup_pci_devices {
 }
 
 sub vm_stop_cleanup {
-    my ($storecfg, $vmid, $conf, $keepActive, $apply_pending_changes) = @_;
+    my ($storecfg, $vmid, $conf, $keepActive, $apply_pending_changes, $noerr) = @_;
 
     eval {
 
@@ -6325,7 +6382,10 @@ sub vm_stop_cleanup {
 
 	vmconfig_apply_pending($vmid, $conf, $storecfg) if $apply_pending_changes;
     };
-    warn $@ if $@; # avoid errors - just warn
+    if (my $err = $@) {
+	die $err if !$noerr;
+	warn $err;
+    }
 }
 
 # call only in locked context
@@ -6376,7 +6436,7 @@ sub _do_vm_stop {
 		die "VM quit/powerdown failed - got timeout\n";
 	    }
 	} else {
-	    vm_stop_cleanup($storecfg, $vmid, $conf, $keepActive, 1) if $conf;
+	    vm_stop_cleanup($storecfg, $vmid, $conf, $keepActive, 1, 1) if $conf;
 	    return;
 	}
     } else {
@@ -6407,7 +6467,7 @@ sub _do_vm_stop {
 	sleep 1;
     }
 
-    vm_stop_cleanup($storecfg, $vmid, $conf, $keepActive, 1) if $conf;
+    vm_stop_cleanup($storecfg, $vmid, $conf, $keepActive, 1, 1) if $conf;
 }
 
 # Note: use $nocheck to skip tests if VM configuration file exists.
@@ -6422,7 +6482,7 @@ sub vm_stop {
 	my $pid = check_running($vmid, $nocheck, $migratedfrom);
 	kill 15, $pid if $pid;
 	my $conf = PVE::QemuConfig->load_config($vmid, $migratedfrom);
-	vm_stop_cleanup($storecfg, $vmid, $conf, $keepActive, 0);
+	vm_stop_cleanup($storecfg, $vmid, $conf, $keepActive, 0, 1);
 	return;
     }
 
@@ -6638,12 +6698,14 @@ sub check_bridge_access {
 sub check_mapping_access {
     my ($rpcenv, $user, $conf) = @_;
 
+    return 1 if $user eq 'root@pam';
+
     for my $opt (keys $conf->%*) {
 	if ($opt =~ m/^usb\d+$/) {
 	    my $device = PVE::JSONSchema::parse_property_string('pve-qm-usb', $conf->{$opt});
 	    if (my $host = $device->{host}) {
 		die "only root can set '$opt' config for real devices\n"
-		    if $host !~ m/^spice$/i && $user ne 'root@pam';
+		    if $host !~ m/^spice$/i;
 	    } elsif ($device->{mapping}) {
 		$rpcenv->check_full($user, "/mapping/usb/$device->{mapping}", ['Mapping.Use']);
 	    } else {
@@ -6652,14 +6714,23 @@ sub check_mapping_access {
 	} elsif ($opt =~ m/^hostpci\d+$/) {
 	    my $device = PVE::JSONSchema::parse_property_string('pve-qm-hostpci', $conf->{$opt});
 	    if ($device->{host}) {
-		die "only root can set '$opt' config for non-mapped devices\n" if $user ne 'root@pam';
+		die "only root can set '$opt' config for non-mapped devices\n";
 	    } elsif ($device->{mapping}) {
 		$rpcenv->check_full($user, "/mapping/pci/$device->{mapping}", ['Mapping.Use']);
 	    } else {
 		die "either 'host' or 'mapping' must be set.\n";
 	    }
-       }
-   }
+	} elsif ($opt =~ m/^rng\d+$/) {
+	    my $device = PVE::JSONSchema::parse_property_string('pve-qm-rng', $conf->{$opt});
+
+	    if ($device->{source} && $device->{source} eq '/dev/hwrng') {
+		$rpcenv->check_full($user, "/mapping/hwrng", ['Mapping.Use']);
+	    }
+	} elsif ($opt =~ m/^virtiofs\d$/) {
+	    my $virtiofs = PVE::JSONSchema::parse_property_string('pve-qm-virtiofs', $conf->{$opt});
+	    $rpcenv->check_full($user, "/mapping/dir/$virtiofs->{dirid}", ['Mapping.Use']);
+	}
+    }
 };
 
 sub check_restore_permissions {
@@ -7348,6 +7419,155 @@ sub restore_proxmox_backup_archive {
     }
 }
 
+sub restore_external_archive {
+    my ($backup_provider, $archive, $vmid, $user, $options) = @_;
+
+    die "live restore from backup provider is not implemented\n" if $options->{live};
+
+    my $storecfg = PVE::Storage::config();
+
+    my ($storeid, $volname) = PVE::Storage::parse_volume_id($archive);
+    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
+
+    my $tmpdir = "/run/qemu-server/vzdumptmp$$";
+    rmtree($tmpdir);
+    mkpath($tmpdir) or die "unable to create $tmpdir\n";
+
+    my $conffile = PVE::QemuConfig->config_file($vmid);
+    # disable interrupts (always do cleanups)
+    local $SIG{INT} =
+	local $SIG{TERM} =
+	local $SIG{QUIT} =
+	local $SIG{HUP} = sub { print STDERR "got interrupt - ignored\n"; };
+
+    # Note: $oldconf is undef if VM does not exists
+    my $cfs_path = PVE::QemuConfig->cfs_config_path($vmid);
+    my $oldconf = PVE::Cluster::cfs_read_file($cfs_path);
+    my $new_conf_raw = '';
+
+    my $rpcenv = PVE::RPCEnvironment::get();
+    my $devinfo = {}; # info about drives included in backup
+    my $virtdev_hash = {}; # info about allocated drives
+
+    eval {
+	# enable interrupts
+	local $SIG{INT} =
+	    local $SIG{TERM} =
+	    local $SIG{QUIT} =
+	    local $SIG{HUP} =
+	    local $SIG{PIPE} = sub { die "interrupted by signal\n"; };
+
+	my $cfgfn = "$tmpdir/qemu-server.conf";
+	my $firewall_config_fn = "$tmpdir/fw.conf";
+
+	my $cmd = "restore";
+
+	my ($mechanism, $vmtype) =
+	    $backup_provider->restore_get_mechanism($volname);
+	die "mechanism '$mechanism' requested by backup provider is not supported for VMs\n"
+	    if $mechanism ne 'qemu-img';
+	die "cannot restore non-VM guest of type '$vmtype'\n" if $vmtype ne 'qemu';
+
+	$devinfo = $backup_provider->restore_vm_init($volname);
+
+	my $data = $backup_provider->archive_get_guest_config($volname)
+	    or die "backup provider failed to extract guest configuration\n";
+	PVE::Tools::file_set_contents($cfgfn, $data);
+
+	if ($data = $backup_provider->archive_get_firewall_config($volname)) {
+	    PVE::Tools::file_set_contents($firewall_config_fn, $data);
+	    my $pve_firewall_dir = '/etc/pve/firewall';
+	    mkdir $pve_firewall_dir; # make sure the dir exists
+	    PVE::Tools::file_copy($firewall_config_fn, "${pve_firewall_dir}/$vmid.fw");
+	}
+
+	my $fh = IO::File->new($cfgfn, "r") or die "unable to read qemu-server.conf - $!\n";
+
+	$virtdev_hash = $parse_backup_hints->($rpcenv, $user, $storecfg, $fh, $devinfo, $options);
+
+	# create empty/temp config
+	PVE::Tools::file_set_contents($conffile, "memory: 128\nlock: create");
+
+	$restore_cleanup_oldconf->($storecfg, $vmid, $oldconf, $virtdev_hash) if $oldconf;
+
+	# allocate volumes
+	my $map = $restore_allocate_devices->($storecfg, $virtdev_hash, $vmid);
+
+	for my $virtdev (sort keys $virtdev_hash->%*) {
+	    my $d = $virtdev_hash->{$virtdev};
+	    next if $d->{is_cloudinit}; # no need to restore cloudinit
+
+	    my $sparseinit = PVE::Storage::volume_has_feature($storecfg, 'sparseinit', $d->{volid});
+	    my $source_format = 'raw';
+
+	    my $info = $backup_provider->restore_vm_volume_init($volname, $d->{devname}, {});
+	    my $source_path = $info->{'qemu-img-path'}
+		or die "did not get source image path from backup provider\n";
+
+	    print "importing drive '$d->{devname}' from '$source_path'\n";
+
+	    # safety check for untrusted source image
+	    PVE::Storage::file_size_info($source_path, undef, $source_format, 1);
+
+	    eval {
+		my $convert_opts = {
+		    bwlimit => $options->{bwlimit},
+		    'is-zero-initialized' => $sparseinit,
+		    'source-path-format' => $source_format,
+		};
+		qemu_img_convert($source_path, $d->{volid}, $d->{size}, $convert_opts);
+	    };
+	    my $err = $@;
+	    eval { $backup_provider->restore_vm_volume_cleanup($volname, $d->{devname}, {}); };
+	    if (my $cleanup_err = $@) {
+		die $cleanup_err if !$err;
+		warn $cleanup_err;
+	    }
+	    die $err if $err
+	}
+
+	$fh->seek(0, 0) || die "seek failed - $!\n";
+
+	my $cookie = { netcount => 0 };
+	while (defined(my $line = <$fh>)) {
+	    $new_conf_raw .= restore_update_config_line(
+		$cookie,
+		$map,
+		$line,
+		$options->{unique},
+	    );
+	}
+
+	$fh->close();
+    };
+    my $err = $@;
+
+    eval { $backup_provider->restore_vm_cleanup($volname); };
+    warn "backup provider cleanup after restore failed - $@" if $@;
+
+    if ($err) {
+	$restore_deactivate_volumes->($storecfg, $virtdev_hash);
+    }
+
+    rmtree($tmpdir);
+
+    if ($err) {
+	$restore_destroy_volumes->($storecfg, $virtdev_hash);
+	die $err;
+    }
+
+    my $new_conf = restore_merge_config($conffile, $new_conf_raw, $options->{override_conf});
+    check_restore_permissions($rpcenv, $user, $new_conf);
+    PVE::QemuConfig->write_config($vmid, $new_conf);
+
+    eval { rescan($vmid, 1); };
+    warn $@ if $@;
+
+    PVE::AccessControl::add_vm_to_pool($vmid, $options->{pool}) if $options->{pool};
+
+    return;
+}
+
 sub pbs_live_restore {
     my ($vmid, $conf, $storecfg, $restored_disks, $opts) = @_;
 
@@ -7960,8 +8180,16 @@ sub convert_iscsi_path {
     die "cannot convert iscsi path '$path', unknown format\n";
 }
 
+# The possible options are:
+# bwlimit - The bandwidth limit in KiB/s.
+# is-zero-initialized - If the destination image is zero-initialized.
+# snapname - Use this snapshot of the source image.
+# source-path-format - Indicate the format of the source when the source is a path. For PVE-managed
+# volumes, the format from the storage layer is always used.
 sub qemu_img_convert {
-    my ($src_volid, $dst_volid, $size, $snapname, $is_zero_initialized, $bwlimit) = @_;
+    my ($src_volid, $dst_volid, $size, $opts) = @_;
+
+    my ($bwlimit, $snapname) = $opts->@{qw(bwlimit snapname)};
 
     my $storecfg = PVE::Storage::config();
     my ($src_storeid) = PVE::Storage::parse_volume_id($src_volid, 1);
@@ -7983,7 +8211,9 @@ sub qemu_img_convert {
 	$cachemode = 'none' if $src_scfg->{type} eq 'zfspool';
     } elsif (-f $src_volid || -b $src_volid) {
 	$src_path = $src_volid;
-	if ($src_path =~ m/\.($PVE::QemuServer::Drive::QEMU_FORMAT_RE)$/) {
+	if ($opts->{'source-path-format'}) {
+	    $src_format = $opts->{'source-path-format'};
+	} elsif ($src_path =~ m/\.($PVE::QemuServer::Drive::QEMU_FORMAT_RE)$/) {
 	    $src_format = $1;
 	}
     }
@@ -8019,7 +8249,7 @@ sub qemu_img_convert {
 
     push @$cmd, $src_path;
 
-    if (!$dst_is_iscsi && $is_zero_initialized) {
+    if (!$dst_is_iscsi && $opts->{'is-zero-initialized'}) {
 	push @$cmd, "zeroinit:$dst_path";
     } else {
 	push @$cmd, $dst_path;
@@ -8486,7 +8716,12 @@ sub clone_disk {
 		push $cmd->@*, "bs=$bs", "osize=$size", "if=$src_path", "of=$dst_path";
 		run_command($cmd);
 	    } else {
-		qemu_img_convert($drive->{file}, $newvolid, $size, $snapname, $sparseinit, $bwlimit);
+		my $opts = {
+		    bwlimit => $bwlimit,
+		    'is-zero-initialized' => $sparseinit,
+		    snapname => $snapname,
+		};
+		qemu_img_convert($drive->{file}, $newvolid, $size, $opts);
 	    }
 	}
     }
@@ -8536,7 +8771,8 @@ sub get_efivars_size {
     my $arch = PVE::QemuServer::Helpers::get_vm_arch($conf);
     $efidisk //= $conf->{efidisk0} ? parse_drive('efidisk0', $conf->{efidisk0}) : undef;
     my $smm = PVE::QemuServer::Machine::machine_type_is_q35($conf);
-    my (undef, $ovmf_vars) = get_ovmf_files($arch, $efidisk, $smm);
+    my $amd_sev_type = get_amd_sev_type($conf);
+    my (undef, $ovmf_vars) = get_ovmf_files($arch, $efidisk, $smm, $amd_sev_type);
     return -s $ovmf_vars;
 }
 
@@ -8560,17 +8796,17 @@ sub update_tpmstate_size {
     $conf->{tpmstate0} = print_drive($disk);
 }
 
-sub create_efidisk($$$$$$$) {
-    my ($storecfg, $storeid, $vmid, $fmt, $arch, $efidisk, $smm) = @_;
+sub create_efidisk($$$$$$$$) {
+    my ($storecfg, $storeid, $vmid, $fmt, $arch, $efidisk, $smm, $amd_sev_type) = @_;
 
-    my (undef, $ovmf_vars) = get_ovmf_files($arch, $efidisk, $smm);
+    my (undef, $ovmf_vars) = get_ovmf_files($arch, $efidisk, $smm, $amd_sev_type);
 
     my $vars_size_b = -s $ovmf_vars;
     my $vars_size = PVE::Tools::convert_size($vars_size_b, 'b' => 'kb');
     my $volid = PVE::Storage::vdisk_alloc($storecfg, $storeid, $vmid, $fmt, undef, $vars_size);
     PVE::Storage::activate_volumes($storecfg, [$volid]);
 
-    qemu_img_convert($ovmf_vars, $volid, $vars_size_b, undef, 0);
+    qemu_img_convert($ovmf_vars, $volid, $vars_size_b);
     my $size = PVE::Storage::volume_size_info($storecfg, $volid, 3);
 
     return ($volid, $size/1024);

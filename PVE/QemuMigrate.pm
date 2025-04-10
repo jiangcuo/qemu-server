@@ -5,6 +5,7 @@ use warnings;
 
 use IO::File;
 use IPC::Open2;
+use Storable qw(dclone);
 use Time::HiRes qw( usleep );
 
 use PVE::AccessControl;
@@ -177,11 +178,17 @@ sub prepare {
 
     my $storecfg = $self->{storecfg} = PVE::Storage::config();
 
+    # updates the configuration, so ordered before saving the configuration in $self
+    eval {
+	PVE::QemuConfig::cleanup_fleecing_images(
+	    $vmid, $storecfg, sub { $self->log($_[0], $_[1]); });
+    };
+    $self->log('warn', "attempt to clean up left-over fleecing images failed - $@") if $@;
+
     # test if VM exists
     my $conf = $self->{vmconf} = PVE::QemuConfig->load_config($vmid);
 
     my $version = PVE::QemuServer::Helpers::get_node_pvecfg_version($self->{node});
-    my $cloudinit_config = $conf->{cloudinit};
 
     my $repl_conf = PVE::ReplicationConfig->new();
     $self->{replication_jobcfg} = $repl_conf->find_local_replication_job($vmid, $self->{node});
@@ -228,7 +235,7 @@ sub prepare {
     my ($loc_res, $mapped_res, $missing_mappings_by_node) = PVE::QemuServer::check_local_resources($conf, $running, 1);
     my $blocking_resources = [];
     for my $res ($loc_res->@*) {
-	if (!grep($res, $mapped_res->@*)) {
+	if (!defined($mapped_res->{$res})) {
 	    push $blocking_resources->@*, $res;
 	}
     }
@@ -240,12 +247,20 @@ sub prepare {
 	}
     }
 
-    if (scalar($mapped_res->@*)) {
+    if (scalar(keys $mapped_res->%*)) {
 	my $missing_mappings = $missing_mappings_by_node->{$self->{node}};
-	if ($running) {
-	    die "can't migrate running VM which uses mapped devices: " . join(", ", $mapped_res->@*) . "\n";
-	} elsif (scalar($missing_mappings->@*)) {
-	    die "can't migrate to '$self->{node}': missing mapped devices " . join(", ", $missing_mappings->@*) . "\n";
+	my $missing_live_mappings = [];
+	for my $key (sort keys $mapped_res->%*) {
+	    my $res = $mapped_res->{$key};
+	    my $name = "$key:$res->{name}";
+	    push $missing_live_mappings->@*, $name if !$res->{'live-migration'};
+	}
+	if (scalar($missing_mappings->@*)) {
+	    my $missing = join(", ", $missing_mappings->@*);
+	    die "can't migrate to '$self->{node}': missing mapped devices $missing\n";
+	} elsif ($running && scalar($missing_live_mappings->@*)) {
+	    my $missing = join(", ", $missing_live_mappings->@*);
+	    die "can't live migrate running VM which uses following mapped devices: $missing\n";
 	} else {
 	    $self->log('info', "migrating VM which uses mapped local devices");
 	}
@@ -1232,6 +1247,7 @@ sub phase2 {
     $self->log('info', "migrate uri => $migrate_uri failed: $merr") if $merr;
 
     my $last_mem_transferred = 0;
+    my $last_vfio_transferred = 0;
     my $usleep = 1000000;
     my $i = 0;
     my $err_count = 0;
@@ -1278,6 +1294,20 @@ sub phase2 {
 		my $downtime = $stat->{downtime} || 0;
 		$self->log('info', "average migration speed: $avg_speed/s - downtime $downtime ms");
 	    }
+	    my $trans = $memstat->{transferred} || 0;
+	    my $vfio_transferred = $stat->{vfio}->{transferred} || 0;
+
+	    if ($trans > 0 || $vfio_transferred > 0) {
+		my $transferred_h = render_bytes($trans, 1);
+		my $summary = "transferred $transferred_h VM-state";
+
+		if ($vfio_transferred > 0) {
+		    my $vfio_h = render_bytes($vfio_transferred, 1);
+		    $summary .= " (+ $vfio_h VFIO-state)";
+		}
+
+		$self->log('info', "migration $status, $summary");
+	    }
 	}
 
 	if ($status eq 'failed' || $status eq 'cancelled') {
@@ -1291,8 +1321,11 @@ sub phase2 {
 	    last;
 	}
 
-	if ($memstat->{transferred} ne $last_mem_transferred) {
+	if ($memstat->{transferred} ne $last_mem_transferred ||
+	    $stat->{vfio}->{transferred} ne $last_vfio_transferred
+	) {
 	    my $trans = $memstat->{transferred} || 0;
+	    my $vfio_transferred = $stat->{vfio}->{transferred} || 0;
 	    my $rem = $memstat->{remaining} || 0;
 	    my $total = $memstat->{total} || 0;
 	    my $speed = ($memstat->{'pages-per-second'} // 0) * ($memstat->{'page-size'} // 0);
@@ -1309,6 +1342,11 @@ sub phase2 {
 	    my $speed_h = render_bytes($speed, 1);
 
 	    my $progress = "transferred $transferred_h of $total_h VM-state, ${speed_h}/s";
+
+	    if ($vfio_transferred > 0) {
+		my $vfio_h = render_bytes($vfio_transferred, 1);
+		$progress .= " (+ $vfio_h VFIO-state)";
+	    }
 
 	    if ($dirty_rate > $speed) {
 		my $dirty_rate_h = render_bytes($dirty_rate, 1);
@@ -1351,6 +1389,7 @@ sub phase2 {
 	}
 
 	$last_mem_transferred = $memstat->{transferred};
+	$last_vfio_transferred = $stat->{vfio}->{transferred};
     }
 
     if ($self->{storage_migration}) {
@@ -1457,7 +1496,8 @@ sub phase3_cleanup {
 
     my $tunnel = $self->{tunnel};
 
-    my $sourcevollist = PVE::QemuServer::get_vm_volumes($conf);
+    # we'll need an unmodified copy of the config later for the cleanup
+    my $oldconf = dclone($conf);
 
     if ($self->{volume_map} && !$self->{opts}->{remote}) {
 	my $target_drives = $self->{target_drive};
@@ -1588,12 +1628,10 @@ sub phase3_cleanup {
 	$self->{errors} = 1;
     }
 
-    # always deactivate volumes - avoid lvm LVs to be active on several nodes
-    eval {
-	PVE::Storage::deactivate_volumes($self->{storecfg}, $sourcevollist);
-    };
+    # stop with nocheck does not do a cleanup, so do it here with the original config
+    eval { PVE::QemuServer::vm_stop_cleanup($self->{storecfg}, $vmid, $oldconf) };
     if (my $err = $@) {
-	$self->log('err', $err);
+	$self->log('err', "Cleanup after stopping VM failed - $err");
 	$self->{errors} = 1;
     }
 
