@@ -6634,7 +6634,9 @@ sub vm_sendkey {
 sub check_bridge_access {
     my ($rpcenv, $authuser, $conf) = @_;
 
-    return 1 if $authuser eq 'root@pam';
+    if ( $user eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($user) ){
+		return 1 
+	};
 
     for my $opt (sort keys $conf->%*) {
 	next if $opt !~ m/^net\d+$/;
@@ -6648,6 +6650,10 @@ sub check_bridge_access {
 sub check_mapping_access {
     my ($rpcenv, $user, $conf) = @_;
 
+    if ( $user eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($user) ){
+		return 1 
+	};
+ 
     for my $opt (keys $conf->%*) {
 	if ($opt =~ m/^usb\d+$/) {
 	    my $device = PVE::JSONSchema::parse_property_string('pve-qm-usb', $conf->{$opt});
