@@ -3361,20 +3361,24 @@ sub get_ovmf_files($$$$) {
 
     my $type = 'default';
     if ($arch eq 'x86_64') {
-	if ($amd_sev_type && $amd_sev_type eq 'snp') {
-	    $type = "4m-snp";
-	    my ($ovmf) = $types->{$type}->@*;
-	    die "EFI base image '$ovmf' not found\n" if ! -f $ovmf;
-	    return ($ovmf);
-	} elsif ($amd_sev_type) {
-	    $type = "4m-sev";
-	} elsif (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
-	    $type = $smm ? "4m" : "4m-no-smm";
-	    $type .= '-ms' if $efidisk->{'pre-enrolled-keys'};
+		if ($amd_sev_type && $amd_sev_type eq 'snp') {
+			$type = "4m-snp";
+			my ($ovmf) = $types->{$type}->@*;
+			die "EFI base image '$ovmf' not found\n" if ! -f $ovmf;
+			return ($ovmf);
+		} elsif ($amd_sev_type) {
+			$type = "4m-sev";
+		}
 	} else {
 	    # TODO: log_warn about use of legacy images for x86_64 with Promxox VE 9
 	}
-
+	
+	if ($arch eq 'x86_64' || $arch eq 'aarch64') {
+		if (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
+			$type = $smm ? "4m" : "4m-no-smm";
+			$type .= '-ms' if $efidisk->{'pre-enrolled-keys'};
+		}
+	}
 
     my ($ovmf_code, $ovmf_vars) = $types->{$type}->@*;
     die "EFI base image '$ovmf_code' not found\n" if ! -f $ovmf_code;
@@ -6684,7 +6688,7 @@ sub vm_sendkey {
 sub check_bridge_access {
     my ($rpcenv, $authuser, $conf) = @_;
 
-    if ( $user eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($user) ){
+    if ( $authuser eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($authuser) ){
 		return 1 
 	};
 
