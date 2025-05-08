@@ -248,6 +248,14 @@ qemu-server (8.3.13) bookworm; urgency=medium
 
  -- Proxmox Support Team <support@proxmox.com>  Mon, 16 Jun 2025 10:04:17 +0200
 
+qemu-server (8.3.12-1) bookworm; urgency=medium
+
+  * Add smbios type2,serial to vm for vdi solution
+
+  * Fix get_ovmf_files() error and check_bridge_access user error
+
+ -- Lierfang Support Team <itsupport@lierfang.com>  Thu, 08 May 2025 18:39:51 +0800
+
 qemu-server (8.3.12) bookworm; urgency=medium
 
   * virtiofs: drop unsafe and problematic writeback option completely fow now.
