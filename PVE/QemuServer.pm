@@ -4155,6 +4155,9 @@ sub config_to_command {
     if (!$kvm) {
 	push @$machineFlags, 'accel=tcg';
     }
+    my $power_state_flags
+	= PVE::QemuServer::Machine::get_power_state_flags($machine_conf, $version_guard);
+    push $cmd->@*, $power_state_flags->@* if (defined($power_state_flags) && $arch eq 'x86_64');
 
     push @$machineFlags, 'smm=off' if should_disable_smm($conf, $vga, $machine_type);
 
