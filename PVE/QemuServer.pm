@@ -1880,7 +1880,7 @@ sub print_vga_device {
     }
 
     if ($vga->{type} eq 'virtio-gl') {
-	my $base = '/usr/lib/$arch-linux-gnu/lib';
+	my $base = "/usr/lib/$arch-linux-gnu/lib";
 	die "missing libraries for '$vga->{type}' detected! Please install 'libgl1' and 'libegl1'\n"
 	    if !-e "${base}EGL.so.1" || !-e "${base}GL.so.1";
 
