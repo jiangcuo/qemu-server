@@ -155,6 +155,11 @@ my $cpu_vendor_list = {
     'Dhyana-v1' => 'Hygon',
     'Dhyana-v2' => 'Hygon',
     'Dhyana-v3' => 'Hygon',
+
+    # Zhaoxin CPUs
+    'YongFeng-v1' => 'Zhaoxin',
+    'YongFeng-v2' => 'Zhaoxin',
+
     # Arm
     'cortex-a35' => 'ARM',
     'cortex-a53' => 'ARM',
@@ -666,9 +671,11 @@ sub get_cpu_options {
     # the vendor in the default list
     my $cpu_vendor = $cpu_vendor_list->{$cputype} if $arch eq 'x86_64';
     if ($cpu_vendor) {
-	    $pve_forced_flags->{'vendor'} = {
-        value => $cpu_vendor,
-    } if ($cpu_vendor ne 'default' && $cpu_vendor ne 'Hygon');
+        if ($cpu_vendor ne 'default' && $cpu_vendor ne 'Hygon' && $cpu_vendor ne 'Zhaoxin'){
+            $pve_forced_flags->{'vendor'} = {
+                value => $cpu_vendor,
+            }
+        }
     } 
     my $cpu_str = $cputype;
 
