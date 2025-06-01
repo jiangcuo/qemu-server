@@ -151,7 +151,11 @@ my $cpu_vendor_list = {
     'EPYC-Milan-v2' => 'AuthenticAMD',
     'EPYC-Genoa' => 'AuthenticAMD',
 
-
+    # Hygon CPUs
+    'Dhyana' => 'Hygon',
+    'Dhyana-v1' => 'Hygon',
+    'Dhyana-v2' => 'Hygon',
+    'Dhyana-v3' => 'Hygon',
     # Arm
     'cortex-a35' => 'ARM',
     'cortex-a53' => 'ARM',
@@ -672,7 +676,7 @@ sub get_cpu_options {
     if ($cpu_vendor) {
 	    $pve_forced_flags->{'vendor'} = {
         value => $cpu_vendor,
-    } if $cpu_vendor ne 'default';
+    } if ($cpu_vendor ne 'default' && $cpu_vendor ne 'Hygon');
     } 
     my $cpu_str = $cputype;
 
