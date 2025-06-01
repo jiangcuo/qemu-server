@@ -155,8 +155,11 @@ my $cpu_vendor_list = {
     'Dhyana-v1' => 'Hygon',
     'Dhyana-v2' => 'Hygon',
     'Dhyana-v3' => 'Hygon',
+    'Dharma' => 'Hygon',
+    'Dharma-v1' => 'Hygon',
 
     # Zhaoxin CPUs
+    'YongFeng' => 'Zhaoxin',
     'YongFeng-v1' => 'Zhaoxin',
     'YongFeng-v2' => 'Zhaoxin',
 
