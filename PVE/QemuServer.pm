@@ -3732,7 +3732,7 @@ sub config_to_command {
 
 	# We need to set the uuid to the vm on vdi solution
 	if ($conf->{uuid} && $arch ne 'ppc64' && $arch ne 's390x'){
-	    push @$cmd, '-smbios', "type=2,serial=$conf->{uuid}";
+	    push @$cmd, '-smbios', "type=2,manufacturer=lierfang,product=pxvirt,serial=$conf->{uuid}";
 	}
 
     if ($conf->{bios} && $conf->{bios} eq 'ovmf' && $arch ne 'ppc64') {
