@@ -271,6 +271,14 @@ sub prepare {
 	die "VMs with 'clipboard' set to 'vnc' are not live migratable!\n";
     }
 
+    # Check for NVME disks in online migration
+    if ($online) {
+	my @nvme_disks = grep { /^nvme\d+$/ } keys %$conf;
+	if (@nvme_disks) {
+	    die "can't live migrate VM with NVME disks: " . join(", ", @nvme_disks) . "\n";
+	}
+    }
+
     my $vollist = PVE::QemuServer::get_vm_volumes($conf);
 
     my $storages = {};
