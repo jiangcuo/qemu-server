@@ -320,8 +320,8 @@ my $spice_enhancements_fmt = {
     },
 	preferredcodec =>  {
 	type => 'string',
-	enum => ['h264', 'h265', 'vp9', 'vp8', 'av1','h264vaapi','h264amf','h264nvenc'],
-	default => 'h264',
+	enum => ['off','h264', 'h265', 'vp9', 'vp8', 'av1','h264vaapi','h264amf','h264nvenc'],
+	default => 'off',
 	optional => 1,
 	description => "Preferred codec for video streaming."
     },
@@ -4040,7 +4040,7 @@ sub config_to_command {
 	    my $spice_opts = "tls-port=${spice_port},addr=$localhost,tls-ciphers=HIGH,seamless-migration=on";
 	    $spice_opts .= ",streaming-video=$spice_enhancement->{videostreaming}"
 		if $spice_enhancement->{videostreaming};
-	    $spice_opts .= ",preferred-codec=gstreamer:$spice_enhancement->{preferredcodec}" if $spice_enhancement->{preferredcodec};
+	    $spice_opts .= ",preferred-codec=gstreamer:$spice_enhancement->{preferredcodec}" if ($spice_enhancement->{preferredcodec} && $spice_enhancement->{preferredcodec} ne 'off');
 	    push @$devices, '-spice', "$spice_opts";
 	}
     }
