@@ -4938,6 +4938,7 @@ my $fast_plug_option = {
     'startup' => 1,
     'tags' => 1,
     'vmstatestorage' => 1,
+	'uuid' => 1,
 };
 
 for my $opt (keys %$confdesc_cloudinit) {
