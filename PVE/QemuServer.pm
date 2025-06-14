@@ -1821,8 +1821,8 @@ my $vga_map = {
     'cirrus' => 'cirrus-vga',
     'std' => 'VGA',
     'vmware' => 'vmware-svga',
-    'virtio' => 'virtio-vga',
-    'virtio-gl' => 'virtio-gpu-gl',
+    'virtio' => 'virtio-gpu-pci',
+    'virtio-gl' => 'virtio-gpu-gl-pci',
 	'ramfb' => 'ramfb',
     'mdev' => 'mdev',
 };
@@ -1831,12 +1831,6 @@ sub print_vga_device {
     my ($conf, $vga, $arch, $machine_version, $machine, $id, $qxlnum, $bridges) = @_;
 
     my $type = $vga_map->{$vga->{type}};
-    if ($arch ne 'x86_64' && defined($type) && $type eq 'virtio-vga') {
-		$type = 'virtio-gpu-pci';
-    }
-	if ($arch ne 'x86_64' && defined($type) && $type eq 'virtio-gpu-gl') {
-		$type = 'virtio-gpu-gl';
-    }
     my $vgamem_mb = $vga->{memory};
 
     my $max_outputs = '';
@@ -1886,7 +1880,7 @@ sub print_vga_device {
 	$pciaddr = print_pci_addr($vgaid, $bridges, $arch, $machine);
     }
 
-    if ($vga->{type} eq 'virtio-gl') {
+    if ($vga->{type} eq 'virtio-gpu-gl-pci') {
 	my $base = "/usr/lib/$arch-linux-gnu/lib";
 	die "missing libraries for '$vga->{type}' detected! Please install 'libgl1' and 'libegl1'\n"
 	    if !-e "${base}EGL.so.1" || !-e "${base}GL.so.1";
