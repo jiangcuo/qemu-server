@@ -24,6 +24,7 @@ drive_is_read_only
 get_scsi_devicetype
 parse_drive
 print_drive
+max_spdk_disks
 );
 
 our $QEMU_FORMAT_RE = qr/raw|qcow|qcow2|qed|vmdk|cloop/;
@@ -150,6 +151,11 @@ our $MAX_SATA_DISKS = 6;
 my $MAX_NVME_DISKS = 16;
 our $MAX_UNUSED_DISKS = 256;
 our $NEW_DISK_RE = qr!^(([^/:\s]+):)?(\d+(\.\d+)?)$!;
+
+our $MAX_SPDK_DISKS = 6;
+sub max_spdk_disks {
+    return $MAX_SPDK_DISKS;
+}
 
 our $drivedesc_hash;
 # Schema when disk allocation is possible.
@@ -469,6 +475,21 @@ my $nvmedesc = {
 };
 PVE::JSONSchema::register_standard_option("pve-qm-nvme", $nvmedesc);
 
+# Add SPDK disk
+my $spdk_fmt = {
+    %drivedesc_base,
+    %iothread_fmt,
+    %readonly_fmt,
+};
+PVE::JSONSchema::register_format("pve-qm-spdk", $spdk_fmt);
+
+my $spdkdesc = {
+    optional => 1,
+    type => 'string', format => $spdk_fmt,
+    description => "Use volume as SPDK disk (n is 0 to " . ($MAX_SPDK_DISKS - 1) . ").",
+};
+
+PVE::JSONSchema::register_standard_option("pve-qm-spdk", $spdkdesc);
 
 my $sata_fmt = {
     %drivedesc_base,
@@ -675,6 +696,11 @@ for (my $i = 0; $i < $MAX_NVME_DISKS; $i++)  {
     $drivedesc_hash_with_alloc->{"nvme$i"} = $desc_with_alloc->('nvme', $nvmedesc);
 }
 
+for (my $i = 0; $i < $MAX_SPDK_DISKS; $i++)  {
+    $drivedesc_hash->{"spdk$i"} = $spdkdesc;
+    $drivedesc_hash_with_alloc->{"spdk$i"} = $desc_with_alloc->('spdk', $spdkdesc);
+}
+
 for (my $i = 0; $i < $MAX_VIRTIO_DISKS; $i++)  {
     $drivedesc_hash->{"virtio$i"} = $virtiodesc;
     $drivedesc_hash_with_alloc->{"virtio$i"} = $desc_with_alloc->('virtio', $virtiodesc);
@@ -701,7 +727,8 @@ sub valid_drive_names {
             (map { "scsi$_" } (0 .. ($MAX_SCSI_DISKS - 1))),
             (map { "virtio$_" } (0 .. ($MAX_VIRTIO_DISKS - 1))),
             (map { "sata$_" } (0 .. ($MAX_SATA_DISKS - 1))),
-             (map { "nvme$_" } (0 .. ($MAX_NVME_DISKS - 1))),
+            (map { "nvme$_" } (0 .. ($MAX_NVME_DISKS - 1))),
+            (map { "spdk$_" } (0 .. ($MAX_SPDK_DISKS - 1))),
             'efidisk0',
             'tpmstate0');
 }
