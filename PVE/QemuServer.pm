@@ -62,6 +62,8 @@ use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::PCI qw(print_pci_addr print_pcie_addr print_pcie_root_port parse_hostpci);
 use PVE::QemuServer::QMPHelpers qw(qemu_deviceadd qemu_devicedel qemu_objectadd qemu_objectdel);
 use PVE::QemuServer::USB;
+use PVE::QemuServer::Virtiofs qw(max_virtiofs start_all_virtiofsd);
+use PVE::QemuServer::Spdk qw(start_all_spdk);
 
 my $have_sdn;
 eval {
@@ -2585,8 +2587,10 @@ sub check_non_migratable_resources {
     my ($conf, $state, $noerr) = @_;
 
     my @blockers = ();
-    if ($state && $conf->{"amd-sev"}) {
-	push @blockers, "amd-sev";
+    if ($state) {
+	push @blockers, "amd-sev" if $conf->{"amd-sev"};
+	push @blockers, "virtiofs" if PVE::QemuServer::Virtiofs::virtiofs_enabled($conf);
+	push @blockers, "spdk" if PVE::QemuServer::Spdk::spdk_enabled($conf);
     }
 
     if (scalar(@blockers) && !$noerr) {
@@ -2651,7 +2655,7 @@ sub check_local_resources {
 	}
 	# sockets are safe: they will recreated be on the target side post-migrate
 	next if $k =~ m/^serial/ && ($conf->{$k} eq 'socket');
-	push @loc_res, $k if $k =~ m/^(usb|hostpci|serial|parallel)\d+$/;
+	push @loc_res, $k if $k =~ m/^(usb|hostpci|serial|parallel|virtiofs|spdk)\d+$/;
     }
 
     die "VM uses local resources\n" if scalar @loc_res && !$noerr;
@@ -3884,8 +3888,19 @@ sub config_to_command {
 	push @$cmd, get_cpu_options($conf, $arch, $kvm, $kvm_off, $machine_version, $winversion, $gpu_passthrough);
     }
 
+    my $virtiofs_enabled = PVE::QemuServer::Virtiofs::virtiofs_enabled($conf);
+    my $spdk_enabled = PVE::QemuServer::Spdk::spdk_enabled($conf);
+
     PVE::QemuServer::Memory::config(
-	$conf, $vmid, $sockets, $cores, $hotplug_features->{memory}, $cmd);
+	$conf,
+	$vmid,
+	$sockets,
+	$cores,
+	$hotplug_features->{memory},
+	$virtiofs_enabled || $spdk_enabled,
+	$cmd,
+	$machineFlags,
+    );
 
     push @$cmd, '-S' if $conf->{freeze};
 
@@ -4012,6 +4027,8 @@ sub config_to_command {
 	    check_volume_storage_type($storecfg, $drive->{file});
 	    push @$vollist, $drive->{file};
 	}
+
+	return if $drive->{interface} =~ /spdk/;
 
 	# ignore efidisk here, already added in bios/fw handling code above
 	return if $drive->{interface} eq 'efidisk';
@@ -4198,6 +4215,9 @@ sub config_to_command {
 	push @$devices, '-object', get_amd_sev_object($conf->{'amd-sev'}, $conf->{bios});
 	push @$machineFlags, 'confidential-guest-support=sev0';
     }
+
+    PVE::QemuServer::Virtiofs::config($conf, $vmid, $devices);
+	PVE::QemuServer::Spdk::add_spdk_char($conf, $vmid, $devices);
 
     push @$cmd, @$devices;
     push @$cmd, '-rtc', join(',', @$rtcFlags) if scalar(@$rtcFlags);
@@ -6010,6 +6030,9 @@ sub vm_start_nolock {
 	PVE::Tools::run_fork sub {
 	    PVE::Systemd::enter_systemd_scope($vmid, "Proxmox VE VM $vmid", %systemd_properties);
 
+	    my $virtiofs_sockets = start_all_virtiofsd($conf, $vmid);
+		my $spdk_sockets = start_all_spdk($conf, $vmid);
+
 	    my $tpmpid;
 	    if ((my $tpm = $conf->{tpmstate0}) && !PVE::QemuConfig->is_template($conf)) {
 		# start the TPM emulator so QEMU can connect on start
@@ -6062,7 +6085,8 @@ sub vm_start_nolock {
 	warn $@ if $@;
 	eval { cleanup_pci_devices($vmid, $conf) };
 	warn $@ if $@;
-
+	eval { PVE::QemuServer::Spdk::stop_all_spdk($vmid); };
+	warn $@ if $@;
 	die "start failed: $err";
     }
 
@@ -6235,6 +6259,8 @@ sub vm_commandline {
     if (!PVE::QemuServer::Helpers::vm_running_locally($vmid)) {
 	eval { cleanup_pci_devices($vmid, $conf) };
 	warn $@ if $@;
+	eval { PVE::QemuServer::Spdk::stop_all_spdk($vmid); };
+	warn $@ if $@;
     }
 
     return PVE::Tools::cmd2string($cmd);
@@ -6348,7 +6374,8 @@ sub vm_stop_cleanup {
 	    # add a "don't delete on stop" flag to the ivshmem format.
 	    unlink '/dev/shm/pve-shm-' . ($ivshmem->{name} // $vmid);
 	}
-
+	eval { PVE::QemuServer::Spdk::stop_all_spdk($vmid) };
+	warn $@ if $@;
 	cleanup_pci_devices($vmid, $conf);
 
 	vmconfig_apply_pending($vmid, $conf, $storecfg) if $apply_pending_changes;
