@@ -154,19 +154,36 @@ sub delete_aio_bdev {
     warn "$rc" if $rc;
 }
 
+sub create_aio_bdev {
+    my ($name, $path, $block_size) = @_;
+    my $cmd = [$spdk_bin, "bdev_aio_create","$name", "$path",  "$block_size"];
+    my $rc = PVE::Tools::run_command($cmd, noerr => 1, quiet => 1);
+    die "$rc" if $rc;
+}
+
+sub delete_uring_bdev {
+    my ($name) = @_;
+		if (!check_bdev($name)) {
+			return;
+		}
+    my $cmd = [$spdk_bin, "bdev_uring_delete", "$name"];
+    my $rc = PVE::Tools::run_command($cmd, noerr => 1, quiet => 1);
+    warn "$rc" if $rc;
+}
+
+sub create_uring_bdev {
+    my ($path, $name, $block_size) = @_;
+    my $cmd = [$spdk_bin, "bdev_uring_create","$path","$name",  "$block_size"];
+    my $rc = PVE::Tools::run_command($cmd, noerr => 1, quiet => 0);
+    die "$rc" if $rc;
+}
+
 sub delete_vhost_controller {
     my ($name) = @_;
 		if (!check_vhost_controller($name)) {
 			return;
 		}
     my $cmd = [$spdk_bin, "vhost_delete_controller", "$name"];
-    my $rc = PVE::Tools::run_command($cmd, noerr => 1, quiet => 1);
-    warn "$rc" if $rc;
-}
-
-sub create_aio_bdev {
-    my ($name, $path, $block_size) = @_;
-    my $cmd = [$spdk_bin, "bdev_aio_create","$name", "$path",  "$block_size"];
     my $rc = PVE::Tools::run_command($cmd, noerr => 1, quiet => 1);
     warn "$rc" if $rc;
 }
