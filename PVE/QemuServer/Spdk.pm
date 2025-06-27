@@ -94,10 +94,21 @@ sub start_spdk {
 
     my $drive = parse_drive($opt, $conf->{$opt});
     my ($path, $format) = PVE::QemuServer::Drive::get_path_and_format($storecfg, $vmid,$drive);
+    my ($storeid, $volname) = PVE::Storage::parse_volume_id($drive->{file}, 1);
+    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
+
     delete_vhost_controller("vm-$vmid-$opt");
-    delete_aio_bdev("vm-disk-$vmid-$opt");
-	create_aio_bdev($path,"vm-disk-$vmid-$opt", 4096);
-	# create_vhost_controller("vm-$vmid-$opt", "vm-disk-$vmid-$opt,$cpu_mask");
+    if ($scfg->{type} eq 'rbd') {
+        my $rbd_name = $volname;
+        if ($volname =~ m|/|) {
+            ($rbd_name) = $volname =~ m|.*/(.+)$|;
+        }
+        delete_rbd_bdev("vm-disk-$vmid-$opt");
+        create_rbd_bdev("vm-disk-$vmid-$opt", $scfg->{pool}, $rbd_name, 4096);
+    } else {
+        delete_aio_bdev("vm-disk-$vmid-$opt");
+        create_aio_bdev($path,"vm-disk-$vmid-$opt", 4096);
+    }
     create_vhost_scsi_controller("vm-$vmid-$opt", $cpu_mask);
     create_vhost_scsi_lun("vm-$vmid-$opt", "vm-disk-$vmid-$opt");
 }
@@ -111,7 +122,7 @@ sub spdk_enabled {
     return $spdk_enabled;
 }
 
-sub check_aio_bdev {
+sub check_bdev {
     my ($name) = @_;
 		my $has_aio_bdev = 0;
 		my $cmd = [$spdk_bin, "bdev_get_bdevs","-b","$name"];
@@ -135,7 +146,7 @@ sub check_vhost_controller {
 
 sub delete_aio_bdev {
     my ($name) = @_;
-		if (!check_aio_bdev($name)) {
+		if (!check_bdev($name)) {
 			return;
 		}
     my $cmd = [$spdk_bin, "bdev_aio_delete", "$name"];
@@ -187,6 +198,22 @@ sub create_vhost_scsi_lun {
     die "$rc" if $rc;
 }
 
+sub create_rbd_bdev {
+    my ($name, $pool_name, $rbd_name, $block_size) = @_;
+    my $cmd = [$spdk_bin, "bdev_rbd_create", "-b", "$name",  "$pool_name","$rbd_name", "$block_size"];
+    my $rc = PVE::Tools::run_command($cmd, noerr => 1, quiet => 0);
+    die "$rc" if $rc;
+}
+
+sub delete_rbd_bdev {
+    my ($name) = @_;
+    my $cmd = [$spdk_bin, "bdev_rbd_delete", "$name"];
+    return if !check_bdev($name);
+    print "delete_rbd_bdev($name)\n";
+    my $rc = PVE::Tools::run_command($cmd, noerr => 1, quiet => 1);
+    warn "$rc" if $rc;
+}
+
 sub stop_all_spdk {
   my ($vmid) = @_;
   my $conf = PVE::QemuConfig->load_config($vmid);
@@ -198,8 +225,21 @@ sub stop_all_spdk {
 }
 sub stop_spdk {
     my ($vmid, $opt) = @_;
+    my $storecfg = PVE::Storage::config();
+    my $conf = PVE::QemuConfig->load_config($vmid);
+
+
+    my $drive = parse_drive($opt, $conf->{$opt});
+    my ($storeid, $volname) = PVE::Storage::parse_volume_id($drive->{file}, 1);
+    my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
+
     delete_vhost_controller("vm-$vmid-$opt");
-    delete_aio_bdev("vm-disk-$vmid-$opt");
+    if ($scfg->{type} eq 'rbd') {
+        delete_rbd_bdev("vm-disk-$vmid-$opt");
+    } else {
+        delete_aio_bdev("vm-disk-$vmid-$opt");
+    }
+    delete_vhost_controller("vm-$vmid-$opt");
 }
 
 sub get_cpu_mask {
