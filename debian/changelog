@@ -1,3 +1,7 @@
+qemu-server (8.3.12-3) bookworm; urgency=medium
+
+  * add spdk disk  support !
+
 qemu-server (8.3.12-2) bookworm; urgency=medium
 
   * Add Zhaoxin & Hygon cpu support
