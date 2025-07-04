@@ -1817,6 +1817,14 @@ sub print_vga_device {
     my ($conf, $vga, $arch, $machine_version, $machine, $id, $qxlnum, $bridges) = @_;
 
     my $type = $vga_map->{$vga->{type}};
+	# x86_64 need using vga device for display!
+	if ($arch eq 'x86_64' && defined($type) ){
+		if ($type eq 'virtio-gpu-pci') {
+			$type = 'virtio-vga';
+		} elsif ($type eq 'virtio-gpu-gl-pci') {
+			$type = 'virtio-vga-gl';
+		}
+	}
     my $vgamem_mb = $vga->{memory};
 
     my $max_outputs = '';
@@ -1866,7 +1874,7 @@ sub print_vga_device {
 	$pciaddr = print_pci_addr($vgaid, $bridges, $arch, $machine);
     }
 
-    if ($vga->{type} eq 'virtio-gpu-gl-pci') {
+    if ($vga->{type} eq 'virtio-gpu-gl-pci' || $vga->{type} eq 'virtio-vga-gl') {
 	my $base = "/usr/lib/$arch-linux-gnu/lib";
 	die "missing libraries for '$vga->{type}' detected! Please install 'libgl1' and 'libegl1'\n"
 	    if !-e "${base}EGL.so.1" || !-e "${base}GL.so.1";
