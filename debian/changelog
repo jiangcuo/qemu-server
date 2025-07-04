@@ -1,6 +1,14 @@
+qemu-server (8.3.12-4) bookworm; urgency=medium
+
+  * Fix virtio-gpu issue on x86_64 https://github.com/jiangcuo/pxvirt/issues/186
+
+ -- Lierfang Support Team <itsupport@lierfang.com>  Fri, 04 Jul 2025 18:40:51 +0800
+
 qemu-server (8.3.12-3) bookworm; urgency=medium
 
   * add spdk disk  support !
+
+ -- Lierfang Support Team <itsupport@lierfang.com>  Fri, 04 Jul 2025 18:39:51 +0800
 
 qemu-server (8.3.12-2) bookworm; urgency=medium
 
