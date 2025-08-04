@@ -9,5 +9,12 @@
 # Uncomment this to turn on verbose mode.
 #export DH_VERBOSE=1
 
+include /usr/share/dpkg/architecture.mk
+
+export CC = $(DEB_HOST_GNU_TYPE)-gcc
+export CXX = $(DEB_HOST_GNU_TYPE)-g++
+export PKG_CONFIG = $(DEB_HOST_GNU_TYPE)-pkgconf
+
+
 %:
 	dh $@

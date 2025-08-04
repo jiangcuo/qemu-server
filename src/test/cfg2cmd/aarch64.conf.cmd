@@ -1,0 +1,41 @@
+/usr/bin/qemu-system-aarch64 \
+  -id 8006 \
+  -name 'vm8006,debug-threads=on' \
+  -no-shutdown \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -mon 'chardev=qmp,mode=control' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -mon 'chardev=qmp-event,mode=control' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu max \
+  -m 2048 \
+  -object 'memory-backend-memfd,id=virtiofs-mem,size=2048M,share=on' \
+  -readconfig /usr/share/qemu-server/pve-port.cfg \
+  -device 'qemu-xhci,id=ehci,bus=pcie.0,addr=0x1' \
+  -device 'qemu-xhci,p2=15,p3=15,id=xhci,bus=pcie.0,addr=0xa' \
+  -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
+  -device 'usb-kbd,id=keyboard,bus=ehci.0,port=2' \
+  -device 'pcie-root-port,id=pcie.5,addr=0x10,x-speed=16,x-width=32,multifunction=on,bus=pcie.0,port=5,chassis=5' \
+  -device 'vfio-pci,host=0000:f0:43.0,id=hostpci0.0,bus=pcie.5,addr=0x0.0,multifunction=on' \
+  -device 'vfio-pci,host=0000:f0:43.1,id=hostpci0.1,bus=pcie.5,addr=0x0.1' \
+  -device 'pcie-root-port,id=pcie.6,addr=0x11,x-speed=16,x-width=32,multifunction=on,bus=pcie.0,port=6,chassis=6' \
+  -device 'vfio-pci,host=1234:f0:43.1,id=hostpci1,bus=pcie.6,addr=0x0' \
+  -device 'virtio-gpu-pci,id=vga,bus=pcie.0,addr=0x2' \
+  -device 'virtio-serial,id=spice,bus=pcie.0,addr=0x9' \
+  -chardev 'spicevmc,id=vdagent,name=vdagent' \
+  -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
+  -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pcie.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -netdev 'type=tap,id=net1,ifname=tap8006i1,script=/usr/libexec/qemu-server/pve-bridge,downscript=/usr/libexec/qemu-server/pve-bridgedown' \
+  -device 'virtio-net-pci,mac=BC:24:11:A3:DA:B1,netdev=net1,bus=pcie.1,addr=0x4,id=net1,rx_queue_size=1024,tx_queue_size=256,bootindex=300' \
+  -netdev 'type=tap,id=net2,ifname=tap8006i2,script=/usr/libexec/qemu-server/pve-bridge,downscript=/usr/libexec/qemu-server/pve-bridgedown' \
+  -device 'virtio-net-pci,mac=BC:24:11:A3:DA:B2,netdev=net2,bus=pcie.1,addr=0x5,id=net2,rx_queue_size=1024,tx_queue_size=256,bootindex=301' \
+  -chardev 'socket,id=spdk_vhost_scsi_0,path=/var/tmp/vm-8006-spdk0' \
+  -device 'vhost-user-scsi-pci,chardev=spdk_vhost_scsi_0,bus=pcie.2,addr=0x16,num_queues=4' \
+  -machine 'memory-backend=virtiofs-mem,accel=tcg,type=virt+pve0,gic-version=max'

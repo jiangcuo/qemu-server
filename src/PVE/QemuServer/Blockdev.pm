@@ -676,6 +676,10 @@ sub resize {
 
     my $running = PVE::QemuServer::Helpers::vm_running_locally($vmid);
 
+    if ($deviceid =~ /^spdk/) {
+        die "spdk block is not supported online resize yet!\n";
+    }
+
     PVE::Storage::volume_resize($storecfg, $volid, $size, $running);
 
     return if !$running;

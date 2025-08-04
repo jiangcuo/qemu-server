@@ -7,6 +7,7 @@ use PVE::QemuServer::Helpers;
 use PVE::QemuServer::MetaInfo;
 use PVE::QemuServer::Monitor;
 use PVE::JSONSchema qw(get_standard_option parse_property_string print_property_string);
+use PVE::Tools qw(get_host_arch);
 
 # The PVE machine versions allow rolling out (incompatibel) changes to the hardware layout and/or
 # the QEMU command of a VM without requiring a newer QEMU upstream machine version.
@@ -44,8 +45,7 @@ my $machine_fmt = {
         default_key => 1,
         description => "Specifies the QEMU machine type.",
         type => 'string',
-        pattern =>
-            '(pc|pc(-i440fx)?-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|q35|pc-q35-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|virt(?:-\d+(\.\d+)+)?(\+pve\d+)?)',
+        pattern => '(pc|pc(-i440fx)?-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|q35|pc-q35-\d+(\.\d+)+(\+pve\d+)?(\.pxe)?|(virt|s390-ccw-virtio|pseries)(?:-\d+(\.\d+)+)?(\+pve\d+)?)',
         maxLength => 40,
         format_description => 'machine type',
         optional => 1,
@@ -101,6 +101,10 @@ sub print_machine {
 my $default_machines = {
     x86_64 => 'pc',
     aarch64 => 'virt',
+    riscv64 => 'virt',
+    loongarch64 => 'virt',
+    ppc64 => 'pseries',
+    s390x => 's390-ccw-virtio',
 };
 
 sub default_machine_for_arch {
@@ -301,7 +305,7 @@ sub get_vm_machine {
             }
             $machine = windows_get_pinned_machine_version($machine, $base_version, $kvmversion);
         } else {
-            $arch //= 'x86_64';
+            $arch //= get_host_arch();
             $machine ||= default_machine_for_arch($arch);
             my $pvever = get_pve_version($kvmversion);
             $machine .= "+pve$pvever";

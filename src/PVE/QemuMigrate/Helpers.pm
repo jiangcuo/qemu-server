@@ -21,6 +21,7 @@ sub check_non_migratable_resources {
     if ($state) {
         push @blockers, "amd-sev" if $conf->{"amd-sev"};
         push @blockers, "virtiofs" if PVE::QemuServer::Virtiofs::virtiofs_enabled($conf);
+        push @blockers, "spdk" if PVE::QemuServer::Spdk::spdk_enabled($conf);
     }
 
     if (scalar(@blockers) && !$noerr) {
@@ -104,7 +105,7 @@ sub check_local_resources {
         }
         # sockets are safe: they will recreated be on the target side post-migrate
         next if $k =~ m/^serial/ && ($conf->{$k} eq 'socket');
-        push @loc_res, $k if $k =~ m/^(usb|hostpci|serial|parallel|virtiofs)\d+$/;
+        push @loc_res, $k if $k =~ m/^(usb|hostpci|serial|parallel|virtiofs|spdk)\d+$/;
     }
 
     die "VM uses local resources\n" if scalar @loc_res && !$noerr;

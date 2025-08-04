@@ -3,7 +3,6 @@ PREFIX=/usr
 BINDIR=$(PREFIX)/libexec/qemu-server
 SERVICEDIR=$(PREFIX)/lib/systemd/system
 
-CC ?= gcc
 CFLAGS += -O2 -fanalyzer -Werror -Wall -Wextra -Wpedantic -Wtype-limits -Wl,-z,relro -std=gnu11
 
 query-machine-capabilities: query-machine-capabilities.c

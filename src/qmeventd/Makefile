@@ -6,10 +6,9 @@ MANDIR=$(PREFIX)/share/man
 
 -include /usr/share/pve-doc-generator/pve-doc-generator.mk
 
-CC ?= gcc
 CFLAGS += -O2 -Werror -Wall -Wextra -Wpedantic -Wtype-limits -Wl,-z,relro -std=gnu11
-CFLAGS += $(shell pkgconf --cflags json-c glib-2.0)
-LDFLAGS += $(shell pkgconf --libs json-c glib-2.0)
+CFLAGS += $(shell $(PKG_CONFIG) --cflags json-c glib-2.0)
+LDFLAGS += $(shell $(PKG_CONFIG) --libs json-c glib-2.0)
 
 qmeventd: qmeventd.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)

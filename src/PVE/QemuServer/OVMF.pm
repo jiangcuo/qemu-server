@@ -42,8 +42,68 @@ my $OVMF = {
         ],
     },
     aarch64 => {
+        '4m-no-smm' => [
+            "$EDK2_FW_BASE/AAVMF_CODE.fd",
+            "$EDK2_FW_BASE/AAVMF_VARS.fd",
+        ],
+        '4m-no-smm-ms' => [
+            "$EDK2_FW_BASE/AAVMF_CODE.ms.fd",
+            "$EDK2_FW_BASE/AAVMF_VARS.ms.fd",
+        ],
+        '4m' => [
+            "$EDK2_FW_BASE/AAVMF_CODE.fd",
+            "$EDK2_FW_BASE/AAVMF_VARS.fd",
+        ],
+        '4m-ms' => [
+            "$EDK2_FW_BASE/AAVMF_CODE.ms.fd",
+            "$EDK2_FW_BASE/AAVMF_VARS.ms.fd",
+        ],
         default => [
             "$EDK2_FW_BASE/AAVMF_CODE.fd", "$EDK2_FW_BASE/AAVMF_VARS.fd",
+        ],
+    },
+    loongarch64 => {
+        '4m-no-smm' =>      [
+            "$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+        ],
+        '4m-no-smm-ms' =>      [
+            "$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+        ],
+        '4m' =>      [
+            "$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+        ],
+        '4m-ms' =>      [
+            "$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+        ],
+        default =>	[
+            "$EDK2_FW_BASE/LOONGARCH64_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/LOONGARCH64_VIRT_VARS.fd",
+        ],
+    },
+    riscv64 => {
+        '4m-no-smm' =>      [
+            "$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+        ],
+        '4m-no-smm-ms' =>      [
+            "$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+        ],
+        '4m' =>      [
+            "$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+        ],
+        '4m-ms' =>      [
+            "$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
+        ],
+        default =>	[
+            "$EDK2_FW_BASE/RISCV_VIRT_CODE.fd",
+            "$EDK2_FW_BASE/RISCV_VIRT_VARS.fd",
         ],
     },
 };
@@ -69,6 +129,13 @@ my sub get_ovmf_files($$$$) {
         } else {
             # TODO: log_warn about use of legacy images for x86_64 with Promxox VE 9
         }
+    } elsif ($arch eq 'aarch64'){
+        if (defined($efidisk->{efitype}) && $efidisk->{efitype} eq '4m') {
+            $type = $smm ? "4m" : "4m-no-smm";
+            $type .= '-ms' if $efidisk->{'pre-enrolled-keys'};
+        }
+    } else {
+        # TODO: riscv64 and loongarch64 secboot ?
     }
 
     my ($ovmf_code, $ovmf_vars) = $types->{$type}->@*;

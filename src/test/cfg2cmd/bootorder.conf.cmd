@@ -31,7 +31,7 @@
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
   -device 'ide-cd,bus=ide.1,unit=0,id=ide2,bootindex=103' \
-  -device 'lsi,id=scsihw0,bus=pci.0,addr=0x5' \
+  -device 'virtio-scsi-pci,id=scsihw0,bus=pci.0,addr=0x5' \
   -blockdev '{"detect-zeroes":"unmap","discard":"unmap","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"unmap","discard":"unmap","driver":"qcow2","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"unmap","discard":"unmap","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.qcow2","node-name":"e6bf62e20f6c14a2c19bd6f1f5ac36c","read-only":false},"node-name":"f6bf62e20f6c14a2c19bd6f1f5ac36c","read-only":false},"node-name":"drive-scsi4","read-only":false,"throttle-group":"throttle-drive-scsi4"}' \
   -device 'scsi-hd,bus=scsihw0.0,scsi-id=4,drive=drive-scsi4,id=scsi4,device_id=drive-scsi4,bootindex=102,write-cache=on' \
   -blockdev '{"detect-zeroes":"unmap","discard":"unmap","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"unmap","discard":"unmap","driver":"qcow2","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"unmap","discard":"unmap","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.qcow2","node-name":"edd19f6c1b3a6d5a6248c3376a91a16","read-only":false},"node-name":"fdd19f6c1b3a6d5a6248c3376a91a16","read-only":false},"node-name":"drive-virtio0","read-only":false,"throttle-group":"throttle-drive-virtio0"}' \
