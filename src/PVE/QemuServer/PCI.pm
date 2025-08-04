@@ -956,18 +956,16 @@ sub prepare_pci_device {
         if !PVE::SysFSTools::check_iommu_support();
     die "no pci device info for device '$pciid'\n" if !$info;
 
-<<<<<<< HEAD
     if ($device->{mac}){
         my $mac = $device->{mac};
         my $vlan = $device->{tag};
         pci_set_sriov_device($pciid,$mac,$vlan);
     }
 
-    if ($device->{nvidia}) {
-=======
+ 
+
     my $driver = $device->{driver} // 'vfio';
     if ($device->{nvidia} || $driver eq "keep") {
->>>>>>> aa47045f (pci: add 'driver' option)
         # nothing to do
     } elsif (my $mdev = $device->{mdev}) {
         my $uuid = $conf->{uuid} // generate_mdev_uuid($vmid, $index);

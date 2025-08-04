@@ -26,7 +26,7 @@
   -device 'VGA,id=vga,bus=pci.0,addr=0x2' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
-  -device 'lsi,id=scsihw0,bus=pci.0,addr=0x5' \
+  -device 'virtio-scsi-pci,id=scsihw0,bus=pci.0,addr=0x5' \
   -blockdev '{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"on","discard":"ignore","driver":"host_device","filename":"/dev/sdg","node-name":"e8c91179e47ae3eb292a03618be5cf4","read-only":false},"node-name":"drive-scsi0","read-only":false}' \
-  -device 'scsi-hd,bus=scsihw0.0,scsi-id=0,drive=drive-scsi0,id=scsi0,device_id=drive-scsi0,bootindex=100,write-cache=on' \
+  -device 'scsi-block,bus=scsihw0.0,scsi-id=0,drive=drive-scsi0,id=scsi0,bootindex=100' \
   -machine 'type=pc+pve0'

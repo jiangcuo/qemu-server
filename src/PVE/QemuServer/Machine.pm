@@ -432,6 +432,8 @@ sub get_vm_machine {
             }
             $machine = windows_get_pinned_machine_version($machine, $base_version, $kvmversion);
         } else {
+            $arch //= get_host_arch();
+            $machine ||= default_machine_for_arch($arch);
             my $pvever = get_pve_version($kvmversion);
             $machine .= "+pve$pvever";
         }

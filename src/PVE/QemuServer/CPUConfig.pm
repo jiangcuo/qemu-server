@@ -190,7 +190,15 @@ my $cpu_models_by_arch = {
         'EPYC-Genoa' => 'AuthenticAMD',
         'EPYC-Genoa-v2' => 'AuthenticAMD',
         'EPYC-Turin' => 'AuthenticAMD',
-
+        'Dhyana' => 'Hygon',
+        'Dhyana-v1' => 'Hygon',
+        'Dhyana-v2' => 'Hygon',
+        'Dhyana-v3' => 'Hygon',
+        'Dharma' => 'Hygon',
+        'Dharma-v1' => 'Hygon',
+        'YongFeng' => 'Zhaoxin',
+        'YongFeng-v1' => 'Zhaoxin',
+        'YongFeng-v2' => 'Zhaoxin',
         # generic types, use vendor from host node
         kvm32 => 'default',
         kvm64 => 'default',
@@ -210,9 +218,27 @@ my $cpu_models_by_arch = {
         'neoverse-n1' => 'ARM',
         'neoverse-n2' => 'ARM',
         'neoverse-v1' => 'ARM',
+        'Kunpeng-920' => 'ARM',
         # 32 bit and deprecated models were not added
         max => 'default',
     },
+    riscv64 => {
+        'rv64' => 'RISCV',
+        max => 'default',
+    },
+    loongarch64 =>  {
+        'la464_loongarch_cpu' => 'LoongARCH',
+        'la464' => 'LoongARCH',
+        'la132' => 'LoongARCH',
+        max => 'default',
+    },
+    power => {
+        'power10' => 'POWER',
+        'power9' => 'POWER',
+        'power8' => 'POWER',
+        'power11' => 'POWER',
+        max => 'default',
+    }
 };
 
 # The host CPU model only exists if the arch matches
@@ -291,6 +317,9 @@ my $supported_cpu_flags_by_arch = {
         },
     ],
     aarch64 => [],
+    loongarch64 => [],
+    power => [],
+    riscv64 => [],
 };
 
 sub get_supported_cpu_flags {
