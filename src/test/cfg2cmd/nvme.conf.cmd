@@ -1,0 +1,31 @@
+/usr/bin/qemu-system-loongarch64 \
+  -id 8006 \
+  -name 'vm8006,debug-threads=on' \
+  -chardev 'socket,id=qmp,path=/var/run/qemu-server/8006.qmp,server=on,wait=off' \
+  -mon 'chardev=qmp,mode=control' \
+  -chardev 'socket,id=qmp-event,path=/var/run/qmeventd.sock,reconnect-ms=5000' \
+  -mon 'chardev=qmp-event,mode=control' \
+  -pidfile /var/run/qemu-server/8006.pid \
+  -daemonize \
+  -smp '1,sockets=1,cores=1,maxcpus=1' \
+  -nodefaults \
+  -boot 'menu=on,strict=on,reboot-timeout=1000,splash=/usr/share/qemu-server/bootsplash.jpg' \
+  -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
+  -cpu max \
+  -m 512 \
+  -object '{"id":"throttle-drive-nvme0","limits":{},"qom-type":"throttle-group"}' \
+  -readconfig /usr/share/qemu-server/pve-port.cfg \
+  -device 'qemu-xhci,id=ehci,bus=pcie.0,addr=0x1' \
+  -device 'qemu-xhci,p2=15,p3=15,id=xhci,bus=pcie.0,addr=0xa' \
+  -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
+  -device 'usb-kbd,id=keyboard,bus=ehci.0,port=2' \
+  -device 'virtio-gpu-pci,id=vga,bus=pcie.0,addr=0x2' \
+  -device 'virtio-serial,id=spice,bus=pcie.0,addr=0x9' \
+  -chardev 'spicevmc,id=vdagent,name=vdagent' \
+  -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
+  -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
+  -device 'virtio-balloon-pci,id=balloon0,bus=pcie.0,addr=0x3,free-page-reporting=on' \
+  -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
+  -blockdev '{"detect-zeroes":"unmap","discard":"unmap","driver":"throttle","file":{"cache":{"direct":true,"no-flush":false},"detect-zeroes":"unmap","discard":"unmap","driver":"raw","file":{"aio":"io_uring","cache":{"direct":true,"no-flush":false},"detect-zeroes":"unmap","discard":"unmap","driver":"file","filename":"/var/lib/vz/images/8006/vm-8006-disk-0.raw","node-name":"e119e463707ef5b322ab615f629db5d","read-only":false},"node-name":"f119e463707ef5b322ab615f629db5d","read-only":false},"node-name":"drive-nvme0","read-only":false,"throttle-group":"throttle-drive-nvme0"}' \
+  -device 'nvme,id=nvme0,drive=drive-nvme0,use-intel-id=on,serial=lierfangnvme0,write-cache=on' 
+  -machine 'accel=tcg,type=virt+pve0'

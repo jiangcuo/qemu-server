@@ -35,7 +35,7 @@ $(BUILDDIR):
 deb: $(DEBS)
 $(DBG_DEB): $(DEB)
 $(DEB): $(BUILDDIR)
-	cd $(BUILDDIR); dpkg-buildpackage -b -us -uc  --jobs=1 -a$(DEB_HOST_ARCH) $(if $(filter-out $(shell dpkg --print-architecture),$(DEB_HOST_ARCH)),-d)
+	cd $(BUILDDIR); dpkg-buildpackage -b -us -uc -a$(DEB_HOST_ARCH) $(if $(filter-out $(shell dpkg --print-architecture),$(DEB_HOST_ARCH)),-d)
 	lintian $(DEBS)
 
 .PHONY: dsc
