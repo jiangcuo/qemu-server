@@ -19,6 +19,7 @@ our @EXPORT_OK = qw(
     is_native_arch
     get_amd_sev_object
     get_amd_sev_type
+    get_default_cpu_type
 );
 
 # under certain race-conditions, this module might be loaded before pve-cluster
@@ -151,6 +152,43 @@ my $cpu_vendor_list = {
     'EPYC-Milan' => 'AuthenticAMD',
     'EPYC-Milan-v2' => 'AuthenticAMD',
     'EPYC-Genoa' => 'AuthenticAMD',
+
+        # Hygon CPUs
+    'Dhyana' => 'Hygon',
+    'Dhyana-v1' => 'Hygon',
+    'Dhyana-v2' => 'Hygon',
+    'Dhyana-v3' => 'Hygon',
+    'Dharma' => 'Hygon',
+    'Dharma-v1' => 'Hygon',
+
+    # Zhaoxin CPUs
+    'YongFeng' => 'Zhaoxin',
+    'YongFeng-v1' => 'Zhaoxin',
+    'YongFeng-v2' => 'Zhaoxin',
+
+    # Arm
+    'cortex-a35' => 'ARM',
+    'cortex-a53' => 'ARM',
+    'cortex-a55' => 'ARM',
+    'cortex-a57' => 'ARM',
+    'cortex-a72' => 'ARM',
+    'cortex-a76' => 'ARM',
+    'neoverse-n1' => 'ARM',
+    'neoverse-n2' => 'ARM',
+    'neoverse-v1' => 'ARM',
+    'Kunpeng-920' => 'ARM',
+
+    # LoongArch
+    'la464_loongarch_cpu' => 'LoongARCH',
+    'la464' => 'LoongARCH',
+    'la132' => 'LoongARCH',
+
+    # RISCV
+    'rv64' => 'RISCV', 
+    'power10' => 'POWER',
+    'power9' => 'POWER',
+    'power8' => 'POWER',
+    'power11' => 'POWER',
 
     # generic types, use vendor from host node
     host => 'default',
@@ -596,6 +634,11 @@ sub get_cpu_options {
 
     my $cputype = get_default_cpu_type($arch, $kvm);
 
+    # special case for loongarch
+    if ( $cputype eq 'la464_loongarch_cpu' ) {
+        $cputype = 'la464';
+    }
+
     my $cpu = {};
     my $custom_cpu;
     my $builtin_cpu;
@@ -659,13 +702,13 @@ sub get_cpu_options {
 
     # $cputype is the "reported-model" for custom types, so we can just look up
     # the vendor in the default list
-    my $cpu_vendor = $cpu_vendor_list->{$cputype};
+    my $cpu_vendor = $cpu_vendor_list->{$cputype} if $arch eq 'x86_64';
     if ($cpu_vendor) {
-        $pve_forced_flags->{'vendor'} = {
-            value => $cpu_vendor,
-        } if $cpu_vendor ne 'default';
-    } elsif ($arch ne 'aarch64') {
-        die "internal error"; # should not happen
+        if ($cpu_vendor ne 'default' && $cpu_vendor ne 'Hygon' && $cpu_vendor ne 'Zhaoxin'){
+            $pve_forced_flags->{'vendor'} = {
+                value => $cpu_vendor,
+            }
+        }
     }
 
     my $cpu_str = $cputype;
@@ -815,10 +858,17 @@ sub get_cpu_from_running_vm {
 sub get_default_cpu_type {
     my ($arch, $kvm) = @_;
 
-    my $cputype = $kvm ? 'kvm64' : 'qemu64';
-    $cputype = 'cortex-a57' if $arch eq 'aarch64';
+    # if !kvm ,cpu will set to max for all arch
+    my %cpu_map = (
+        'x86_64' => $kvm ? 'kvm64' : 'qemu64',
+        'aarch64' => $kvm ? 'host' : 'max',
+        'riscv64' => $kvm ? 'rv64' : 'max',
+        'loongarch64' => $kvm ? 'la464' : 'max',
+        'ppc64' => $kvm ? 'power10' : 'power10',
+        's390x' => $kvm ? 'max' : 'max',
+    );
 
-    return $cputype;
+    return $cpu_map{$arch} // 'max';
 }
 
 sub is_native_arch($) {
@@ -848,7 +898,9 @@ sub get_cpu_bitness {
     }
 
     return $cputypes_32bit->{$cputype} ? 32 : 64 if $arch eq 'x86_64';
-    return 64 if $arch eq 'aarch64';
+        if ($arch eq 'aarch64' || $arch eq 'loongarch64' || $arch eq 'riscv64' || $arch eq 'ppc64' || $arch eq 's390x') {
+        return 64;
+    }
 
     die "unsupported architecture '$arch'\n";
 }

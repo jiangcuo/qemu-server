@@ -17,7 +17,8 @@ SOURCES=PCI.pm		\
 	CGroup.pm	\
 	Drive.pm	\
 	QMPHelpers.pm	\
-	Virtiofs.pm
+	Virtiofs.pm	  \
+	Spdk.pm
 
 .PHONY: install
 install: $(SOURCES)

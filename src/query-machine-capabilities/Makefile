@@ -4,7 +4,6 @@ BINDIR=$(PREFIX)/libexec/qemu-server
 # bookworm's systemd debhelper do not understand unit files shiped in /usr yet.
 SERVICEDIR=/lib/systemd/system
 
-CC ?= gcc
 CFLAGS += -O2 -fanalyzer -Werror -Wall -Wextra -Wpedantic -Wtype-limits -Wl,-z,relro -std=gnu11
 
 query-machine-capabilities: query-machine-capabilities.c

@@ -5,8 +5,8 @@ BUILDDIR ?= $(PACKAGE)-$(DEB_VERSION_UPSTREAM)
 
 GITVERSION:=$(shell git rev-parse HEAD)
 
-DEB=$(PACKAGE)_$(DEB_VERSION_UPSTREAM_REVISION)_$(DEB_BUILD_ARCH).deb
-DBG_DEB=$(PACKAGE)-dbgsym_$(DEB_VERSION_UPSTREAM_REVISION)_$(DEB_BUILD_ARCH).deb
+DEB=$(PACKAGE)_$(DEB_VERSION_UPSTREAM_REVISION)_$(DEB_HOST_ARCH).deb
+DBG_DEB=$(PACKAGE)-dbgsym_$(DEB_VERSION_UPSTREAM_REVISION)_$(DEB_HOST_ARCH).deb
 DSC=$(PACKAGE)_$(DEB_VERSION_UPSTREAM_REVISION).dsc
 
 DEBS=$(DEB) $(DBG_DEB)
@@ -32,13 +32,13 @@ $(BUILDDIR):
 deb: $(DEBS)
 $(DBG_DEB): $(DEB)
 $(DEB): $(BUILDDIR)
-	cd $(BUILDDIR); dpkg-buildpackage -b -us -uc
+	cd $(BUILDDIR); dpkg-buildpackage -b -us -uc  -a$(DEB_HOST_ARCH) $(if $(filter-out $(shell dpkg --print-architecture),$(DEB_HOST_ARCH)),-d)
 	lintian $(DEBS)
 
 .PHONY: dsc
 dsc: $(DSC)
 $(DSC): $(BUILDDIR)
-	cd $(BUILDDIR); dpkg-buildpackage -S -us -uc -d
+	cd $(BUILDDIR); dpkg-buildpackage -S -us -uc -d 
 	lintian $(DSC)
 
 sbuild: $(DSC)

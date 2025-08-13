@@ -17,7 +17,7 @@ use PVE::CGroup;
 use PVE::Cluster qw (cfs_read_file cfs_write_file);
 use PVE::RRD;
 use PVE::SafeSyslog;
-use PVE::Tools qw(extract_param);
+use PVE::Tools qw(extract_param get_host_arch);
 use PVE::Exception qw(raise raise_param_exc raise_perm_exc);
 use PVE::Storage;
 use PVE::JSONSchema qw(get_standard_option);
@@ -28,7 +28,7 @@ use PVE::GuestImport;
 use PVE::QemuConfig;
 use PVE::QemuServer;
 use PVE::QemuServer::Cloudinit;
-use PVE::QemuServer::CPUConfig;
+use PVE::QemuServer::CPUConfig qw(get_default_cpu_type);
 use PVE::QemuServer::Drive qw(checked_volume_format checked_parse_volname);
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::ImportDisk;
@@ -737,6 +737,7 @@ my $memoryoptions = {
 
 my $hwtypeoptions = {
     'acpi' => 1,
+    'arch' => 1,
     'hotplug' => 1,
     'kvm' => 1,
     'machine' => 1,
@@ -751,22 +752,30 @@ my $hwtypeoptions = {
 
 my $generaloptions = {
     'agent' => 1,
+    'append' => 1,
     'autostart' => 1,
     'bios' => 1,
     'description' => 1,
+    'gicversion' =>1,
+    'kernel' =>1,
     'keyboard' => 1,
     'localtime' => 1,
     'migrate_downtime' => 1,
     'migrate_speed' => 1,
     'name' => 1,
+    'noboot' => 1,
     'onboot' => 1,
     'ostype' => 1,
     'protection' => 1,
+    'pxvditemplate' => 1,
+    'initrd' =>1,
     'reboot' => 1,
+    'snapshot' => 1,
     'startdate' => 1,
     'startup' => 1,
     'tdf' => 1,
     'template' => 1,
+    'uuid' => 1,
 };
 
 my $vmpoweroptions = {
@@ -1132,6 +1141,11 @@ __PACKAGE__->register_method({
                     description => "Assign a unique random ethernet address.",
                     requires => 'archive',
                 },
+                uuid =>{
+                    optional => 1,
+                    type => 'string',
+                    description => "VM  uuid.",
+                },
                 'live-restore' => {
                     optional => 1,
                     type => 'boolean',
@@ -1407,6 +1421,10 @@ __PACKAGE__->register_method({
                         $conf->{boot} = PVE::QemuServer::print_bootorder($devs);
                     }
 
+                    if (!$conf->{uuid}) {
+                        $conf->{uuid} = PVE::QemuServer::generate_uuid();
+                    }
+
                     my $vga = PVE::QemuServer::parse_vga($conf->{vga});
                     PVE::QemuServer::assert_clipboard_config($vga);
 
@@ -1415,10 +1433,40 @@ __PACKAGE__->register_method({
                         $conf->{smbios1} = PVE::QemuServer::generate_smbios1_uuid();
                     }
 
-                    if (
-                        (!defined($conf->{vmgenid}) || $conf->{vmgenid} eq '1')
-                        && $arch ne 'aarch64'
-                    ) {
+                    # set default bios to ovmf
+                    if (!$conf->{bios}){
+                        $conf->{bios} = 'ovmf';
+                    }
+
+                    # set default arch for vm
+                    my $hostarch = get_host_arch();
+                    if (!$conf->{arch}) {
+                        $conf->{arch} = $hostarch;
+                    }
+
+                    # We check the status of the kvm
+                    # if it is a different architecture, the kvm will be disabled in vm config.
+                    my $kvm = $conf->{kvm} // 1;
+                    if ($conf->{arch} ne $hostarch) {
+                        $kvm = 0;
+                    }
+                    $conf->{kvm} = $kvm;
+
+                    if (!$conf->{cpu}) {
+                        $conf->{cpu} = get_default_cpu_type($arch,$kvm);
+                    }
+
+                    # We detect the value of machine
+                    # and if not, force it to be specified
+                    if (!$conf->{machine}){
+                        if ($conf->{arch} eq 'x86_64'){
+                            $conf->{machine} = 'pc';
+                        }else{
+                            $conf->{machine} = 'virt';
+                        }
+                    }
+
+                    if ((!defined($conf->{vmgenid}) || $conf->{vmgenid} eq '1') && $arch eq 'x86_64') {
                         $conf->{vmgenid} = PVE::QemuServer::generate_uuid();
                     }
 
@@ -1543,6 +1591,7 @@ __PACKAGE__->register_method({
         my $res = [
             { subdir => 'config' },
             { subdir => 'cloudinit' },
+            { subdir => 'clonedisk' },
             { subdir => 'pending' },
             { subdir => 'status' },
             { subdir => 'unlink' },
@@ -1558,6 +1607,7 @@ __PACKAGE__->register_method({
             { subdir => 'snapshot' },
             { subdir => 'spiceproxy' },
             { subdir => 'sendkey' },
+            { subdir => 'showcmd'},
             { subdir => 'firewall' },
             { subdir => 'mtunnel' },
             { subdir => 'remote_migrate' },
@@ -1971,7 +2021,7 @@ my $update_vm_api = sub {
 
     my $skiplock = extract_param($param, 'skiplock');
     raise_param_exc({ skiplock => "Only root may use this option." })
-        if $skiplock && $authuser ne 'root@pam';
+        if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
     my $delete_str = extract_param($param, 'delete');
 
@@ -2509,6 +2559,107 @@ my $vm_config_perm_list = [
     'VM.Config.Options',
     'VM.Config.Cloudinit',
 ];
+__PACKAGE__->register_method({
+    name => 'create_linkclone_vmdisk',
+    path => '{vmid}/clonedisk',
+    method => 'POST',
+    description => "Create linkclone disk",
+	proxyto => 'node',
+	protected => 1,
+    permissions => {
+		description => "You need 'VM.Clone' permissions on /vms/{vmid}, and 'VM.Allocate' permissions " .
+	    "on /vms/{newid} (or on the VM pool /pool/{pool}). You also need " .
+	    "'Datastore.AllocateSpace' on any used storage and 'SDN.Use' on any used bridge/vnet",
+	check =>
+	[ 'and',
+	  ['perm', '/vms/{vmid}', [ 'VM.Clone' ]],
+	  [ 'or',
+	    [ 'perm', '/vms/{newid}', ['VM.Allocate']],
+	    [ 'perm', '/pool/{pool}', ['VM.Allocate'], require_param => 'pool'],
+	  ],
+	]
+    },
+    parameters => {
+	additionalProperties => 0,
+	properties => {
+		node => get_standard_option('pve-node'),
+	    vmid => get_standard_option('pve-vmid', { completion => \&PVE::QemuServer::complete_vmid }),
+	    'target-vmid' => get_standard_option('pve-vmid', {
+			completion => \&PVE::Cluster::complete_next_vmid,
+			description => 'VMID for the clone.' }
+		),
+		disk => {
+	        type => 'string',
+			description => "The disk you want to clone.",
+			enum => [PVE::QemuServer::Drive::valid_drive_names_with_unused()],
+	    },
+		delete => {
+			type => 'boolean',
+			description => "Delete the original disk after successful copy. By default the"
+		    ." original disk is kept as unused disk.",
+			optional => 1,
+			default => 1,
+	    },
+		'target-disk' => {
+	        type => 'string',
+			description => "The config key the disk will be link clone  to on the target VM"
+		    ." (for example, ide0 or scsi1). Default is the source disk key.",
+			enum => [PVE::QemuServer::Drive::valid_drive_names_with_unused()],
+			optional => 1,
+	    },
+		snapname => get_standard_option('pve-snapshot-name', {
+        }),
+	    },
+    },
+    returns => {
+		type => 'string',
+    },
+    code => sub {
+		my ($param) = @_;
+		my $rpcenv = PVE::RPCEnvironment::get();
+
+		my $authuser = $rpcenv->get_user();
+
+		my $vmid = $param->{vmid};
+		my $node = $param->{node};
+		my $targetvm = $param->{'target-vmid'};
+		my $disk = $param->{disk};
+		my $delete = $param->{delete} // 1;
+		my $targetdisk = $param->{'target-disk'} // $disk ;
+		my $snapname = $param->{snapname} ;
+		my $storecfg = PVE::Storage::config();
+		# check vm esists
+		my $vmlist = PVE::Cluster::get_vmlist()->{ids};
+		die "could not find target VM ${vmid}\n" if !exists($vmlist->{$vmid});
+		die "could not find target VM ${targetvm}\n" if !exists($vmlist->{$targetvm});
+		my $running = PVE::QemuServer::check_running($targetvm);
+
+		die "Could clone disk to running vm ${targetvm}\n" if $running;
+		my $targetvmconf = PVE::QemuConfig->load_config($targetvm);
+		my $targetdrive = PVE::QemuServer::parse_drive($targetdisk, $targetvmconf->{$targetdisk});
+		my $old_volid = $targetdrive->{file};
+		die "you can't clone a cdrom\n" if PVE::QemuServer::drive_is_cdrom($targetdrive, 1);
+		my $worker = sub {
+			my $upid = shift;
+			# remove old disk
+			if ($delete && $old_volid){
+				eval {
+					syslog('info', "destroy $old_volid $upid\n");
+					PVE::Storage::vdisk_free($storecfg, $old_volid);
+				};
+				warn  "old storage delete failed: $@" if $@;
+			}
+
+			syslog('info', "clone $vmid $disk to $targetvm $targetdisk $upid\n");
+			my $conf = PVE::QemuConfig->load_config($vmid);
+			my $drive = PVE::QemuServer::parse_drive($disk, $conf->{$disk});
+			$targetvmconf->{$targetdisk} = PVE::Storage::vdisk_clone_pxvirt($storecfg, $drive->{file}, $targetvm, $snapname);
+			PVE::QemuConfig->write_config($targetvm, $targetvmconf);
+		};
+
+		my $upid = $rpcenv->fork_worker('qmclonedisk' , $vmid, $authuser, $worker);
+		return $upid;
+}});
 
 __PACKAGE__->register_method({
     name => 'update_vm_async',
@@ -2689,12 +2840,15 @@ __PACKAGE__->register_method({
 
         my $skiplock = $param->{skiplock};
         raise_param_exc({ skiplock => "Only root may use this option." })
-            if $skiplock && $authuser ne 'root@pam';
+            if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
         my $early_checks = sub {
             # test if VM exists
             my $conf = PVE::QemuConfig->load_config($vmid);
             PVE::QemuConfig->check_protection($conf, "can't remove VM $vmid");
+
+            # We do not detect base disk like template VMS, and simply refuse to delete them.
+            die "can't remove pxvditemplate VM $vmid " if $conf->{pxvditemplate};
 
             my $ha_managed = PVE::HA::Config::service_is_configured("vm:$vmid");
 
@@ -3350,6 +3504,12 @@ __PACKAGE__->register_method({
                 description => "CIDR of the (sub) network that is used for migration.",
                 optional => 1,
             },
+            skiptemplate => {
+                description => "force start for template",
+                type => 'boolean',
+                default => '0',
+                optional => 1,
+            },
             machine => get_standard_option('pve-qemu-machine'),
             'force-cpu' => {
                 description => "Override QEMU's -cpu argument with the given string.",
@@ -3379,7 +3539,8 @@ __PACKAGE__->register_method({
         my $vmid = extract_param($param, 'vmid');
         my $timeout = extract_param($param, 'timeout');
         my $machine = extract_param($param, 'machine');
-
+        my $skiptemplate = extract_param($param, 'skiptemplate');
+        
         my $get_root_param = sub {
             my $value = extract_param($param, $_[0]);
             raise_param_exc({ "$_[0]" => "Only root may use this option." })
@@ -3480,6 +3641,7 @@ __PACKAGE__->register_method({
                     forcemachine => $machine,
                     timeout => $timeout,
                     forcecpu => $force_cpu,
+                    skiptemplate => $skiptemplate,
                 };
 
                 PVE::QemuServer::vm_start($storecfg, $vmid, $params, $migrate_opts);
@@ -3546,7 +3708,7 @@ __PACKAGE__->register_method({
 
         my $skiplock = extract_param($param, 'skiplock');
         raise_param_exc({ skiplock => "Only root may use this option." })
-            if $skiplock && $authuser ne 'root@pam';
+            if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
         my $keepActive = extract_param($param, 'keepActive');
         raise_param_exc({ keepActive => "Only root may use this option." })
@@ -3650,7 +3812,7 @@ __PACKAGE__->register_method({
 
         my $skiplock = extract_param($param, 'skiplock');
         raise_param_exc({ skiplock => "Only root may use this option." })
-            if $skiplock && $authuser ne 'root@pam';
+            if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
         die "VM $vmid not running\n" if !PVE::QemuServer::check_running($vmid);
 
@@ -3721,7 +3883,7 @@ __PACKAGE__->register_method({
 
         my $skiplock = extract_param($param, 'skiplock');
         raise_param_exc({ skiplock => "Only root may use this option." })
-            if $skiplock && $authuser ne 'root@pam';
+            if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
         my $keepActive = extract_param($param, 'keepActive');
         raise_param_exc({ keepActive => "Only root may use this option." })
@@ -3895,7 +4057,7 @@ __PACKAGE__->register_method({
 
         my $skiplock = extract_param($param, 'skiplock');
         raise_param_exc({ skiplock => "Only root may use this option." })
-            if $skiplock && $authuser ne 'root@pam';
+            if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
         die "VM $vmid not running\n" if !PVE::QemuServer::check_running($vmid);
 
@@ -3978,7 +4140,7 @@ __PACKAGE__->register_method({
 
         my $skiplock = extract_param($param, 'skiplock');
         raise_param_exc({ skiplock => "Only root may use this option." })
-            if $skiplock && $authuser ne 'root@pam';
+            if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
         # nocheck is used as part of migration when config file might be still
         # be on source node
@@ -4058,7 +4220,7 @@ __PACKAGE__->register_method({
 
         my $skiplock = extract_param($param, 'skiplock');
         raise_param_exc({ skiplock => "Only root may use this option." })
-            if $skiplock && $authuser ne 'root@pam';
+            if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
         PVE::QemuServer::vm_sendkey($vmid, $skiplock, $param->{key});
 
@@ -4223,6 +4385,11 @@ __PACKAGE__->register_method({
                 minimum => '0',
                 default => 'clone limit from datacenter or storage config',
             },
+            uuid =>{
+                optional => 1,
+                type => 'string',
+                description => "vm uuid.",
+            },
         },
     },
     returns => {
@@ -4243,6 +4410,7 @@ __PACKAGE__->register_method({
         my $storage = extract_param($param, 'storage');
         my $format = extract_param($param, 'format');
         my $target = extract_param($param, 'target');
+        my $uuid = extract_param($param, 'uuid');
 
         my $localnode = PVE::INotify::nodename();
 
@@ -4397,7 +4565,11 @@ __PACKAGE__->register_method({
                 $newconf->{vmgenid} = PVE::QemuServer::generate_uuid();
             }
 
+            # auto generate a new uuid only if the option was set for template
+            $newconf->{uuid} = $uuid // PVE::QemuServer::generate_uuid();
+
             delete $newconf->{template};
+            delete $newconf->{pxvditemplate};
 
             if ($param->{name}) {
                 $newconf->{name} = $param->{name};
@@ -5678,7 +5850,7 @@ __PACKAGE__->register_method({
 
         my $skiplock = extract_param($param, 'skiplock');
         raise_param_exc({ skiplock => "Only root may use this option." })
-            if $skiplock && $authuser ne 'root@pam';
+            if $skiplock && ($authuser ne 'root@pam' && !PVE::AccessControl::verify_root_api_key($authuser));
 
         my $storecfg = PVE::Storage::config();
 
@@ -6856,5 +7028,31 @@ __PACKAGE__->register_method({
         return { socket => $socket };
     },
 });
+
+__PACKAGE__->register_method ({
+    name => 'showcmd',
+    path => '{vmid}/showcmd',
+    method => 'GET',
+    description => "Show command line which is used to start the VM (debug info).",
+    parameters => {
+       additionalProperties => 0,
+       properties => {
+           node => get_standard_option('pve-node'),
+           vmid => get_standard_option('pve-vmid')
+       },
+    },
+    permissions => {
+        check => ['perm', '/vms/{vmid}', [ 'VM.Audit' ]],
+    },
+    returns => {
+        type => "string"
+    },
+    code => sub {
+        my ($param) = @_;
+
+        my $storecfg = PVE::Storage::config();
+        my $cmdline = PVE::QemuServer::vm_commandline($storecfg, $param->{vmid}, $param->{snapshot});
+        return "$cmdline";
+    }});
 
 1;

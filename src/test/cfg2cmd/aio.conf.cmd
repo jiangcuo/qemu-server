@@ -23,7 +23,7 @@
   -device 'VGA,id=vga,bus=pci.0,addr=0x2' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
-  -device 'lsi,id=scsihw0,bus=pci.0,addr=0x5' \
+  -device 'virtio-scsi-pci,id=scsihw0,bus=pci.0,addr=0x5' \
   -drive 'file=/var/lib/vz/images/8006/vm-8006-disk-0.raw,if=none,id=drive-scsi0,aio=threads,discard=on,format=raw,cache=none,detect-zeroes=unmap' \
   -device 'scsi-hd,bus=scsihw0.0,scsi-id=0,drive=drive-scsi0,id=scsi0' \
   -drive 'file=/var/lib/vz/images/8006/vm-8006-disk-1.raw,if=none,id=drive-scsi1,aio=native,discard=on,format=raw,cache=none,detect-zeroes=unmap' \
@@ -38,7 +38,7 @@
   -device 'scsi-hd,bus=scsihw0.0,scsi-id=5,drive=drive-scsi5,id=scsi5' \
   -drive 'file=/dev/rbd-pve/fc4181a6-56eb-4f68-b452-8ba1f381ca2a/cpool/vm-8006-disk-6,if=none,id=drive-scsi6,discard=on,format=raw,cache=none,aio=io_uring,detect-zeroes=unmap' \
   -device 'scsi-hd,bus=scsihw0.0,scsi-id=6,drive=drive-scsi6,id=scsi6' \
-  -device 'lsi,id=scsihw1,bus=pci.0,addr=0x6' \
+  -device 'virtio-scsi-pci,id=scsihw1,bus=pci.0,addr=0x6' \
   -drive 'file=/dev/rbd-pve/fc4181a6-56eb-4f68-b452-8ba1f381ca2a/cpool/vm-8006-disk-7,if=none,id=drive-scsi7,aio=io_uring,discard=on,format=raw,cache=none,detect-zeroes=unmap' \
   -device 'scsi-hd,bus=scsihw1.0,scsi-id=0,drive=drive-scsi7,id=scsi7' \
   -drive 'file=/dev/rbd-pve/fc4181a6-56eb-4f68-b452-8ba1f381ca2a/cpool/vm-8006-disk-8,if=none,id=drive-scsi8,cache=writeback,discard=on,format=raw,aio=threads,detect-zeroes=unmap' \

@@ -13,6 +13,7 @@ install: pve-usb.cfg pve-q35.cfg pve-q35-4.0.cfg bootsplash.jpg modules-load.con
 	install -m 0644 pve-q35.cfg $(SHAREDIR)
 	install -m 0644 pve-q35-4.0.cfg $(SHAREDIR)
 	install -m 0644 -D bootsplash.jpg $(SHAREDIR)
+	install -m 0644 pve-port.cfg $(SHAREDIR)
 	install -D -m 0644 modules-load.conf $(DESTDIR)/etc/modules-load.d/qemu-server.conf
 	install -d $(LIBEXECDIR)
 	install -m 0755 pve-bridge $(LIBEXECDIR)/pve-bridge

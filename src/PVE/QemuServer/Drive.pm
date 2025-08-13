@@ -24,6 +24,7 @@ our @EXPORT_OK = qw(
     get_scsi_devicetype
     parse_drive
     print_drive
+    max_spdk_disks
 );
 
 our $QEMU_FORMAT_RE = qr/raw|qcow|qcow2|qed|vmdk|cloop/;
@@ -157,6 +158,14 @@ our $NEW_DISK_RE = qr!^(([^/:\s]+):)?(\d+(\.\d+)?)$!;
 our $drivedesc_hash;
 # Schema when disk allocation is possible.
 our $drivedesc_hash_with_alloc = {};
+
+
+my $MAX_NVME_DISKS = 16;
+our $MAX_SPDK_DISKS = 6;
+sub max_spdk_disks {
+    return $MAX_SPDK_DISKS;
+}
+
 
 my %drivedesc_base = (
     volume => { alias => 'file' },
@@ -361,6 +370,34 @@ my %wwn_fmt = (
     },
 );
 
+my %nvme_sub_fmt = (
+    max_ioqpairs => {
+        type => 'integer',
+        format_description => 'max_ioqpairs',
+        description => "Set the maximum number of allowed I/O queue pairs. This replaces the deprecated num_queues parameter.",
+        optional => 1,
+    },
+    msix_qsize => {
+        type => 'integer',
+        format_description => 'msix_qsize',
+        description => "The number of MSI-X vectors that the device should support.",
+        optional => 1,
+    },
+    mdts => {
+        type => 'integer',
+        format_description => 'mdts',
+        description => "Set the Maximum Data Transfer Size of the device.",
+        optional => 1,
+    },
+    'use-intel-id' => {
+        type => 'boolean',
+        format_description => 'mdts',
+        description => "Set the Maximum Data Transfer Size of the device.",
+        optional => 1,
+        default => 1,
+    },
+);
+
 my $add_throttle_desc = sub {
     my ($key, $type, $what, $unit, $longunit, $minimum) = @_;
     my $d = {
@@ -496,6 +533,35 @@ my $scsidesc = {
         . ($MAX_SCSI_DISKS - 1) . ").",
 };
 PVE::JSONSchema::register_standard_option("pve-qm-scsi", $scsidesc);
+
+my $nvme_fmt = {
+    %drivedesc_base,
+    %iothread_fmt,
+    %readonly_fmt,
+    %nvme_sub_fmt,
+};
+my $nvmedesc = {
+    optional => 1,
+    type => 'string', format => $nvme_fmt,
+    description => "Use volume as NVME disk or CD-ROM (n is 0 to " . ($MAX_NVME_DISKS - 1) . ").",
+};
+PVE::JSONSchema::register_standard_option("pve-qm-nvme", $nvmedesc);
+
+# Add SPDK disk
+my $spdk_fmt = {
+    %drivedesc_base,
+    %iothread_fmt,
+    %readonly_fmt,
+};
+PVE::JSONSchema::register_format("pve-qm-spdk", $spdk_fmt);
+
+my $spdkdesc = {
+    optional => 1,
+    type => 'string', format => $spdk_fmt,
+    description => "Use volume as SPDK disk (n is 0 to " . ($MAX_SPDK_DISKS - 1) . ").",
+};
+
+PVE::JSONSchema::register_standard_option("pve-qm-spdk", $spdkdesc);
 
 my $sata_fmt = {
     %drivedesc_base, %ssd_fmt, %wwn_fmt,
@@ -688,6 +754,17 @@ my $desc_with_alloc = sub {
     return $new_desc;
 };
 
+for (my $i = 0; $i < $MAX_NVME_DISKS; $i++)  {
+    $drivedesc_hash->{"nvme$i"} = $nvmedesc;
+    $drivedesc_hash_with_alloc->{"nvme$i"} = $desc_with_alloc->('nvme', $nvmedesc);
+}
+
+for (my $i = 0; $i < $MAX_SPDK_DISKS; $i++)  {
+    $drivedesc_hash->{"spdk$i"} = $spdkdesc;
+    $drivedesc_hash_with_alloc->{"spdk$i"} = $desc_with_alloc->('spdk', $spdkdesc);
+}
+
+
 for (my $i = 0; $i < $MAX_IDE_DISKS; $i++) {
     $drivedesc_hash->{"ide$i"} = $idedesc;
     $drivedesc_hash_with_alloc->{"ide$i"} = $desc_with_alloc->('ide', $idedesc);
@@ -730,6 +807,8 @@ sub valid_drive_names {
         (map { "scsi$_" } (0 .. ($MAX_SCSI_DISKS - 1))),
         (map { "virtio$_" } (0 .. ($MAX_VIRTIO_DISKS - 1))),
         (map { "sata$_" } (0 .. ($MAX_SATA_DISKS - 1))),
+        (map { "nvme$_" } (0 .. ($MAX_NVME_DISKS - 1))),
+        (map { "spdk$_" } (0 .. ($MAX_SPDK_DISKS - 1))),
         'efidisk0',
         'tpmstate0',
     );
