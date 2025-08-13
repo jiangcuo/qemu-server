@@ -67,7 +67,6 @@ use PVE::QemuServer::Drive qw(
     checked_volume_format
     drive_is_cloudinit
     drive_is_cdrom
-    drive_is_read_only
     parse_drive
     print_drive
     storage_allows_io_uring_default
@@ -1272,6 +1271,15 @@ sub print_drivedevice_full {
 
         my $device_type = ($drive->{media} && $drive->{media} eq 'cdrom') ? "cd" : "hd";
 
+        # With ide-hd, the inserted block node needs to be marked as writable too, but -blockdev
+        # will complain if it's marked as writable but the actual backing device is read-only (e.g.
+        # read-only base LV). IDE/SATA do not support being configured as read-only, the most
+        # similar is using ide-cd instead of ide-hd, with most of the code and configuration shared
+        # in QEMU. Since a template is never actually started, the front-end device is never
+        # accessed. The backup only accesses the inserted block node, so it does not matter for the
+        # backup if the type is 'ide-cd' instead.
+        $device_type = 'cd' if $conf->{template};
+
         $device = "ide-$device_type";
         if ($drive->{interface} eq 'ide') {
             $device .= ",bus=ide.$controller,unit=$unit";
@@ -1334,6 +1342,13 @@ sub print_drive_commandline_full {
 
     my ($path, $format) =
         PVE::QemuServer::Drive::get_path_and_format($storecfg, $drive, $live_restore_name);
+
+    if ($scfg && $scfg->{'snapshot-as-volume-chain'} && $format && $format eq 'qcow2') {
+        # the print_drive_commandline_full() function is only used if machine version is < 10.0
+        die "storage for '$drive->{file}' is configured for snapshots as a volume chain - this"
+            . " requires QEMU machine version >= 10.0. See"
+            . " https://pve.proxmox.com/wiki/QEMU_Machine_Version_Upgrade\n";
+    }
 
     my $is_rbd = $path =~ m/^rbd:/;
 
@@ -3198,9 +3213,11 @@ sub config_to_command {
     my ($forcemachine, $forcecpu, $live_restore_backing, $dry_run) =
         $options->@{qw(force-machine force-cpu live-restore-backing dry-run)};
 
+    my $is_template = PVE::QemuConfig->is_template($conf);
+
     # minimize config for templates, they can only start for backup,
     # so most options besides the disks are irrelevant
-    if (PVE::QemuConfig->is_template($conf)) {
+    if ($is_template) {
         my $newconf = {
             template => 1, # in case below code checks that
             kvm => 0, # to prevent an error on hosts without virtualization extensions
@@ -3355,7 +3372,7 @@ sub config_to_command {
             q35 => $q35,
         };
         my ($ovmf_cmd, $ovmf_machine_flags) = PVE::QemuServer::OVMF::print_ovmf_commandline(
-            $conf, $storecfg, $vmid, $hw_info, $version_guard,
+            $conf, $storecfg, $vmid, $hw_info, $version_guard, $is_template,
         );
         push $cmd->@*, $ovmf_cmd->@*;
         push $machineFlags->@*, $ovmf_machine_flags->@*;
@@ -3455,7 +3472,7 @@ sub config_to_command {
 
     # Add a TPM only if the VM is not a template,
     # to support backing up template VMs even if the TPM disk is write-protected.
-    add_tpm_device($vmid, $devices, $conf) if (!PVE::QemuConfig->is_template($conf));
+    add_tpm_device($vmid, $devices, $conf) if !$is_template;
 
     my $sockets = 1;
     $sockets = $conf->{smp} if $conf->{smp}; # old style - no longer iused
@@ -3743,9 +3760,7 @@ sub config_to_command {
 
                     my $extra_blockdev_options = {};
                     $extra_blockdev_options->{'live-restore'} = $live_restore if $live_restore;
-                    # extra protection for templates, but SATA and IDE don't support it..
-                    $extra_blockdev_options->{'read-only'} = 1
-                        if drive_is_read_only($conf, $drive);
+                    $extra_blockdev_options->{'read-only'} = 1 if $is_template;
 
                     my $blockdev = PVE::QemuServer::Blockdev::generate_drive_blockdev(
                         $storecfg, $drive, $machine_version, $extra_blockdev_options,
@@ -3762,8 +3777,13 @@ sub config_to_command {
                 my $drive_cmd =
                     print_drive_commandline_full($storecfg, $vmid, $drive, $live_blockdev_name);
 
-                # extra protection for templates, but SATA and IDE don't support it..
-                $drive_cmd .= ',readonly=on' if drive_is_read_only($conf, $drive);
+                if ($is_template) {
+                    # TODO PVE 10.x - since the temporary config for starting templates for backup
+                    # uses the latest machine version, this should already be dead code. It's kept
+                    # for now if for whatever reason an older QEMU build is used (e.g. bisecting).
+                    my $interface = $drive->{interface};
+                    $drive_cmd .= ',readonly=on' if $interface ne 'ide' && $interface ne 'sata';
+                }
 
                 push @$devices, '-drive', $drive_cmd;
             }
@@ -3892,7 +3912,11 @@ sub config_to_command {
         print "activating and using '$vmstate' as vmstate\n";
     }
 
-    if (PVE::QemuConfig->is_template($conf)) {
+    if ($is_template) {
+        # TODO PVE 10.x - since the temporary config for starting templates for backup uses the
+        # latest machine version, this should already be dead code. It's kept for now if for
+        # whatever reason an older QEMU build is used (e.g. bisecting).
+
         # needed to workaround base volumes being read-only
         push @$cmd, '-snapshot';
     }
@@ -4447,12 +4471,17 @@ sub qemu_volume_snapshot {
         print "internal qemu snapshot\n";
         mon_cmd($vmid, 'blockdev-snapshot-internal-sync', device => $deviceid, name => $snap);
     } elsif ($do_snapshots_type eq 'external') {
+        my $machine_version = PVE::QemuServer::Machine::get_current_qemu_machine($vmid);
+        if (!PVE::QemuServer::Machine::is_machine_version_at_least($machine_version, 10, 0)) {
+            die "storage for '$volid' is configured for snapshots as a volume chain - this requires"
+                . " QEMU machine version >= 10.0. See"
+                . " https://pve.proxmox.com/wiki/QEMU_Machine_Version_Upgrade\n";
+        }
         my $storeid = (PVE::Storage::parse_volume_id($volid))[0];
         my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
         print "external qemu snapshot\n";
         my $snapshots = PVE::Storage::volume_snapshot_info($storecfg, $volid);
         my $parent_snap = $snapshots->{'current'}->{parent};
-        my $machine_version = PVE::QemuServer::Machine::get_current_qemu_machine($vmid);
         PVE::QemuServer::Blockdev::blockdev_external_snapshot(
             $storecfg, $vmid, $machine_version, $deviceid, $drive, $snap, $parent_snap,
         );
@@ -4489,6 +4518,13 @@ sub qemu_volume_snapshot_delete {
             name => $snap,
         );
     } elsif ($do_snapshots_type eq 'external') {
+        my $machine_version = PVE::QemuServer::Machine::get_current_qemu_machine($vmid);
+        if (!PVE::QemuServer::Machine::is_machine_version_at_least($machine_version, 10, 0)) {
+            die "storage for '$volid' is configured for snapshots as a volume chain - this requires"
+                . " QEMU machine version >= 10.0. See"
+                . " https://pve.proxmox.com/wiki/QEMU_Machine_Version_Upgrade\n";
+        }
+
         print "delete qemu external snapshot\n";
 
         my $path = PVE::Storage::path($storecfg, $volid);
@@ -4499,7 +4535,6 @@ sub qemu_volume_snapshot_delete {
 
         my $parentsnap = $snapshots->{$snap}->{parent};
         my $childsnap = $snapshots->{$snap}->{child};
-        my $machine_version = PVE::QemuServer::Machine::get_current_qemu_machine($vmid);
 
         # if we delete the first snasphot, we commit because the first snapshot original base image, it should be big.
         # improve-me: if firstsnap > child : commit, if firstsnap < child do a stream.
@@ -6102,6 +6137,9 @@ sub vm_stop_cleanup {
     my ($storecfg, $vmid, $conf, $keepActive, $apply_pending_changes, $noerr) = @_;
 
     eval {
+        # ensure that no dbus-vmstate helper is left running in any case
+        # at this point, it should never be still running, so quiesce any warnings
+        PVE::QemuServer::DBusVMState::qemu_del_dbus_vmstate($vmid, quiet => 1);
 
         if (!$keepActive) {
             my $vollist = get_vm_volumes($conf);
