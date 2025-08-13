@@ -70,6 +70,7 @@ use PVE::QemuServer::RNG qw(parse_rng print_rng_device_commandline print_rng_obj
 use PVE::QemuServer::USB;
 use PVE::QemuServer::Virtiofs qw(max_virtiofs start_all_virtiofsd);
 use PVE::QemuServer::Spdk qw(start_all_spdk);
+use PVE::QemuServer::Spdk qw(start_all_spdk);
 
 my $have_sdn;
 eval {
@@ -9769,6 +9770,23 @@ sub delete_ifaces_ipams_ips {
             };
             warn $@ if $@;
         }
+    }
+}
+
+sub generate_vm_uuid {
+    my ($vmid, $index) = @_;
+    return sprintf("%08d-0000-0000-0000-%012d", $index, $vmid);
+}
+
+sub get_drive_path {
+    my ($drive) = @_;
+    my $cfg = PVE::Storage::config();
+    my $path = PVE::Storage::path($cfg, $drive);
+
+    if (-e $path) {
+        return $path;
+    } else {
+        die "Custom file not found at $path\n";
     }
 }
 
