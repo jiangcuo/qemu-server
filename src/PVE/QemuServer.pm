@@ -71,6 +71,7 @@ use PVE::QemuServer::Drive qw(
     print_drive
     storage_allows_io_uring_default
 );
+use PVE::QemuServer::DriveDevice qw(print_drivedevice_full scsihw_infos);
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::QemuServer::MetaInfo;
@@ -1267,6 +1268,7 @@ sub print_keyboarddevice_full {
     return "usb-kbd,id=keyboard,bus=ehci.0,port=2";
 }
 
+<<<<<<< HEAD
 sub print_drivedevice_full {
     my ($storecfg, $conf, $vmid, $drive, $bridges, $arch, $machine_type) = @_;
 
@@ -1419,6 +1421,8 @@ sub print_drivedevice_full {
     return $device;
 }
 
+=======
+>>>>>>> 87ad8fd1 (introduce DriveDevice module)
 sub print_drive_commandline_full {
     my ($storecfg, $vmid, $drive, $live_restore_name) = @_;
 
@@ -8310,28 +8314,6 @@ sub vm_iothreads_list {
     }
 
     return $iothreads;
-}
-
-sub scsihw_infos {
-    my ($conf, $drive) = @_;
-
-    my $maxdev = 0;
-
-    if (!$conf->{scsihw} || ($conf->{scsihw} =~ m/^lsi/)) {
-        $maxdev = 7;
-    } elsif ($conf->{scsihw} && ($conf->{scsihw} eq 'virtio-scsi-single')) {
-        $maxdev = 1;
-    } else {
-        $maxdev = 256;
-    }
-
-    my $controller = int($drive->{index} / $maxdev);
-    my $controller_prefix =
-        ($conf->{scsihw} && $conf->{scsihw} eq 'virtio-scsi-single')
-        ? "virtioscsi"
-        : "scsihw";
-
-    return ($maxdev, $controller, $controller_prefix);
 }
 
 sub resolve_dst_disk_format {
