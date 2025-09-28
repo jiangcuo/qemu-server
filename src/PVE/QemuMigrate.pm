@@ -195,8 +195,6 @@ sub prepare {
     # test if VM exists
     my $conf = $self->{vmconf} = PVE::QemuConfig->load_config($vmid);
 
-    my $version = PVE::QemuServer::Helpers::get_node_pvecfg_version($self->{node});
-
     my $repl_conf = PVE::ReplicationConfig->new();
     $self->{replication_jobcfg} = $repl_conf->find_local_replication_job($vmid, $self->{node});
     $self->{is_replicated} = $repl_conf->check_for_existing_jobs($vmid, 1);
@@ -1006,6 +1004,10 @@ sub phase2_start_local_cluster {
         push @$cmd, '--force-cpu', $start->{forcecpu};
     }
 
+    if ($start->{'nets-host-mtu'}) {
+        push @$cmd, '--nets-host-mtu', $start->{'nets-host-mtu'};
+    }
+
     if ($self->{storage_migration}) {
         push @$cmd, '--targetstorage', ($self->{opts}->{targetstorage} // '1');
     }
@@ -1057,6 +1059,7 @@ sub phase2_start_local_cluster {
     };
 
     my $target_replicated_volumes = {};
+    my $target_nets_host_mtu_not_supported;
 
     # Note: We try to keep $spice_ticket secret (do not pass via command line parameter)
     # instead we pipe it through STDIN
@@ -1114,10 +1117,15 @@ sub phase2_start_local_cluster {
         },
         errfunc => sub {
             my $line = shift;
+            $target_nets_host_mtu_not_supported = 1
+                if $line =~ m/^Unknown option: nets-host-mtu/;
             $self->log('info', "[$self->{node}] $line");
         },
         noerr => 1,
     );
+
+    die "target node $self->{node} is too old for preserving VirtIO-net MTU, please upgrade\n"
+        if $target_nets_host_mtu_not_supported;
 
     die "remote command failed with exit code $exitcode\n" if $exitcode;
 
@@ -1194,6 +1202,10 @@ sub phase2 {
             nbd => $self->{nbd},
         },
     };
+
+    if (my $nets_host_mtu = PVE::QemuServer::Network::get_nets_host_mtu($vmid, $conf)) {
+        $params->{start_params}->{'nets-host-mtu'} = $nets_host_mtu;
+    }
 
     my ($tunnel_info, $spice_port);
 

@@ -478,6 +478,14 @@ sub generate_drive_blockdev {
         };
     }
 
+    if ($drive->{scsiblock}) {
+        # When using scsi-block for the front-end device, throttling would not work in any case, and
+        # the throttle block driver doesn't allow doing the necessary ioctls(), so don't attach a
+        # throttle filter. Implementing live mirroring for such disks would require special care!
+        $child->{'node-name'} = top_node_name($drive_id);
+        return $child;
+    }
+
     # for fleecing and TPM backup, this is already the top node
     return $child if $options->{fleecing} || $options->{'tpm-backup'} || $options->{'no-throttle'};
 
@@ -920,9 +928,15 @@ sub blockdev_replace {
     my $volid = $drive->{file};
     my $drive_id = PVE::QemuServer::Drive::get_drive_id($drive);
 
-    my $src_name_options = $src_snap eq 'current' ? {} : { 'snapshot-name' => $src_snap };
-    my $src_file_blockdev_name = get_node_name('file', $drive_id, $volid, $src_name_options);
-    my $src_fmt_blockdev_name = get_node_name('fmt', $drive_id, $volid, $src_name_options);
+    my $src_name_options = {};
+    my $src_blockdev_name;
+    if ($src_snap eq 'current') {
+        # there might be other nodes on top like zeroinit, look up the current node below throttle
+        $src_blockdev_name = get_node_name_below_throttle($vmid, $deviceid, 1);
+    } else {
+        $src_name_options = { 'snapshot-name' => $src_snap };
+        $src_blockdev_name = get_node_name('fmt', $drive_id, $volid, $src_name_options);
+    }
 
     my $target_file_blockdev = generate_file_blockdev(
         $storecfg,
@@ -985,7 +999,7 @@ sub blockdev_replace {
     }
 
     # delete old file|fmt nodes
-    eval { detach($vmid, $src_fmt_blockdev_name); };
+    eval { detach($vmid, $src_blockdev_name); };
     warn "detaching block node for $src_snap failed - $@" if $@;
 }
 

@@ -732,6 +732,7 @@ my $check_cpu_model_access = sub {
 my $cpuoptions = {
     'cores' => 1,
     'cpu' => 1,
+    'runningcpu' => 1,
     'cpulimit' => 1,
     'cpuunits' => 1,
     'numa' => 1,
@@ -752,6 +753,7 @@ my $hwtypeoptions = {
     'hotplug' => 1,
     'kvm' => 1,
     'machine' => 1,
+    'runningmachine' => 1,
     'scsihw' => 1,
     'smbios1' => 1,
     'tablet' => 1,
@@ -966,7 +968,7 @@ my $check_vm_modify_config_perm = sub {
             $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.PowerMgmt']);
         } elsif ($diskoptions->{$opt}) {
             $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.Disk']);
-        } elsif ($opt =~ m/^net\d+$/) {
+        } elsif ($opt =~ m/^net\d+$/ || $opt eq 'running-nets-host-mtu') {
             $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.Network']);
         } elsif ($cloudinitoptions->{$opt} || $opt =~ m/^ipconfig\d+$/) {
             $rpcenv->check_vm_perm(
@@ -1682,7 +1684,8 @@ __PACKAGE__->register_method({
 
         my $path = "pve-vm-9.0/$param->{vmid}";
         $path = "pve2-vm/$param->{vmid}" if !-e "/var/lib/rrdcached/db/${path}";
-        return PVE::RRD::create_rrd_graph($path, $param->{timeframe}, $param->{cf});
+        return PVE::RRD::create_rrd_graph($path, $param->{timeframe}, $param->{ds},
+            $param->{cf});
 
     },
 });
@@ -2163,6 +2166,7 @@ my $update_vm_api = sub {
             }
             push @delete, 'runningmachine' if $conf->{runningmachine};
             push @delete, 'runningcpu' if $conf->{runningcpu};
+            push @delete, 'running-nets-host-mtu' if $conf->{'running-nets-host-mtu'};
         }
 
         PVE::QemuConfig->check_lock($conf) if !$skiplock;
@@ -3545,6 +3549,16 @@ __PACKAGE__->register_method({
                 default => 0,
                 description => 'Whether to migrate conntrack entries for running VMs.',
             },
+            'nets-host-mtu' => {
+                type => 'string',
+                pattern => 'net\d+=\d+(,net\d+=\d+)*',
+                optional => 1,
+                description =>
+                    'Used for migration compat. List of VirtIO network devices and their effective'
+                    . ' host_mtu setting according to the QEMU object model on the source side of'
+                    . ' the migration. A value of 0 means that the host_mtu parameter is to be'
+                    . ' avoided for the corresponding device.',
+            },
         },
     },
     returns => {
@@ -3576,6 +3590,7 @@ __PACKAGE__->register_method({
         my $targetstorage = $get_root_param->('targetstorage');
         my $force_cpu = $get_root_param->('force-cpu');
         my $with_conntrack_state = $get_root_param->('with-conntrack-state');
+        my $nets_host_mtu = $get_root_param->('nets-host-mtu');
 
         my $storagemap;
 
@@ -3664,6 +3679,7 @@ __PACKAGE__->register_method({
                     timeout => $timeout,
                     forcecpu => $force_cpu,
                     skiptemplate => $skiptemplate,
+                    'nets-host-mtu' => $nets_host_mtu,
                 };
 
                 PVE::QemuServer::vm_start($storecfg, $vmid, $params, $migrate_opts);
@@ -4511,7 +4527,10 @@ __PACKAGE__->register_method({
                     || $opt eq 'parent'
                     || $opt eq 'snaptime'
                     || $opt eq 'vmstate'
-                    || $opt eq 'snapstate';
+                    || $opt eq 'snapstate'
+                    || $opt eq 'runningcpu'
+                    || $opt eq 'runningmachine'
+                    || $opt eq 'running-nets-host-mtu';
 
                 # no need to copy unused images, because VMID(owner) changes anyways
                 next if $opt =~ m/^unused\d+$/;
@@ -4795,8 +4814,8 @@ __PACKAGE__->register_method({
             digest => {
                 type => 'string',
                 description =>
-                    'Prevent changes if current configuration file has different SHA1"
-		    ." digest. This can be used to prevent concurrent modifications.',
+                    'Prevent changes if current configuration file has different SHA1'
+                    . ' digest. This can be used to prevent concurrent modifications.',
                 maxLength => 40,
                 optional => 1,
             },
@@ -4817,8 +4836,8 @@ __PACKAGE__->register_method({
             'target-digest' => {
                 type => 'string',
                 description =>
-                    'Prevent changes if the current config file of the target VM has a"
-		    ." different SHA1 digest. This can be used to detect concurrent modifications.',
+                    'Prevent changes if the current config file of the target VM has a'
+                    . ' different SHA1 digest. This can be used to detect concurrent modifications.',
                 maxLength => 40,
                 optional => 1,
             },
@@ -7128,7 +7147,7 @@ __PACKAGE__->register_method({
     path => '{vmid}/dbus-vmstate',
     method => 'POST',
     proxyto => 'node',
-    description => 'Stop the dbus-vmstate helper for the given VM if running.',
+    description => 'Control the dbus-vmstate helper for a given running VM.',
     permissions => {
         check => ['perm', '/vms/{vmid}', ['VM.Migrate']],
     },

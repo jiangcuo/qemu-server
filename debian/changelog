@@ -1,14 +1,85 @@
+qemu-server (9.0.22) trixie; urgency=medium
+
+  * partially fix #6805:
+    - api: modify vm config: privilege checks for VM-state-related
+      properties.
+    - api: clone: properly remove all snapshot-related info.
+
+  * api: create/update: disallow setting 'running-nets-host-mtu' via API.
+
+  * resume from suspended: properly handle 'nets-host-mtu'.
+
+  * vm command line: handle 'nets-host-mtu' property in snapshot.
+
+  * vm start: remove left-over VM-state-related properties.
+
+  * api schema: fix broken line continuation in the description for three
+    properties.
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 17 Sep 2025 18:37:06 +0200
+
+qemu-server (9.0.21) trixie; urgency=medium
+
+  * fix #6608: expose vIOMMU driver address space bit width 'aw-bits' option.
+
+  * migration: tell users to upgrade the target node if nets-host-mtu is not
+    supported by the target qemu-server package version.
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 10 Sep 2025 15:17:11 +0200
+
+qemu-server (9.0.20) trixie; urgency=medium
+
+  * api: rrd: add missing ds parameter for generating PNG graph.
+
+  * virtio-net: fix migration between default/non-default MTUs starting with
+    machine version 10.0+pve1.
+
+  * api: vm start: introduce nets-host-mtu parameter for migration compat.
+
+  * snapshot: introduce running-nets-host-mtu property.
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 04 Sep 2025 19:49:27 +0200
+
+qemu-server (9.0.19) trixie; urgency=medium
+
+  * fix generating block-dev option on VM live import.
+
+  * fix #6680: do not use a top throttle node when using scsi-block, like for
+    passthrough of SCSI devices and 10+ machine version, as passed through
+    disks do not support bandwidth limitations.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 26 Aug 2025 09:35:28 +0200
+
+qemu-server (9.0.18) trixie; urgency=medium
+
+  * close #6378: expose guest-phys-bits CPU option to cope with using the host
+    CPU type on CPU models where the CPU address width and the IOMMU address
+    width are different. On such systems the guest-phys-bits option needs to
+    be set to properly support huge pages and/or VFIO.
+
+  * fix #6675: template backup: fix regression with IDE/SATA and blockdev.
+
+  * fix #6680: avoid setting nonexistent 'write-cache' and 'drive_id' options
+    for passed-through disks using SCSI with machine version >= 10.0.
+
+  * dbus-vmstate: fix installation path for script.
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 14 Aug 2025 12:33:11 +0200
+
 qemu-server (9.0.17) trixie; urgency=medium
 
-  * fix #6648: api: machine versions: fix ordering
+  * fix #6648: api: available machine versions: ensure array of versions is
+    correctly ordered numerically.
 
-  * prohibit using snapshot-as-volume-chain qcow2 images with pre-10.0 machines
+  * prohibit using snapshot-as-volume-chain qcow2 images with VMs that use a
+    pre-10.0 machine version.
 
-  * qmp client: add $noerr argument
+  * blockdev: attach/detach: silence errors for QMP commands for which failure
+    may be expected.
 
-  * blockdev: attach/detach: silence errors for QMP commands for which failure may be expected
-
-  * blockdev: delete/replace: re-use detach() helper
+  * blockdev: delete/replace: re-use common detach helper to avoid
+    false-positive errors in the syslog for devices that QEMU already
+    auto-removes itself.
 
  -- Proxmox Support Team <support@proxmox.com>  Tue, 12 Aug 2025 15:10:38 +0200
 

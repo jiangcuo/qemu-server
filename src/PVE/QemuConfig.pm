@@ -243,10 +243,11 @@ sub __snapshot_save_vmstate {
     my $runningmachine = PVE::QemuServer::Machine::get_current_qemu_machine($vmid);
 
     # get current QEMU -cpu argument to ensure consistency of custom CPU models
-    my $runningcpu;
-    if (my $pid = PVE::QemuServer::check_running($vmid)) {
-        $runningcpu = PVE::QemuServer::CPUConfig::get_cpu_from_running_vm($pid);
-    }
+    my $pid = PVE::QemuServer::Helpers::vm_running_locally($vmid)
+        or die "cannot obtain PID for VM $vmid!\n";
+    my $runningcpu = PVE::QemuServer::CPUConfig::get_cpu_from_running_vm($pid);
+
+    my $nets_host_mtu = PVE::QemuServer::Network::get_nets_host_mtu($vmid, $conf);
 
     if (!$suspend) {
         $conf = $conf->{snapshots}->{$snapname};
@@ -255,6 +256,7 @@ sub __snapshot_save_vmstate {
     $conf->{vmstate} = $statefile;
     $conf->{runningmachine} = $runningmachine;
     $conf->{runningcpu} = $runningcpu;
+    $conf->{'running-nets-host-mtu'} = $nets_host_mtu;
 
     return $statefile;
 }
@@ -474,6 +476,8 @@ sub __snapshot_rollback_hook {
             # re-initializing its random number generator
             $conf->{vmgenid} = PVE::QemuServer::generate_uuid();
         }
+
+        $data->{'nets-host-mtu'} = delete($conf->{'running-nets-host-mtu'});
     }
 
     return;
@@ -514,6 +518,7 @@ sub __snapshot_rollback_vm_start {
         statefile => $vmstate,
         forcemachine => $data->{forcemachine},
         forcecpu => $data->{forcecpu},
+        'nets-host-mtu' => $data->{'nets-host-mtu'},
     };
     PVE::QemuServer::vm_start($storecfg, $vmid, $params);
 }

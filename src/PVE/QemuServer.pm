@@ -693,6 +693,15 @@ EODESCR
         pattern => $PVE::QemuServer::CPUConfig::qemu_cmdline_cpu_re,
         format_description => 'QEMU -cpu parameter',
     },
+    'running-nets-host-mtu' => {
+        type => 'string',
+        pattern => 'net\d+=\d+(,net\d+=\d+)*',
+        optional => 1,
+        description =>
+            'List of VirtIO network devices and their effective host_mtu setting. A value of 0'
+            . ' means that the host_mtu parameter is to be avoided for the corresponding device.'
+            . ' This is used internally for snapshots.',
+    },
     machine => get_standard_option('pve-qemu-machine'),
     arch => {
         description => "Virtual processor architecture. Defaults to the host.",
@@ -796,8 +805,8 @@ my $cicustom_fmt = {
     meta => {
         type => 'string',
         optional => 1,
-        description => 'Specify a custom file containing all meta data passed to the VM via"
-	    ." cloud-init. This is provider specific meaning configdrive2 and nocloud differ.',
+        description => 'Specify a custom file containing all meta data passed to the VM via'
+            . ' cloud-init. This is provider specific meaning configdrive2 and nocloud differ.',
         format => 'pve-volume-id',
         format_description => 'volume',
     },
@@ -1265,6 +1274,7 @@ sub print_drivedevice_full {
     my $maxdev = 0;
 
     my $machine_version = extract_version($machine_type, kvm_user_version());
+    my $has_write_cache = 1; # whether the device has a 'write-cache' option
 
     my $drive_id = PVE::QemuServer::Drive::get_drive_id($drive);
     if ($drive->{interface} eq 'virtio') {
@@ -1296,8 +1306,11 @@ sub print_drivedevice_full {
         }
         $device .= ",id=$drive_id";
 
-        # for the switch to -blockdev, the SCSI device ID needs to be explicitly specified
-        if (min_version($machine_version, 10, 0)) {
+        # For the switch to -blockdev, the SCSI device ID needs to be explicitly specified. Note
+        # that only ide-cd and ide-hd have a 'device_id' option.
+        if (
+            min_version($machine_version, 10, 0) && ($device_type eq 'cd' || $device_type eq 'hd')
+        ) {
             $device .= ",device_id=drive-${drive_id}";
         }
 
@@ -1306,7 +1319,8 @@ sub print_drivedevice_full {
         }
         $device .= ",wwn=$drive->{wwn}" if $drive->{wwn};
 
-        # only scsi-hd and scsi-cd support passing vendor and product information
+        # only scsi-hd and scsi-cd support passing vendor and product information and have a
+        # 'write-cache' option
         if ($device_type eq 'hd' || $device_type eq 'cd') {
             if (my $vendor = $drive->{vendor}) {
                 $device .= ",vendor=$vendor";
@@ -1314,6 +1328,10 @@ sub print_drivedevice_full {
             if (my $product = $drive->{product}) {
                 $device .= ",product=$product";
             }
+
+            $has_write_cache = 1;
+        } else {
+            $has_write_cache = 0;
         }
 
     } elsif ($drive->{interface} eq 'ide' || $drive->{interface} eq 'sata') {
@@ -1386,7 +1404,7 @@ sub print_drivedevice_full {
     }
 
     if (min_version($machine_version, 10, 0)) { # for the switch to -blockdev
-        if (!drive_is_cdrom($drive)) {
+        if (!drive_is_cdrom($drive) && $has_write_cache) {
             my $write_cache = 'on';
             if (my $cache = $drive->{cache}) {
                 $write_cache = 'off' if $cache eq 'writethrough' || $cache eq 'directsync';
@@ -1518,7 +1536,17 @@ sub print_pbs_blockdev {
 }
 
 sub print_netdevice_full {
-    my ($vmid, $conf, $net, $netid, $bridges, $use_old_bios_files, $arch, $machine_version) = @_;
+    my (
+        $vmid,
+        $conf,
+        $net,
+        $netid,
+        $bridges,
+        $use_old_bios_files,
+        $arch,
+        $machine_version,
+        $host_mtu_migration, # force this value for host_mtu, 0 means force absence of param
+    ) = @_;
 
     my $device = $net->{model};
     if ($net->{model} eq 'virtio') {
@@ -1545,21 +1573,44 @@ sub print_netdevice_full {
 
     my $mtu = $net->{mtu};
 
-    if ($net->{model} eq 'virtio' && $net->{bridge}) {
+    my $migration_skip_host_mtu = defined($host_mtu_migration) && $host_mtu_migration == 0;
+    print "netdev $netid: not adding 'host_mtu' parameter for migration compat\n"
+        if $migration_skip_host_mtu;
+
+    if ($net->{model} eq 'virtio' && $net->{bridge} && !$migration_skip_host_mtu) {
         my $bridge_mtu = PVE::Network::read_bridge_mtu($net->{bridge});
+
+        if ($host_mtu_migration) {
+            print "netdev $netid: using 'host_mtu=$host_mtu_migration' for migration compat\n";
+            $mtu = $host_mtu_migration;
+        }
 
         if (!defined($mtu) || $mtu == 1) {
             $mtu = $bridge_mtu;
         } elsif ($mtu < 576) {
             die "netdev $netid: MTU '$mtu' is smaller than the IP minimum MTU '576'\n";
         } elsif ($mtu > $bridge_mtu) {
-            die "netdev $netid: MTU '$mtu' is bigger than the bridge MTU '$bridge_mtu'\n";
+            die "netdev $netid: MTU '$mtu' is bigger than the bridge MTU '$bridge_mtu'"
+                . " - adjust the MTU for the network device in the VM configuration, while ensuring"
+                . " that the bridge is configured as desired.\n";
         }
 
-        $tmpstr .= ",host_mtu=$mtu" if $mtu != 1500;
+        if (min_version($machine_version, 10, 0, 1) || $host_mtu_migration) {
+            # Always add host_mtu for migration compatibility, because the presence of host_mtu
+            # means that the virtual hardware is generated differently (at least for i440fx)
+            $tmpstr .= ",host_mtu=$mtu";
+        } else {
+            $tmpstr .= ",host_mtu=$mtu" if $mtu != 1500;
+        }
     } elsif (defined($mtu)) {
-        warn
-            "WARN: netdev $netid: ignoring MTU '$mtu', not using VirtIO or no bridge configured.\n";
+        my $msg_prefix = "netdev $netid: ignoring MTU '$mtu'";
+        if ($migration_skip_host_mtu) {
+            log_warn("$msg_prefix, not used on the source side according to migration parameters");
+        } elsif (!$net->{bridge}) {
+            log_warn("$msg_prefix, no bridge configured");
+        } else {
+            log_warn("$msg_prefix, not using VirtIO");
+        }
     }
 
     if ($use_old_bios_files) {
@@ -1882,6 +1933,7 @@ sub json_config_properties {
         parent => 1,
         snaptime => 1,
         vmstate => 1,
+        'running-nets-host-mtu' => 1,
         runningmachine => 1,
         runningcpu => 1,
         meta => 1,
@@ -2757,8 +2809,8 @@ sub vmstatus {
         $d->{netout} = 0;
         $d->{netin} = 0;
 
-        $d->{diskread} = 0;
-        $d->{diskwrite} = 0;
+        $d->{diskread} = undef;
+        $d->{diskwrite} = undef;
 
         $d->{template} = 1 if PVE::QemuConfig->is_template($conf);
         $d->{pxvditemplate} = 1 if $conf->{pxvditemplate};
@@ -2913,9 +2965,15 @@ sub vmstatus {
         $res->{$vmid}->{'running-qemu'} = $version;
     };
 
+    my $proxmox_support_cb = sub {
+        my ($vmid, $resp) = @_;
+        $res->{$vmid}->{'proxmox-support'} = $resp->{'return'} // {};
+    };
+
     my $statuscb = sub {
         my ($vmid, $resp) = @_;
 
+        $qmpclient->queue_cmd($vmid, $proxmox_support_cb, 'query-proxmox-support');
         $qmpclient->queue_cmd($vmid, $blockstatscb, 'query-blockstats');
         $qmpclient->queue_cmd($vmid, $machinecb, 'query-machines');
         $qmpclient->queue_cmd($vmid, $versioncb, 'query-version');
@@ -2939,16 +2997,6 @@ sub vmstatus {
     }
 
     $qmpclient->queue_execute(undef, 2);
-
-    foreach my $vmid (keys %$list) {
-        next if $opt_vmid && ($vmid ne $opt_vmid);
-        next if !$res->{$vmid}->{pid}; #not running
-
-        # we can't use the $qmpclient since it might have already aborted on
-        # 'query-balloon', but this might also fail for older versions...
-        my $qemu_support = eval { mon_cmd($vmid, "query-proxmox-support") };
-        $res->{$vmid}->{'proxmox-support'} = $qemu_support // {};
-    }
 
     foreach my $vmid (keys %$list) {
         next if $opt_vmid && ($vmid ne $opt_vmid);
@@ -3909,6 +3957,8 @@ sub config_to_command {
         },
     );
 
+    my $nets_host_mtu =
+        { map { split('=', $_) } PVE::Tools::split_list($options->{'nets-host-mtu'}) };
     for (my $i = 0; $i < $MAX_NETS; $i++) {
         my $netname = "net$i";
 
@@ -3924,6 +3974,8 @@ sub config_to_command {
         my $netdevfull = print_netdev_full($vmid, $conf, $arch, $d, $netname);
         push @$devices, '-netdev', $netdevfull;
 
+        # force +pve1 if machine version 10.0, for host_mtu differentiation
+        $version_guard->(10, 0, 1);
         my $netdevicefull = print_netdevice_full(
             $vmid,
             $conf,
@@ -3933,6 +3985,7 @@ sub config_to_command {
             $use_old_bios_files,
             $arch,
             $machine_version,
+            $nets_host_mtu->{$netname},
         );
 
         push @$devices, '-device', $netdevicefull;
@@ -4017,11 +4070,22 @@ sub config_to_command {
     }
 
     if (my $viommu = $machine_conf->{viommu}) {
+        my $viommu_devstr = '';
+        if ($machine_conf->{'aw-bits'}) {
+            $viommu_devstr .= ",aw-bits=$machine_conf->{'aw-bits'}";
+
+            # TODO remove message once this gets properly checked/warned about in QEMU itself.
+            print "vIOMMU 'aw-bits' set to $machine_conf->{'aw-bits'}. Sometimes it is necessary to"
+                . " set the CPU's 'guest-phys-bits' to the same value.\n";
+        }
+
         if ($viommu eq 'intel' && $arch eq 'x86_64') {
-            unshift @$devices, '-device', 'intel-iommu,intremap=on,caching-mode=on';
+            $viommu_devstr = "intel-iommu,intremap=on,caching-mode=on$viommu_devstr";
+            unshift @$devices, '-device', $viommu_devstr;
             push @$machineFlags, 'kernel-irqchip=split';
         } elsif ($viommu eq 'virtio') {
-            push @$devices, '-device', 'virtio-iommu-pci';
+            $viommu_devstr = "virtio-iommu-pci$viommu_devstr";
+            push @$devices, '-device', $viommu_devstr;
         }
     }
 
@@ -5623,6 +5687,20 @@ sub vm_migrate_alloc_nbd_disks {
     return $nbd;
 }
 
+my sub remove_left_over_vmstate_opts {
+    my ($vmid, $conf) = @_;
+
+    my $found;
+    for my $opt (qw(running-nets-host-mtu runningmachine runningcpu)) {
+        if (defined($conf->{$opt})) {
+            print "No VM state set, removing left-over option '$opt'\n";
+            delete $conf->{$opt};
+            $found = 1;
+        }
+    }
+    PVE::QemuConfig->write_config($vmid, $conf) if $found;
+}
+
 # see vm_start_nolock for parameters, additionally:
 # migrate_opts:
 #   storagemap = parsed storage map for allocating NBD disks
@@ -5687,6 +5765,8 @@ sub vm_start {
 #      },
 #      virtio2 => ...
 #   }
+#   nets-host-mtu => Used for migration compat. List of VirtIO network devices and their effective
+#       host_mtu setting according to the QEMU object model on the source side of the migration.
 # migrate_opts:
 #   nbd => volumes for NBD exports (vm_migrate_alloc_nbd_disks)
 #   migratedfrom => source node
@@ -5749,10 +5829,12 @@ sub vm_start_nolock {
 
     my $forcemachine = $params->{forcemachine};
     my $forcecpu = $params->{forcecpu};
+    my $nets_host_mtu = $params->{'nets-host-mtu'};
     if ($resume) {
         # enforce machine and CPU type on suspended vm to ensure HW compatibility
         $forcemachine = $conf->{runningmachine};
         $forcecpu = $conf->{runningcpu};
+        $nets_host_mtu = $conf->{'running-nets-host-mtu'};
         print "Resuming suspended VM\n";
     }
 
@@ -5799,6 +5881,7 @@ sub vm_start_nolock {
                 'force-machine' => $forcemachine,
                 'force-cpu' => $forcecpu,
                 'live-restore-backing' => $params->{'live-restore-backing'},
+                'nets-host-mtu' => $nets_host_mtu,
             },
         );
 
@@ -6101,8 +6184,10 @@ sub vm_start_nolock {
             PVE::Storage::deactivate_volumes($storecfg, [$vmstate]);
             PVE::Storage::vdisk_free($storecfg, $vmstate);
         }
-        delete $conf->@{qw(lock vmstate runningmachine runningcpu)};
+        delete $conf->@{qw(lock vmstate running-nets-host-mtu runningmachine runningcpu)};
         PVE::QemuConfig->write_config($vmid, $conf);
+    } elsif (!$conf->{vmstate}) {
+        remove_left_over_vmstate_opts($vmid, $conf);
     }
 
     PVE::GuestHelpers::exec_hookscript($conf, $vmid, 'post-start');
@@ -6132,6 +6217,7 @@ sub vm_commandline {
         # check for machine or CPU overrides in snapshot
         $options->{'force-machine'} = $snapshot->{runningmachine};
         $options->{'force-cpu'} = $snapshot->{runningcpu};
+        $options->{'nets-host-mtu'} = $snapshot->{'running-nets-host-mtu'};
 
         $snapshot->{digest} = $conf->{digest}; # keep file digest for API
 
@@ -7513,7 +7599,10 @@ sub live_import_from_files {
             my ($interface, $index) = PVE::QemuServer::Drive::parse_drive_interface($dev);
             my $drive = { file => $volid, interface => $interface, index => $index };
             my $blockdev = PVE::QemuServer::Blockdev::generate_drive_blockdev(
-                $storecfg, $drive, $machine_version, {},
+                $storecfg,
+                $drive,
+                $machine_version,
+                { 'no-throttle' => 1 },
             );
             $live_restore_backing->{$dev}->{blockdev} = $blockdev;
         } else {
