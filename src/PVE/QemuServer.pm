@@ -2350,6 +2350,12 @@ sub write_vm_config {
     return $raw;
 }
 
+sub get_default_property_value {
+    my ($name) = @_;
+
+    return $confdesc->{$name}->{default};
+}
+
 sub load_defaults {
 
     my $res = {};
