@@ -3147,9 +3147,6 @@ sub vmstatus {
         $d->{netout} = 0;
         $d->{netin} = 0;
 
-        $d->{diskread} = undef;
-        $d->{diskwrite} = undef;
-
         $d->{template} = 1 if PVE::QemuConfig->is_template($conf);
         $d->{pxvditemplate} = 1 if $conf->{pxvditemplate};
         $d->{snapshot} = 1 if $conf->{snapshot};
