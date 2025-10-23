@@ -146,6 +146,14 @@ EODESCR
         optional => 1,
         description => "Override PCI subsystem device ID visible to guest",
     },
+    'driver' => {
+        type => 'string',
+        optional => 1,
+        default => 'vfio',
+        enum => [qw(vfio keep)],
+        description => "If set to 'keep' the device will neither be reset nor bound to the "
+            . "'vfio-pci' driver. Useful for devices that already have the correct driver loaded.",
+    },
 };
 PVE::JSONSchema::register_format('pve-qm-hostpci', $hostpci_fmt);
 
@@ -948,6 +956,7 @@ sub prepare_pci_device {
         if !PVE::SysFSTools::check_iommu_support();
     die "no pci device info for device '$pciid'\n" if !$info;
 
+<<<<<<< HEAD
     if ($device->{mac}){
         my $mac = $device->{mac};
         my $vlan = $device->{tag};
@@ -955,6 +964,10 @@ sub prepare_pci_device {
     }
 
     if ($device->{nvidia}) {
+=======
+    my $driver = $device->{driver} // 'vfio';
+    if ($device->{nvidia} || $driver eq "keep") {
+>>>>>>> aa47045f (pci: add 'driver' option)
         # nothing to do
     } elsif (my $mdev = $device->{mdev}) {
         my $uuid = $conf->{uuid} // generate_mdev_uuid($vmid, $index);
