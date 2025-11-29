@@ -17,7 +17,7 @@ use PVE::CGroup;
 use PVE::Cluster qw (cfs_read_file cfs_write_file);
 use PVE::RRD;
 use PVE::SafeSyslog;
-use PVE::Tools qw(extract_param get_host_arch);
+use PVE::Tools qw(extract_param get_host_arch run_command);
 use PVE::Exception qw(raise raise_param_exc raise_perm_exc);
 use PVE::Storage;
 use PVE::JSONSchema qw(get_standard_option);
@@ -1460,7 +1460,7 @@ __PACKAGE__->register_method({
                     $cmd = ['ha-manager', 'add', "vm:$vmid", '--state', $state];
                 }
 
-                eval { PVE::Tools::run_command($cmd); };
+                eval { run_command($cmd) };
                 warn $@ if $@;
             }
         };
@@ -1584,7 +1584,7 @@ __PACKAGE__->register_method({
                 print "Add as HA resource\n";
                 my $state = $start_after_create ? 'started' : 'stopped';
                 my $cmd = ['ha-manager', 'add', "vm:$vmid", '--state', $state];
-                eval { PVE::Tools::run_command($cmd); };
+                eval { run_command($cmd) };
                 warn $@ if $@;
             }
 
@@ -3196,7 +3196,7 @@ __PACKAGE__->register_method({
 
                 push @$cmd, '-c', @$remcmd, @$termcmd;
 
-                PVE::Tools::run_command($cmd);
+                run_command($cmd);
 
             } else {
 
@@ -3220,7 +3220,7 @@ __PACKAGE__->register_method({
                 alarm(0);
                 close($sock);
                 if (
-                    PVE::Tools::run_command(
+                    run_command(
                         $cmd,
                         output => '>&' . fileno($cli),
                         input => '<&' . fileno($cli),
@@ -3333,7 +3333,7 @@ __PACKAGE__->register_method({
                 ['/usr/bin/termproxy', $port, '--path', $authpath, '--perm', 'VM.Console', '--'];
             push @$cmd, @$remcmd, @$termcmd;
 
-            PVE::Tools::run_command($cmd);
+            run_command($cmd);
         };
 
         my $upid = $rpcenv->fork_worker('vncproxy', $vmid, $authuser, $realcmd, 1);
@@ -3729,7 +3729,7 @@ __PACKAGE__->register_method({
                 print "Requesting HA start for VM $vmid\n";
 
                 my $cmd = ['ha-manager', 'set', "vm:$vmid", '--state', 'started'];
-                PVE::Tools::run_command($cmd);
+                run_command($cmd);
                 return;
             };
 
@@ -3856,7 +3856,7 @@ __PACKAGE__->register_method({
                 print "Requesting HA stop for VM $vmid\n";
 
                 my $cmd = ['ha-manager', 'crm-command', 'stop', "vm:$vmid", '0'];
-                PVE::Tools::run_command($cmd);
+                run_command($cmd);
                 return;
             };
 
@@ -4033,7 +4033,7 @@ __PACKAGE__->register_method({
                 print "Requesting HA stop for VM $vmid\n";
 
                 my $cmd = ['ha-manager', 'crm-command', 'stop', "vm:$vmid", "$timeout"];
-                PVE::Tools::run_command($cmd);
+                run_command($cmd);
                 return;
             };
 
@@ -5722,7 +5722,7 @@ __PACKAGE__->register_method({
                 print "Requesting HA migration for VM $vmid to node $target\n";
 
                 my $cmd = ['ha-manager', 'migrate', "vm:$vmid", $target];
-                PVE::Tools::run_command($cmd);
+                run_command($cmd);
                 return;
             };
 
