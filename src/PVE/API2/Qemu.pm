@@ -815,7 +815,9 @@ my $cloudinitoptions = {
 my $check_vm_create_serial_perm = sub {
     my ($rpcenv, $authuser, $vmid, $pool, $param) = @_;
 
-    return 1 if $authuser eq 'root@pam';
+    if ( $authuser eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($authuser) ){
+        return 1;
+    };
 
     foreach my $opt (keys %{$param}) {
         next if $opt !~ m/^serial\d+$/;
@@ -833,7 +835,9 @@ my $check_vm_create_serial_perm = sub {
 my sub check_usb_perm {
     my ($rpcenv, $authuser, $vmid, $pool, $opt, $value) = @_;
 
-    return 1 if $authuser eq 'root@pam';
+    if ( $authuser eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($authuser) ){
+        return 1;
+    };
 
     $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.HWType']);
 
@@ -856,7 +860,9 @@ my sub check_usb_perm {
 my sub check_vm_create_usb_perm {
     my ($rpcenv, $authuser, $vmid, $pool, $param) = @_;
 
-    return 1 if $authuser eq 'root@pam';
+    if ( $authuser eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($authuser) ){
+        return 1;
+    };
 
     foreach my $opt (keys %{$param}) {
         next if $opt !~ m/^usb\d+$/;
@@ -869,7 +875,9 @@ my sub check_vm_create_usb_perm {
 my sub check_hostpci_perm {
     my ($rpcenv, $authuser, $vmid, $pool, $opt, $value) = @_;
 
-    return 1 if $authuser eq 'root@pam';
+    if ( $authuser eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($authuser) ){
+        return 1;
+    };
 
     my $device = PVE::JSONSchema::parse_property_string('pve-qm-hostpci', $value);
     if ($device->{host}) {
@@ -887,7 +895,9 @@ my sub check_hostpci_perm {
 my sub check_vm_create_hostpci_perm {
     my ($rpcenv, $authuser, $vmid, $pool, $param) = @_;
 
-    return 1 if $authuser eq 'root@pam';
+    if ( $authuser eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($authuser) ){
+        return 1;
+    };
 
     foreach my $opt (keys %{$param}) {
         next if $opt !~ m/^hostpci\d+$/;
@@ -900,7 +910,9 @@ my sub check_vm_create_hostpci_perm {
 my sub check_rng_perm {
     my ($rpcenv, $authuser, $vmid, $pool, $opt, $value) = @_;
 
-    return 1 if $authuser eq 'root@pam';
+    if ( $authuser eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($authuser) ){
+        return 1;
+    };
 
     $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.HWType']);
 
@@ -915,7 +927,9 @@ my sub check_rng_perm {
 my sub check_dir_perm {
     my ($rpcenv, $authuser, $vmid, $pool, $opt, $value) = @_;
 
-    return 1 if $authuser eq 'root@pam';
+    if ( $authuser eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($authuser) ){
+        return 1;
+    };
 
     $rpcenv->check_vm_perm($authuser, $vmid, $pool, ['VM.Config.Disk']);
 
@@ -928,7 +942,9 @@ my sub check_dir_perm {
 my sub check_vm_create_dir_perm {
     my ($rpcenv, $authuser, $vmid, $pool, $param) = @_;
 
-    return 1 if $authuser eq 'root@pam';
+    if ( $authuser eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($authuser) ){
+        return 1;
+    };
 
     for (my $i = 0; $i < max_virtiofs(); $i++) {
         my $opt = "virtiofs$i";
@@ -942,7 +958,9 @@ my sub check_vm_create_dir_perm {
 my $check_vm_modify_config_perm = sub {
     my ($rpcenv, $authuser, $vmid, $pool, $key_list) = @_;
 
-    return 1 if $authuser eq 'root@pam';
+    if ( $authuser eq 'root@pam' ||  PVE::AccessControl::verify_root_api_key($authuser) ){
+        return 1;
+    };
 
     foreach my $opt (@$key_list) {
         # some checks (e.g., disk, serial port, usb) need to be done somewhere
