@@ -5490,7 +5490,9 @@ __PACKAGE__->register_method({
 
         my $vga = PVE::QemuServer::parse_vga($vmconf->{vga});
         if ($res->{running} && $vga->{'clipboard'} && $vga->{'clipboard'} eq 'vnc') {
-            push $local_resources->@*, "clipboard=vnc";
+            my $machine_version = PVE::QemuServer::Machine::get_current_qemu_machine($vmid);
+            push $local_resources->@*, "clipboard=vnc"
+                if !PVE::QemuServer::Machine::is_machine_version_at_least($machine_version, 10, 1);
         }
 
         $res->{allowed_nodes} = [];
