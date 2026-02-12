@@ -22,8 +22,12 @@
   -device 'piix3-usb-uhci,id=uhci,bus=pci.0,addr=0x1.0x2' \
   -device 'usb-tablet,id=tablet,bus=uhci.0,port=1' \
   -device 'VGA,id=vga,bus=pci.0,addr=0x2' \
+  -device 'virtio-serial,id=spice,bus=pci.0,addr=0x9' \
+  -chardev 'spicevmc,id=vdagent,name=vdagent' \
+  -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
+  -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
   -chardev 'socket,id=spdk_vhost_scsi_0,path=/var/tmp/vm-8006-spdk0' \
-  -device 'vhost-user-scsi-pci,chardev=spdk_vhost_scsi_0,bus=pci.2,addr=0x19,num_queues=4'
+  -device 'vhost-user-scsi-pci,chardev=spdk_vhost_scsi_0,bus=pci.2,addr=0x19,num_queues=4' \
   -machine 'memory-backend=virtiofs-mem,type=pc+pve1'
