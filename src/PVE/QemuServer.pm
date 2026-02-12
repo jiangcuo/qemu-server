@@ -4123,8 +4123,7 @@ sub config_to_command {
     my $spice_port;
 
     assert_clipboard_config($vga);
-    my $is_spice = $qxlnum || $vga->{type} =~ /^(virtio|mdev)/ ;
-     $is_spice = 0 if $arch eq 's390x';
+    my $is_spice = $vga->{type} && $vga->{type} !~ m/^(serial\d+|none)$/ && $arch ne 's390x';
 
     if ($is_spice || ($vga->{'clipboard'} && $vga->{'clipboard'} eq 'vnc')) {
         if ($qxlnum > 1) {
