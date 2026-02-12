@@ -193,8 +193,8 @@ sub extract_version {
 sub is_machine_version_at_least {
     my ($machine_type, $major, $minor, $pve) = @_;
 
-    return PVE::QemuServer::Helpers::min_version(extract_version($machine_type), $major, $minor,
-        $pve);
+    my $version = extract_version($machine_type, PVE::QemuServer::Helpers::kvm_user_version());
+    return PVE::QemuServer::Helpers::min_version($version, $major, $minor, $pve);
 }
 
 sub get_machine_pve_revisions {
