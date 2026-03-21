@@ -4435,8 +4435,10 @@ sub config_to_command {
     push @$machineFlags, 'smm=off' if should_disable_smm($conf, $vga, $machine_type);
 
     my $machine_type_min = $machine_type;
-    $machine_type_min =~ s/\+pve\d+$//;
-    $machine_type_min .= "+pve$required_pve_version";
+    if ($required_pve_version || $machine_type =~ m/-\d+\.\d+/) {
+        $machine_type_min =~ s/\+pve\d+$//;
+        $machine_type_min .= "+pve$required_pve_version";
+    }
 
     my $gicv = $kvm ? 'host' : 'max';
     if ( $conf->{gicversion} ) {
@@ -9818,21 +9820,5 @@ sub get_nets_host_mtu {
     return join(',', $nets_host_mtu->@*);
 }
 
-sub generate_vm_uuid {
-    my ($vmid, $index) = @_;
-    return sprintf("%08d-0000-0000-0000-%012d", $index, $vmid);
-}
-
-sub get_drive_path {
-    my ($drive) = @_;
-    my $cfg = PVE::Storage::config();
-    my $path = PVE::Storage::path($cfg, $drive);
-
-    if (-e $path) {
-        return $path;
-    } else {
-        die "Custom file not found at $path\n";
-    }
-}
 
 1;
