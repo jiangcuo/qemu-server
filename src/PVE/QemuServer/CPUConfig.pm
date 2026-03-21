@@ -59,6 +59,11 @@ my $builtin_models = {
         flags =>
             "+aes;+popcnt;+pni;+sse4.1;+sse4.2;+ssse3;+avx;+avx2;+bmi1;+bmi2;+f16c;+fma;+abm;+movbe;+xsave;+avx512f;+avx512bw;+avx512cd;+avx512dq;+avx512vl",
     },
+    'armv8-gmssl' => {
+        'reported-model' => 'generic-v8',
+        flags =>
+            "+aes;+sm3;+sm4",
+    },
 };
 
 my $depreacated_cpu_map = {
@@ -177,10 +182,13 @@ my $cpu_vendor_list = {
     'neoverse-n2' => 'ARM',
     'neoverse-v1' => 'ARM',
     'Kunpeng-920' => 'ARM',
+    'phytium' => 'ARM',
+    'generic-v8' => 'ARM',
 
     # LoongArch
     'la464_loongarch_cpu' => 'LoongARCH',
     'la464' => 'LoongARCH',
+    'la664' => 'LoongARCH',
     'la132' => 'LoongARCH',
 
     # RISCV
@@ -212,6 +220,31 @@ my @supported_cpu_flags = (
     'hv-tlbflush',
     'hv-evmcs',
     'aes',
+    'sm3',
+    'sm4',
+    'sha1',
+    'sha2',
+    'sha3',
+    'sha512',
+    'crc32',
+    'atomic',
+    'rdm',
+    'dp',
+    'dpb',
+    'fhm',
+    'rndr',
+    'ts',
+    'tlb',
+    'jscvt',
+    'fcma',
+    'lrcpc',
+    'dpb2',
+    'bf16',
+    'i8mm',
+    'sb',
+    'frintts',
+    'specres',
+    'dgh',
 );
 my $cpu_flag_supported_re = qr/([+-])(@{[join('|', @supported_cpu_flags)]})/;
 my $cpu_flag_any_re = qr/([+-])([a-zA-Z0-9\-_\.]+)/;
