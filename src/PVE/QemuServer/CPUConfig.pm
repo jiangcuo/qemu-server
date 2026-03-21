@@ -553,10 +553,10 @@ sub print_cpu_device {
     my ($conf, $arch, $id) = @_;
 
     # FIXME: hot plugging other architectures like our unofficial aarch64 support?
-    die "Hotplug of non x86_64 CPU not yet supported" if $arch ne 'x86_64';
+    die "Hotplug of non x86_64 CPU not yet supported" if ($arch ne 'x86_64' && $arch ne 'loongarch64');
 
     my $kvm = $conf->{kvm} // is_native_arch($arch);
-    my $cpu = get_default_cpu_type('x86_64', $kvm);
+    my $cpu = get_default_cpu_type($arch, $kvm);
     if (my $cputype = $conf->{cpu}) {
         my $cpuconf = PVE::JSONSchema::parse_property_string('pve-vm-cpu-conf', $cputype)
             or die "Cannot parse cpu description: $cputype\n";
@@ -578,8 +578,12 @@ sub print_cpu_device {
 
     my $current_core = ($id - 1) % $cores;
     my $current_socket = int(($id - 1 - $current_core) / $cores);
-
-    return "$cpu-x86_64-cpu,id=cpu$id,socket-id=$current_socket,core-id=$current_core,thread-id=0";
+    if ($arch eq 'x86_64') {
+        return "$cpu-x86_64-cpu,id=cpu$id,socket-id=$current_socket,core-id=$current_core,thread-id=0";
+    } elsif ($arch eq 'loongarch64') {
+        return "$cpu-loongarch-cpu,id=cpu$id,socket-id=$current_socket,core-id=$current_core,thread-id=0";
+    }
+    die "Hotplug of non x86_64 or loongarch64 CPU not yet supported";
 }
 
 # Resolves multiple arrays of hashes representing CPU flags with metadata to a
