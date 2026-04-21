@@ -919,9 +919,9 @@ sub print_hostpci_devices {
                 }
             }
 
-            if ($mdevtype && $vga->{type} eq 'mdev'){
+            if ($vga->{type} eq 'mdev'){
                 $devicestr .= ",display=on";
-                if ($mdevtype eq "i915"){
+                if (defined($mdevtype) && $mdevtype eq "i915"){
                     $devicestr .= ",x-igd-opregion=on" ;
                 }
                 $devicestr .= ",ramfb=on" if $d->{ramfb};
