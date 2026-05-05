@@ -6396,7 +6396,7 @@ sub vm_start_nolock {
 
             # nvidia grid needs the uuid of the mdev as qemu parameter
             if (!defined($uuid) && $chosen_mdev->{vendor} =~ m/^(0x)?10de$/) {
-                $uuid = $conf->{uuid} // PVE::QemuServer::PCI::generate_mdev_uuid($vmid, $index);
+                $uuid = PVE::QemuServer::PCI::generate_mdev_uuid($vmid, $index);
             }
         }
         push @$cmd, '-uuid', $uuid if defined($uuid);
