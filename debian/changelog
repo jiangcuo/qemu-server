@@ -1,3 +1,12 @@
+qemu-server (8.4.8+pxvirt1) bookworm; urgency=medium
+
+  * Update version 
+  * PCI: always use proxmox mdev uuid style
+  * Add loongarch64 cpu hotplug support
+  * Add more cpu model
+
+ -- Lierfang Support Team <itsupport@lierfang.com> Thu, 07 May 2026 19:28:07 +0800
+
 qemu-server (8.4.8) bookworm; urgency=medium
 
   * cloud-init: dns: avoid "uninitialized value in split" warning if there is
