@@ -1,3 +1,104 @@
+qemu-server (8.4.8) bookworm; urgency=medium
+
+  * cloud-init: dns: avoid "uninitialized value in split" warning if there is
+    no 'searchdomain' cloud-init setting and also no 'search' setting in the
+    host's resolv.conf.
+
+  * api: dump cloud-init: mask password for user without VM.Config.Cloudinit
+    privilege.
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 23 Apr 2026 11:21:11 +0200
+
+qemu-server (8.4.7) bookworm; urgency=medium
+
+  * api: vncproxy: align the VM-specific vncproxy endpoint for non-serial
+    displays with the serial-display behavior: listen only on localhost when
+    used through the 'websocket' parameter, and use TLS otherwise. This may
+    affect external VNC clients that connect directly without going through
+    'vncwebsocket' or that do not support TLS.
+
+  * api: vnc/termproxy: bind VNC and SPICE tickets to the listen port to
+    harden authentication for interactive console sessions. Also extends to
+    the SPICE proxy ticket used during live migration.
+
+  * api: vncproxy: always use a freshly generated password when authenticating
+    via the VNC protocol, improving entropy compared to the previous
+    ticket-derived scheme.
+
+  * api: termproxy: pin the accepted ticket in the spawned termproxy process
+    as an additional defense-in-depth measure.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 21 Apr 2026 22:33:21 +0200
+
+qemu-server (8.4.6) bookworm; urgency=medium
+
+  * fix #6985: efi: secure boot: support enrolling Microsoft's 2023 UEFI
+    certificates. The original set of Microsoft certificates from 2011, which
+    Windows and common Linux distributions use for secure boot, expires in
+    June 2026. Microsoft created replacement certificates in 2023.
+    - qm cli: add 'enroll-efi-keys' command to enroll certificates for a
+      shut-down VM.
+    - efi disk: add 'ms-cert=2023k' property which indicates that the new
+      certificates are enrolled. The property can be set via API or 'qm set'.
+      If the VM is running, as a pending change. The new certificates are
+      enrolled when the change is applied to the disk.
+
+ -- Proxmox Support Team <support@proxmox.com>  Mon, 16 Mar 2026 12:06:59 +0100
+
+qemu-server (8.4.5) bookworm; urgency=medium
+
+  * fix #6934: vm start: do not try to apply pending changes when resuming
+    from hibernation.
+
+  * vm status: make sure disk{read, write} adhere to return schema to fix
+    regression for PDM.
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 26 Nov 2025 08:36:06 +0100
+
+qemu-server (8.4.4) bookworm; urgency=medium
+
+  * fix #6207: vm status: return undefined value when disk{read, write} cannot
+    be queried rather than 0 to avoid spikes in RRD graph.
+
+  * vm status: also queue query-proxmox-support QMP commands to avoid stacking
+    timeouts.
+
+  * fix #6828: remote migration: bump timeout for writing configuration to
+    accommodate volume activation. Allow for up to 2 minutes instead of just
+    10 seconds.
+
+  * partially fix #6805:
+    - api: modify vm config: privilege checks for VM-state-related properties.
+    - api: clone: properly remove all snapshot-related info.
+
+ -- Proxmox Support Team <support@proxmox.com>  Tue, 07 Oct 2025 10:12:06 +0200
+
+qemu-server (8.4.3) bookworm; urgency=medium
+
+  * migration: only use nets-host-mtu for PVE 8 target if actually required.
+
+  * migration: tell users to upgrade the target node if nets-host-mtu is
+    required but not supported by the target qemu-server.
+    Note, while PVE generally only guarantees migration support from
+    target-version >= source-version, it's relatively easy here to avoid
+    having to leverage that requirement.
+
+ -- Proxmox Support Team <support@proxmox.com>  Wed, 10 Sep 2025 13:32:30 +0200
+
+qemu-server (8.4.2) bookworm; urgency=medium
+
+  * fix #6466: aarch64: pci: properly print higher-index PCI bridge addresses.
+
+  * api: vm start: introduce nets-host-mtu parameter for live-migration
+    compat. This fixes some issues with migrating to a Proxmox VE 9 host, e.g.
+    during major upgrade, as that version started to inherit the MTU from the
+    underlying Linux bridge if it's not explicitly set, this the chosen MTU
+    for a virtual NIC might differ on source and target, which can result in a
+    different (incompatible) virtual hardware layout, at least for i440fx
+    machines.
+
+ -- Proxmox Support Team <support@proxmox.com>  Thu, 04 Sep 2025 20:02:48 +0200
+
 qemu-server (8.4.5) bookworm; urgency=medium
 
   * fix #6934: vm start: do not try to apply pending changes when resuming

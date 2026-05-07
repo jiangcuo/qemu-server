@@ -64,6 +64,7 @@ use PVE::QemuServer::Machine;
 use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::QemuServer::MetaInfo;
 use PVE::QemuServer::Monitor qw(mon_cmd);
+use PVE::QemuServer::OVMF;
 use PVE::QemuServer::PCI qw(print_pci_addr print_pcie_addr print_pcie_root_port parse_hostpci);
 use PVE::QemuServer::QMPHelpers qw(qemu_deviceadd qemu_devicedel qemu_objectadd qemu_objectdel);
 use PVE::QemuServer::RNG qw(parse_rng print_rng_device_commandline print_rng_object_commandline);
@@ -5673,12 +5674,18 @@ sub vmconfig_apply_pending {
         next if $opt eq 'delete'; # just to be sure
         eval {
             if (defined($conf->{$opt}) && is_valid_drivename($opt)) {
-                vmconfig_register_unused_drive(
-                    $storecfg,
-                    $vmid,
-                    $conf,
-                    parse_drive($opt, $conf->{$opt}),
-                );
+                my $old_drive = parse_drive($opt, $conf->{$opt});
+                vmconfig_register_unused_drive($storecfg, $vmid, $conf, $old_drive);
+                if ($opt eq 'efidisk0') {
+                    my $new_drive = parse_drive($opt, $conf->{pending}->{$opt});
+                    PVE::QemuServer::OVMF::drive_change(
+                        $storecfg,
+                        $vmid,
+                        $old_drive,
+                        $new_drive,
+                    );
+                    $conf->{pending}->{$opt} = print_drive($new_drive);
+                }
             } elsif (defined($conf->{pending}->{$opt}) && $opt =~ m/^net\d+$/) {
                 return if !$have_sdn; # return from eval if SDN is not available
 
@@ -6131,6 +6138,34 @@ my sub remove_left_over_vmstate_opts {
     PVE::QemuConfig->write_config($vmid, $conf) if $found;
 }
 
+
+my sub check_efi_vars {
+    my ($storecfg, $vmid, $conf) = @_;
+
+    return if PVE::QemuConfig->is_template($conf);
+    return if !$conf->{efidisk0};
+
+    my $efidisk = parse_drive('efidisk0', $conf->{efidisk0});
+    if (PVE::QemuServer::OVMF::should_enroll_ms_2023_cert($efidisk)) {
+        # TODO: make the first print a log_warn with PVE 9.2 to make it more noticeable!
+        print "EFI disk without 'ms-cert=2023k' option, suggesting that not all UEFI 2023\n";
+        print "certificates from Microsoft are enrolled yet. The UEFI 2011 certificates expire\n";
+        print
+            "in June 2026! The new certificates are required for secure boot update for Windows\n";
+        print "and common Linux distributions. Use 'Disk Action > Enroll Updated Certificates'\n";
+        print "in the UI or, while the VM is shut down, run 'qm enroll-efi-keys $vmid' to enroll\n";
+        print "the new certificates.\n\n";
+        print "For Windows with BitLocker, run the following command inside Powershell:\n";
+        print "  manage-bde -protectors -disable <drive>\n";
+        print "for each drive with BitLocker (for example, <drive> could be 'C:').\n";
+        print "This is required for each drive with BitLocker before proceeding with enrollment.\n";
+        print "Otherwise, you will be prompted for the BitLocker recovery key on the next boot.\n";
+    }
+
+    return;
+}
+
+
 # see vm_start_nolock for parameters, additionally:
 # migrate_opts:
 #   storagemap = parsed storage map for allocating NBD disks
@@ -6410,6 +6445,8 @@ sub vm_start_nolock {
     }
 
     PVE::Storage::activate_volumes($storecfg, $vollist);
+
+    check_efi_vars($storecfg, $vmid, $conf) if $conf->{bios} && $conf->{bios} eq 'ovmf';
 
     my %silence_std_outs = (outfunc => sub { }, errfunc => sub { });
     eval { run_command(['/bin/systemctl', 'reset-failed', "$vmid.scope"], %silence_std_outs) };
@@ -9335,6 +9372,13 @@ sub create_efidisk($$$$$$$$) {
     qemu_img_convert($ovmf_vars, $volid, $vars_size_b);
     my $size = PVE::Storage::volume_size_info($storecfg, $volid, 3);
 
+    if (
+        $efidisk->{'pre-enrolled-keys'}
+        && PVE::QemuServer::OVMF::is_ms_2023_cert_enrolled($ovmf_vars)
+    ) {
+        $efidisk->{'ms-cert'} = '2023k';
+    }
+
     return ($volid, $size / 1024);
 }
 
@@ -9775,6 +9819,7 @@ sub delete_ifaces_ipams_ips {
     }
 }
 
+
 sub generate_vm_uuid {
     my ($vmid, $index) = @_;
     return sprintf("%08d-0000-0000-0000-%012d", $index, $vmid);
@@ -9791,6 +9836,7 @@ sub get_drive_path {
         die "Custom file not found at $path\n";
     }
 }
+
 
 sub get_nets_host_mtu {
     my ($vmid, $conf, $only_inherited_mtus) = @_;
@@ -9819,6 +9865,5 @@ sub get_nets_host_mtu {
     }
     return join(',', $nets_host_mtu->@*);
 }
-
 
 1;

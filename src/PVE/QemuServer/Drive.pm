@@ -606,6 +606,18 @@ my %efitype_fmt = (
         optional => 1,
         default => 0,
     },
+    'ms-cert' => {
+        type => 'string',
+        enum => [qw(2011 2023 2023w 2023k)],
+        description =>
+            "Informational marker indicating the version of the latest Microsoft UEFI certificates"
+            . " that have been enrolled by Proxmox VE. The value '2023k' means that the 'Microsoft"
+            . " UEFI CA 2023', the 'Windows UEFI CA 2023' and the 'Microsoft Corporation KEK 2K CA"
+            . " 2023' certificates are included. The values '2023' and '2023w' are"
+            . " deprecated and for compatibility only.",
+        optional => 1,
+        default => '2011',
+    },
 );
 
 my $efidisk_fmt = {

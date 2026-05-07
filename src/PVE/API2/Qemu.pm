@@ -3,13 +3,14 @@ package PVE::API2::Qemu;
 use strict;
 use warnings;
 use Cwd 'abs_path';
+use Fcntl qw(F_GETFD F_SETFD FD_CLOEXEC);
 use Net::SSLeay;
 use IO::Socket::IP;
+use IO::Socket::SSL;
 use IO::Socket::UNIX;
 use IPC::Open3;
 use JSON;
 use URI::Escape;
-use Crypt::OpenSSL::Random;
 use Socket qw(SOCK_STREAM);
 
 use PVE::APIClient::LWP;
@@ -57,6 +58,7 @@ use PVE::Replication;
 use PVE::ReplicationState;
 use PVE::StorageTunnel;
 use PVE::RESTEnvironment qw(log_warn);
+use PVE::Ticket;
 
 BEGIN {
     if (!$ENV{PVE_GENERATING_DOCS}) {
@@ -2974,23 +2976,6 @@ __PACKAGE__->register_method({
     },
 });
 
-# uses good entropy, each char is limited to 6 bit to get printable chars simply
-my $gen_rand_chars = sub {
-    my ($length) = @_;
-
-    die "invalid length $length" if $length < 1;
-
-    my $min = ord('!'); # first printable ascii
-
-    my $rand_bytes = Crypt::OpenSSL::Random::random_bytes($length);
-    die "failed to generate random bytes!\n"
-        if !$rand_bytes;
-
-    my $str = join('', map { chr((ord($_) & 0x3F) + $min) } split('', $rand_bytes));
-
-    return $str;
-};
-
 my $sslcert;
 
 __PACKAGE__->register_method({
@@ -3013,12 +2998,12 @@ __PACKAGE__->register_method({
                 description => "Prepare for websocket upgrade (only required when using "
                     . "serial terminal, otherwise upgrade is always possible).",
             },
+            # FIXME: MAJOR VERSION: Drop this, require always using explicit 'password' return value
             'generate-password' => {
                 optional => 1,
                 type => 'boolean',
                 default => 0,
-                description =>
-                    "Generates a random password to be used as ticket instead of the API ticket.",
+                description => "Deprecated, do not use. Password is generated when required.",
             },
         },
     },
@@ -3029,7 +3014,7 @@ __PACKAGE__->register_method({
             ticket => { type => 'string' },
             password => {
                 optional => 1,
-                description => "Returned if requested with 'generate-password' param."
+                description => "Password used for authentication within the VNC protocol."
                     . " Consists of printable ASCII characters ('!' .. '~').",
                 type => 'string',
             },
@@ -3059,12 +3044,6 @@ __PACKAGE__->register_method({
 
         my $authpath = "/vms/$vmid";
 
-        my $ticket = PVE::AccessControl::assemble_vnc_ticket($authuser, $authpath);
-        my $password = $ticket;
-        if ($param->{'generate-password'}) {
-            $password = $gen_rand_chars->(8);
-        }
-
         $sslcert = PVE::Tools::file_get_contents("/etc/pve/pve-root-ca.pem", 8192)
             if !$sslcert;
 
@@ -3082,6 +3061,14 @@ __PACKAGE__->register_method({
         }
 
         my $port = PVE::Tools::next_vnc_port($family);
+
+        my $ticket = PVE::AccessControl::assemble_vnc_ticket($authuser, $authpath, $port);
+        my $password;
+        if ($param->{'generate-password'} || !defined($serial) || $param->{websocket}) {
+            $password = PVE::Ticket::generate_vnc_password();
+            # FIXME: MAJOR VERSION: Avoid this hack, require using explicit 'password' return value
+            $ticket = "${password}:${ticket}";
+        } # else authentication happens via ticket only, not via password in VNC protocol
 
         my $timeout = 10;
 
@@ -3107,11 +3094,14 @@ __PACKAGE__->register_method({
                     $authpath,
                     '-perm',
                     'Sys.Console',
+                    '-verify-port',
                 ];
 
                 if ($param->{websocket}) {
-                    $ENV{PVE_VNC_TICKET} = $password; # pass ticket to vncterm
+                    $ENV{PVE_VNC_TICKET} = $password; # pass VNC protocol password to vncterm
                     push @$cmd, '-notls', '-listen', 'localhost';
+                } else {
+                    $ENV{PVE_VNC_TICKET} = $ticket; # pass VNC ticket to vncterm
                 }
 
                 push @$cmd, '-c', @$remcmd, @$termcmd;
@@ -3119,18 +3109,49 @@ __PACKAGE__->register_method({
                 PVE::Tools::run_command($cmd);
 
             } else {
-
-                $ENV{LC_PVE_TICKET} = $password; # set ticket with "qm vncproxy"
+                $ENV{LC_PVE_TICKET} = $password; # set VNC protocol password with "qm vncproxy"
 
                 $cmd = [@$remcmd, "/usr/sbin/qm", 'vncproxy', $vmid];
 
-                my $sock = IO::Socket::IP->new(
-                    ReuseAddr => 1,
-                    Listen => 1,
-                    LocalPort => $port,
-                    Proto => 'tcp',
-                    GetAddrInfoFlags => 0,
-                ) or die "failed to create socket: $!\n";
+                my $sock;
+
+                if ($param->{websocket}) {
+                    # listen for localhost only, no TLS
+                    my $socket_params = {
+                        ReuseAddr => 1,
+                        Listen => 1,
+                        LocalPort => $port,
+                        Proto => 'tcp',
+                        GetAddrInfoFlags => 0,
+                        LocalHost => 'localhost',
+                    };
+
+                    $sock = IO::Socket::IP->new($socket_params->%*)
+                        or die "failed to create socket: $!\n";
+                } else {
+                    my $socket_params = {
+                        ReuseAddr => 1,
+                        Listen => 1,
+                        LocalPort => $port,
+                        Proto => 'tcp',
+                        GetAddrInfoFlags => 0,
+                        SSL_server => 1,
+                    };
+
+                    my $pveproxy_cert_file = '/etc/pve/local/pveproxy-ssl.pem';
+                    my $pveproxy_key_file = '/etc/pve/local/pveproxy-ssl.key';
+                    if (-f $pveproxy_cert_file && -f $pveproxy_key_file) {
+                        $socket_params->{SSL_cert_file} = $pveproxy_cert_file;
+                        $socket_params->{SSL_key_file} = $pveproxy_key_file;
+                    } else {
+                        $socket_params->{SSL_cert_file} = '/etc/pve/local/pve-ssl.pem';
+                        $socket_params->{SSL_key_file} = '/etc/pve/local/pve-ssl.key';
+                    }
+
+                    $sock = IO::Socket::SSL->new($socket_params->%*)
+                        or die "failed to create SSL socket: $!\n";
+                }
+
                 # Inside the worker we shouldn't have any previous alarms
                 # running anyway...:
                 alarm(0);
@@ -3165,7 +3186,8 @@ __PACKAGE__->register_method({
             upid => $upid,
             cert => $sslcert,
         };
-        $res->{password} = $password if $param->{'generate-password'};
+
+        $res->{password} = $password if defined($password);
 
         return $res;
     },
@@ -3225,8 +3247,6 @@ __PACKAGE__->register_method({
 
         my $authpath = "/vms/$vmid";
 
-        my $ticket = PVE::AccessControl::assemble_vnc_ticket($authuser, $authpath);
-
         my $family;
         my $remcmd = [];
 
@@ -3240,6 +3260,7 @@ __PACKAGE__->register_method({
         }
 
         my $port = PVE::Tools::next_vnc_port($family);
+        my $ticket = PVE::AccessControl::assemble_vnc_ticket($authuser, $authpath, $port);
 
         my $termcmd = ['/usr/sbin/qm', 'terminal', $vmid, '-escape', '0'];
         push @$termcmd, '-iface', $serial if $serial;
@@ -3249,11 +3270,34 @@ __PACKAGE__->register_method({
 
             syslog('info', "starting qemu termproxy $upid\n");
 
-            my $cmd =
-                ['/usr/bin/termproxy', $port, '--path', $authpath, '--perm', 'VM.Console', '--'];
+            pipe(my $ticket_rd, my $ticket_wr) or die "failed to create pipe: $!\n";
+
+            my $flags = fcntl($ticket_rd, F_GETFD, 0)
+                // die "failed to get file descriptor flags: $!\n";
+            fcntl($ticket_rd, F_SETFD, $flags & ~FD_CLOEXEC)
+                // die "failed to remove CLOEXEC flag from fd: $!\n";
+
+            my $cmd = [
+                '/usr/bin/termproxy',
+                $port,
+                '--path',
+                $authpath,
+                '--perm',
+                'VM.Console',
+                '--vncticket-endpoint',
+                '--verify-port',
+                '--ticket-fd',
+                fileno($ticket_rd),
+                '--',
+            ];
             push @$cmd, @$remcmd, @$termcmd;
 
-            PVE::Tools::run_command($cmd);
+            my $afterfork = sub {
+                print {$ticket_wr} $ticket;
+                close($ticket_wr);
+            };
+
+            PVE::Tools::run_command($cmd, afterfork => $afterfork);
         };
 
         my $upid = $rpcenv->fork_worker('vncproxy', $vmid, $authuser, $realcmd, 1);
@@ -3314,15 +3358,14 @@ __PACKAGE__->register_method({
 
         my $authpath = "/vms/$vmid";
 
-        PVE::AccessControl::verify_vnc_ticket($param->{vncticket}, $authuser, $authpath);
-
-        my $conf = PVE::QemuConfig->load_config($vmid, $node); # VM exists ?
-
-        # Note: VNC ports are accessible from outside, so we do not gain any
-        # security if we verify that $param->{port} belongs to VM $vmid. This
-        # check is done by verifying the VNC ticket (inside VNC protocol).
+        # Note: VNC ports may be accessible from outside, so there is a password that needs to
+        # additionally be checked inside the VNC protocol.
 
         my $port = $param->{port};
+
+        PVE::AccessControl::verify_vnc_ticket($param->{vncticket}, $authuser, $authpath, $port);
+
+        my $conf = PVE::QemuConfig->load_config($vmid, $node); # VM exists ?
 
         return { port => $port };
     },
@@ -3674,6 +3717,7 @@ __PACKAGE__->register_method({
                     forcecpu => $force_cpu,
                     'nets-host-mtu' => $nets_host_mtu,
                     skiptemplate => $skiptemplate,
+
                 };
 
                 PVE::QemuServer::vm_start($storecfg, $vmid, $params, $migrate_opts);
@@ -6489,10 +6533,20 @@ __PACKAGE__->register_method({
     code => sub {
         my ($param) = @_;
 
+        my $rpcenv = PVE::RPCEnvironment::get();
+        my $authuser = $rpcenv->get_user();
+
         my $conf = PVE::QemuConfig->load_config($param->{vmid});
 
-        return PVE::QemuServer::Cloudinit::dump_cloudinit_config($conf, $param->{vmid},
-            $param->{type});
+        my $mask_password =
+            !$rpcenv->check($authuser, '/vms/{vmid}', ['VM.Config.Cloudinit'], 1);
+
+        return PVE::QemuServer::Cloudinit::dump_cloudinit_config(
+            $conf,
+            $param->{vmid},
+            $param->{type},
+            $mask_password,
+        );
     },
 });
 

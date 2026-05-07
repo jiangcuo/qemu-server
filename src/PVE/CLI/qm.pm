@@ -30,11 +30,12 @@ use PVE::Tools qw(extract_param file_get_contents);
 use PVE::API2::Qemu::Agent;
 use PVE::API2::Qemu;
 use PVE::QemuConfig;
-use PVE::QemuServer::Drive qw(is_valid_drivename);
+use PVE::QemuServer::Drive qw(is_valid_drivename parse_drive print_drive);
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Agent qw(agent_available);
 use PVE::QemuServer::ImportDisk;
 use PVE::QemuServer::Monitor qw(mon_cmd);
+use PVE::QemuServer::OVMF;
 use PVE::QemuServer::QMPHelpers;
 use PVE::QemuServer;
 
@@ -692,6 +693,63 @@ __PACKAGE__->register_method({
 });
 
 __PACKAGE__->register_method({
+    name => 'enroll-efi-keys',
+    path => 'enroll-efi-keys',
+    method => 'POST',
+    description =>
+        "Enroll important updated certificates to the EFI disk with pre-enrolled-keys. Currently,"
+        . " these are UEFI 2023 certificates from Microsoft. Must be called while the VM is shut"
+        . " down.",
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            vmid =>
+                get_standard_option('pve-vmid', { completion => \&PVE::QemuServer::complete_vmid }),
+        },
+    },
+    returns => { type => 'null' },
+    code => sub {
+        my ($param) = @_;
+
+        my $vmid = extract_param($param, 'vmid');
+
+        my $conf = PVE::QemuConfig->load_config($vmid);
+        PVE::QemuConfig->check_lock($conf);
+
+        die "VM $vmid is running\n" if PVE::QemuServer::Helpers::vm_running_locally($vmid);
+        die "VM $vmid is a template\n" if PVE::QemuConfig->is_template($conf);
+        die "VM $vmid has no EFI disk configured\n" if !$conf->{efidisk0};
+
+        my $storecfg = PVE::Storage::config();
+
+        my $efidisk = parse_drive('efidisk0', $conf->{efidisk0});
+        my $updated =
+            PVE::QemuServer::OVMF::ensure_ms_2023_cert_enrolled($storecfg, $vmid, $efidisk);
+
+        if (!$updated) {
+            print "skipping - no pre-enrolled keys or already got ms-cert=2023k marker\n";
+            return;
+        }
+
+        PVE::QemuConfig->lock_config(
+            $vmid,
+            sub {
+                my $locked_conf = PVE::QemuConfig->load_config($vmid);
+
+                eval { PVE::Tools::assert_if_modified($conf->{digest}, $locked_conf->{digest}) };
+                die "VM ${vmid}: $@" if $@;
+
+                $locked_conf->{efidisk0} = print_drive($updated);
+                PVE::QemuConfig->write_config($vmid, $locked_conf);
+                print "successfully updated efidisk\n";
+            },
+        );
+
+        return;
+    },
+});
+
+__PACKAGE__->register_method({
     name => 'terminal',
     path => 'terminal',
     method => 'POST',
@@ -1335,6 +1393,8 @@ our $cmddef = {
         resize => ["PVE::API2::Qemu", 'resize_vm', ['vmid', 'disk', 'size'], {%node}],
         unlink => ["PVE::API2::Qemu", 'unlink', ['vmid'], {%node}],
     },
+
+    'enroll-efi-keys' => [__PACKAGE__, 'enroll-efi-keys', ['vmid']],
 
     monitor => [__PACKAGE__, 'monitor', ['vmid']],
 
