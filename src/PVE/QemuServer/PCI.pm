@@ -882,7 +882,7 @@ sub print_hostpci_devices {
 
         my $sysfspath;
         if ($d->{mdev}) {
-            my $uuid = $conf->{uuid} // generate_mdev_uuid($vmid, $i);
+            my $uuid = generate_mdev_uuid($vmid, $i);
             $sysfspath = "/sys/bus/mdev/devices/$uuid";
         }
 
@@ -954,7 +954,7 @@ sub prepare_pci_device {
     if ($device->{nvidia}) {
         # nothing to do
     } elsif (my $mdev = $device->{mdev}) {
-        my $uuid = $conf->{uuid} // generate_mdev_uuid($vmid, $index);
+        my $uuid = generate_mdev_uuid($vmid, $index);
         PVE::SysFSTools::pci_create_mdev_device($pciid, $uuid, $mdev);
     } else {
         die "can't unbind/bind PCI group to VFIO '$pciid'\n"
