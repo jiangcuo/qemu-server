@@ -3,6 +3,8 @@ package PVE::QemuServer::Memory;
 use strict;
 use warnings;
 
+use JSON;
+
 use PVE::JSONSchema qw(parse_property_string);
 use PVE::Tools qw(run_command lock_file lock_file_full file_read_firstline dir_glob_foreach);
 use PVE::Exception qw(raise raise_param_exc);
@@ -74,6 +76,14 @@ our $memory_fmt = {
         default_key => 1,
         minimum => 16,
         default => 512,
+    },
+    'prealloc-threads' => {
+        description =>
+            "Number of threads to use for RAM preallocation. Setting this enables RAM"
+            . " preallocation for the VM.",
+        type => 'integer',
+        minimum => 1,
+        optional => 1,
     },
 };
 
@@ -152,6 +162,13 @@ sub get_current_memory {
     return $memory->{current};
 }
 
+my sub get_prealloc_threads {
+    my ($conf) = @_;
+
+    my $memory = parse_memory($conf->{memory});
+    return $memory->{'prealloc-threads'};
+}
+
 sub get_numa_node_list {
     my ($conf) = @_;
     my @numa_map;
@@ -183,6 +200,72 @@ sub get_numa_guest_to_host_map {
     return $map if %$map;
     my $sockets = $conf->{sockets} || 1;
     return { map { $_ => $_ } (0 .. ($sockets - 1)) };
+}
+
+my sub get_thread_context_object {
+    my ($id, $hostnodes) = @_;
+
+    return if !defined($hostnodes);
+    return if $hostnodes =~ m/,/;
+
+    my ($start, $end) = split('-', $hostnodes);
+    $end //= $start;
+    for my $node ($start .. $end) {
+        return if !host_numanode_exists($node);
+    }
+
+    my $thread_context = "tc-$id";
+    return (
+        "thread-context,id=$thread_context,node-affinity=$hostnodes",
+        $thread_context,
+    );
+}
+
+my sub apply_prealloc_options {
+    my ($conf, $mem_object, $thread_context) = @_;
+
+    my $prealloc_threads = get_prealloc_threads($conf);
+
+    if ($conf->{hugepages} || $prealloc_threads) {
+        $mem_object .= ",prealloc=yes";
+    }
+
+    if ($prealloc_threads) {
+        $mem_object .= ",prealloc-threads=$prealloc_threads";
+        $mem_object .= ",prealloc-context=$thread_context" if $thread_context;
+    }
+
+    return $mem_object;
+}
+
+my sub apply_prealloc_context {
+    my ($conf, $mem_object, $thread_context) = @_;
+
+    return $mem_object if !get_prealloc_threads($conf) || !$thread_context;
+
+    return "$mem_object,prealloc-context=$thread_context";
+}
+
+my sub get_mem_object_qmp_properties {
+    my ($conf, $qom_type, $size, $thread_context) = @_;
+
+    my $properties = {
+        'qom-type' => $qom_type,
+        size => int($size * 1024 * 1024),
+    };
+
+    my $prealloc_threads = get_prealloc_threads($conf);
+
+    if ($conf->{hugepages} || $prealloc_threads) {
+        $properties->{prealloc} = JSON::true;
+    }
+
+    if ($prealloc_threads) {
+        $properties->{'prealloc-threads'} = $prealloc_threads;
+        $properties->{'prealloc-context'} = $thread_context if $thread_context;
+    }
+
+    return $properties;
 }
 
 sub foreach_dimm {
@@ -240,6 +323,7 @@ sub qemu_memory_hotplug {
     if ($value > $memory) {
 
         my $numa_hostmap;
+        my $memory_add_conf = { %$conf, memory => print_memory($newmem) };
 
         foreach_dimm(
             $conf,
@@ -265,14 +349,18 @@ sub qemu_memory_hotplug {
                         hugepages_allocate($hugepages_topology, $hugepages_host_topology);
 
                         eval {
+                            my $object_properties = get_mem_object_qmp_properties(
+                                $memory_add_conf,
+                                "memory-backend-file",
+                                $dimm_size,
+                            );
+                            $object_properties->{id} = "mem-$name";
+                            $object_properties->{'mem-path'} = $path;
+                            $object_properties->{share} = JSON::true;
+
                             mon_cmd(
                                 $vmid, "object-add",
-                                'qom-type' => "memory-backend-file",
-                                id => "mem-$name",
-                                size => int($dimm_size * 1024 * 1024),
-                                'mem-path' => $path,
-                                share => JSON::true,
-                                prealloc => JSON::true,
+                                %$object_properties,
                             );
                         };
                         if (my $err = $@) {
@@ -286,11 +374,16 @@ sub qemu_memory_hotplug {
 
                 } else {
                     eval {
+                        my $object_properties = get_mem_object_qmp_properties(
+                            $memory_add_conf,
+                            "memory-backend-ram",
+                            $dimm_size,
+                        );
+                        $object_properties->{id} = "mem-$name";
+
                         mon_cmd(
                             $vmid, "object-add",
-                            'qom-type' => "memory-backend-ram",
-                            id => "mem-$name",
-                            size => int($dimm_size * 1024 * 1024),
+                            %$object_properties,
                         );
                     };
                 }
@@ -375,6 +468,7 @@ sub config {
     my ($conf, $vmid, $sockets, $cores, $hotplug, $virtiofs_enabled, $cmd, $machine_flags) = @_;
 
     my $memory = get_current_memory($conf->{memory});
+    my $prealloc_threads = get_prealloc_threads($conf);
     my $static_memory = 0;
 
     if ($hotplug) {
@@ -435,9 +529,10 @@ sub config {
 
             # hostnodes
             my $hostnodelists = $numa->{hostnodes};
+            my $hostnodes;
             if (defined($hostnodelists)) {
 
-                my $hostnodes = print_numa_hostnodes($hostnodelists);
+                $hostnodes = print_numa_hostnodes($hostnodelists);
 
                 # policy
                 my $policy = $numa->{policy};
@@ -445,6 +540,13 @@ sub config {
                 $mem_object .= ",host-nodes=$hostnodes,policy=$policy";
             } else {
                 die "numa hostnodes need to be defined to use hugepages" if $conf->{hugepages};
+            }
+
+            if ($prealloc_threads && !$virtiofs_enabled) {
+                my ($thread_context_object, $thread_context) =
+                    get_thread_context_object($memdev, $hostnodes);
+                push @$cmd, '-object', $thread_context_object if $thread_context_object;
+                $mem_object = apply_prealloc_context($conf, $mem_object, $thread_context);
             }
 
             push @$cmd, '-object', $mem_object;
@@ -467,15 +569,30 @@ sub config {
 
                 my $memdev = $virtiofs_enabled ? "virtiofs-mem$i" : "ram-node$i";
                 my $mem_object = print_mem_object($conf, $memdev, $numa_memory);
+                if ($prealloc_threads && !$virtiofs_enabled) {
+                    my ($thread_context_object, $thread_context) =
+                        get_thread_context_object($memdev, $i);
+                    push @$cmd, '-object', $thread_context_object if $thread_context_object;
+                    $mem_object = apply_prealloc_context($conf, $mem_object, $thread_context);
+                }
                 push @$cmd, '-object', $mem_object;
                 push @$cmd, '-numa', "node,nodeid=$i,cpus=$cpus,memdev=$memdev";
             }
         }
     } elsif ($virtiofs_enabled) {
         # kvm: '-machine memory-backend' and '-numa memdev' properties are mutually exclusive
+        my $mem_object = 'memory-backend-memfd,id=virtiofs-mem' . ",size=${memory}M,share=on";
+        $mem_object = apply_prealloc_options($conf, $mem_object) if $prealloc_threads;
+
         push @$cmd, '-object',
-            'memory-backend-memfd,id=virtiofs-mem' . ",size=$conf->{memory}M,share=on";
+            $mem_object;
         push @$machine_flags, 'memory-backend=virtiofs-mem';
+    } elsif ($prealloc_threads) {
+        my $memdev = 'ram';
+        my $mem_object = print_mem_object($conf, $memdev, $static_memory);
+
+        push @$cmd, '-object', $mem_object;
+        push @$machine_flags, "memory-backend=$memdev";
     }
 
     if ($hotplug) {
@@ -502,18 +619,20 @@ sub config {
 sub print_mem_object {
     my ($conf, $id, $size) = @_;
 
+    my $mem_object;
     if ($conf->{hugepages}) {
 
         my $hugepages_size = hugepages_size($conf, $size);
         my $path = hugepages_mount_path($hugepages_size);
 
-        return "memory-backend-file,id=$id,size=${size}M,mem-path=$path,share=on,prealloc=yes";
+        $mem_object = "memory-backend-file,id=$id,size=${size}M,mem-path=$path,share=on";
     } elsif ($id =~ m/^virtiofs-mem/) {
-        return "memory-backend-memfd,id=$id,size=${size}M,share=on";
+        $mem_object = "memory-backend-memfd,id=$id,size=${size}M,share=on";
     } else {
-        return "memory-backend-ram,id=$id,size=${size}M";
+        $mem_object = "memory-backend-ram,id=$id,size=${size}M";
     }
 
+    return apply_prealloc_options($conf, $mem_object);
 }
 
 sub print_numa_hostnodes {
@@ -820,4 +939,3 @@ sub hugepages_update_locked {
     return $res;
 }
 1;
-
