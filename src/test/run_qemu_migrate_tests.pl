@@ -305,6 +305,16 @@ my $vm_configs = {
         'unused0' => 'local-zfs:vm-4567-disk-0',
         'vmgenid' => 'e698e60c-9278-4dd9-941f-416075383f2a',
     },
+    8006 => {
+        'bootdisk' => 'nvme0',
+        'cores' => 1,
+        'memory' => 512,
+        'name' => 'nvme-migration-test',
+        'nvme0' => 'local-lvm:vm-8006-disk-0,size=1G',
+        'ostype' => 'l26',
+        'snapshots' => {},
+        'sockets' => 1,
+    },
 };
 
 my $source_vdisks = {
@@ -367,6 +377,13 @@ my $source_vdisks = {
             'size' => 4294967296,
             'vmid' => '111',
             'volid' => 'local-lvm:vm-111-disk-0',
+        },
+        {
+            'ctime' => '1589277334',
+            'format' => 'raw',
+            'size' => 1073741824,
+            'vmid' => '8006',
+            'volid' => 'local-lvm:vm-8006-disk-0',
         },
     ],
     'local-zfs' => [
@@ -1634,6 +1651,47 @@ my $tests = [
             vm_config => $vm_configs->{149},
             vm_status => {
                 running => 0,
+            },
+        },
+    },
+    {
+        name => '8006_nvme_offline',
+        target => 'pve1',
+        vmid => 8006,
+        vm_status => {
+            running => 0,
+        },
+        expected_calls => $default_expected_calls_offline,
+        expected => {
+            source_volids => {},
+            target_volids => local_volids_for_vm(8006),
+            vm_config => $vm_configs->{8006},
+            vm_status => {
+                running => 0,
+            },
+        },
+    },
+    {
+        name => '8006_nvme_online_rejected',
+        target => 'pve1',
+        vmid => 8006,
+        vm_status => {
+            running => 1,
+            runningmachine => 'pc-q35-5.0+pve0',
+        },
+        opts => {
+            online => 1,
+            'with-local-disks' => 1,
+        },
+        expected_calls => {},
+        expect_die => "can't live migrate VM with NVME disks: nvme0",
+        expected => {
+            source_volids => local_volids_for_vm(8006),
+            target_volids => {},
+            vm_config => $vm_configs->{8006},
+            vm_status => {
+                running => 1,
+                runningmachine => 'pc-q35-5.0+pve0',
             },
         },
     },

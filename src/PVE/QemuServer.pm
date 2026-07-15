@@ -2818,7 +2818,7 @@ sub check_local_resources {
         }
         # sockets are safe: they will recreated be on the target side post-migrate
         next if $k =~ m/^serial/ && ($conf->{$k} eq 'socket');
-        push @loc_res, $k if $k =~ m/^(usb|hostpci|serial|parallel|virtiofs|spdk|nvme)\d+$/;
+        push @loc_res, $k if $k =~ m/^(usb|hostpci|serial|parallel|virtiofs|spdk)\d+$/;
     }
 
     die "VM uses local resources\n" if scalar @loc_res && !$noerr;
