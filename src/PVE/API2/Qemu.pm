@@ -71,6 +71,192 @@ BEGIN {
 
 use base qw(PVE::RESTHandler);
 
+# Decode a single internationalised-domain-name (IDN) label from its
+# punycode/ASCII form ('xn--...') to the original Unicode string. RFC 3492
+# Bootstring; matches the JavaScript window.punycode shipped by
+# proxmox-widget-toolkit so a round-trip through the web UI is lossless.
+#
+# Implemented inline (~30 lines of pure Perl) so we don't pull in
+# Net::IDN::Encode as a new runtime dependency just for the clone default
+# name. Returns the decoded Unicode string on success; returns the input
+# verbatim if it doesn't start with the 'xn--' ACE prefix, contains
+# non-basic characters, decodes to a string containing control / unassigned
+# / surrogate / private-use code points, or fails any RFC-mandated bound
+# check. That fallback path is the whole point: callers want IDN values
+# rendered as Unicode and everything else left alone, never an exception.
+sub decode_punycode_label {
+    my ($input) = @_;
+    return $input if !defined($input);
+    return $input if $input !~ /^xn--(.*)$/i;
+
+    my $encoded = $1;
+    return $input if $encoded eq '';
+
+    my ($base, $tmin, $tmax, $skew, $damp, $initial_bias, $initial_n) =
+        (36, 1, 26, 38, 700, 72, 128);
+
+    my @output;
+    my $extended_start = 0;
+    if ((my $delim = rindex($encoded, '-')) >= 0) {
+        my $basic = substr($encoded, 0, $delim);
+        return $input if $basic =~ /[^\x00-\x7f]/;
+        @output = split(//, $basic);
+        $extended_start = $delim + 1;
+    }
+
+    my $decode_digit = sub {
+        my ($c) = @_;
+        return ord($c) - ord('0') + 26 if $c =~ /[0-9]/;
+        return ord(lc($c)) - ord('a') if $c =~ /[A-Za-z]/;
+        return $base;
+    };
+
+    my $adapt = sub {
+        my ($delta, $numpoints, $firsttime) = @_;
+        $delta = $firsttime ? int($delta / $damp) : ($delta >> 1);
+        $delta += int($delta / $numpoints);
+        my $k = 0;
+        while ($delta > int((($base - $tmin) * $tmax) / 2)) {
+            $delta = int($delta / ($base - $tmin));
+            $k += $base;
+        }
+        return $k + int((($base - $tmin + 1) * $delta) / ($delta + $skew));
+    };
+
+    my ($n, $i, $bias, $pos) = ($initial_n, 0, $initial_bias, $extended_start);
+    my $enc_len = length($encoded);
+
+    while ($pos < $enc_len) {
+        my $old_i = $i;
+        my $w = 1;
+        my $k = $base;
+        while (1) {
+            return $input if $pos >= $enc_len;
+            my $digit = $decode_digit->(substr($encoded, $pos, 1));
+            $pos++;
+            return $input if $digit >= $base;
+            return $input if $digit > int((0x7fffffff - $i) / $w);
+            $i += $digit * $w;
+            my $t = $k <= $bias ? $tmin : ($k >= $bias + $tmax ? $tmax : $k - $bias);
+            last if $digit < $t;
+            return $input if $w > int(0x7fffffff / ($base - $t));
+            $w *= ($base - $t);
+            $k += $base;
+        }
+        my $out_len = scalar(@output) + 1;
+        $bias = $adapt->($i - $old_i, $out_len, $old_i == 0);
+        return $input if int($i / $out_len) > 0x7fffffff - $n;
+        $n += int($i / $out_len);
+        $i = $i % $out_len;
+        return $input if $n >= 0xd800 && $n <= 0xdfff;
+        return $input if $n > 0x10ffff;
+        splice(@output, $i, 0, chr($n));
+        $i++;
+    }
+
+    my $result = join('', @output);
+    return $input if $result =~ /[\p{Cc}\p{Cn}\p{Cs}\p{Co}]/;
+    return $result;
+}
+
+# Decode every 'xn--...' token in an arbitrary text body to its Unicode
+# form, leaving everything else alone. Mirrors the JavaScript
+# Proxmox.Utils.decodePunycodeText() from proxmox-widget-toolkit so a name
+# like 'Copy-of-VM-xn--winssssws--ys5qt78h7rtmv2f' decodes its IDN segment
+# without disturbing the literal prefix. Each token is decoded
+# independently, so a malformed token can't corrupt neighbouring text.
+sub decode_punycode_text {
+    my ($text) = @_;
+    return $text if !defined($text) || $text !~ /xn--/i;
+    $text =~ s/(xn--[A-Za-z0-9-]+)/decode_punycode_label($1)/eg;
+    return $text;
+}
+
+# Encode a single label that may contain non-ASCII characters back into its
+# punycode/ACE form ('xn--...'). RFC 3492 Bootstring encoder, the reverse
+# of decode_punycode_label. Used to produce a valid 'dns-name'-format
+# string from a label that contains decoded Unicode characters (such as
+# the 'Copy-of-VM-<unicode-name>' default name a clone builds from a
+# decoded source). Pure-ASCII input is returned unchanged. Any encoder
+# error falls back to the input verbatim, matching the failure mode of
+# the decode helper.
+sub encode_punycode_label {
+    my ($input) = @_;
+    return $input if !defined($input);
+    # Pure ASCII -> nothing to do.
+    return $input if $input !~ /[^\x00-\x7f]/;
+
+    my ($base, $tmin, $tmax, $skew, $damp, $initial_bias, $initial_n) =
+        (36, 1, 26, 38, 700, 72, 128);
+
+    my @codepoints = map { ord($_) } split(//, $input);
+    my @basic = grep { $_ < 0x80 } @codepoints;
+    my $h = my $b = scalar(@basic);
+
+    my $output = join('', map { chr($_) } @basic);
+    $output .= '-' if $b > 0;
+
+    my $encode_digit = sub {
+        my ($d) = @_;
+        return chr($d + ord('a')) if $d < 26;
+        return chr($d - 26 + ord('0'));
+    };
+    my $adapt = sub {
+        my ($delta, $numpoints, $firsttime) = @_;
+        $delta = $firsttime ? int($delta / $damp) : ($delta >> 1);
+        $delta += int($delta / $numpoints);
+        my $k = 0;
+        while ($delta > int((($base - $tmin) * $tmax) / 2)) {
+            $delta = int($delta / ($base - $tmin));
+            $k += $base;
+        }
+        return $k + int((($base - $tmin + 1) * $delta) / ($delta + $skew));
+    };
+
+    my $n = $initial_n;
+    my $delta = 0;
+    my $bias = $initial_bias;
+    my $total = scalar(@codepoints);
+
+    while ($h < $total) {
+        # Find the minimum codepoint >= n.
+        my $m = 0x7fffffff;
+        for my $c (@codepoints) {
+            $m = $c if $c >= $n && $c < $m;
+        }
+        return $input if $m - $n > int((0x7fffffff - $delta) / ($h + 1));
+        $delta += ($m - $n) * ($h + 1);
+        $n = $m;
+        for my $c (@codepoints) {
+            if ($c < $n) {
+                $delta++;
+                return $input if $delta > 0x7fffffff;
+            } elsif ($c == $n) {
+                my $q = $delta;
+                my $k = $base;
+                while (1) {
+                    my $t =
+                          $k <= $bias ? $tmin
+                        : $k >= $bias + $tmax ? $tmax
+                        : $k - $bias;
+                    last if $q < $t;
+                    $output .= $encode_digit->($t + (($q - $t) % ($base - $t)));
+                    $q = int(($q - $t) / ($base - $t));
+                    $k += $base;
+                }
+                $output .= $encode_digit->($q);
+                $bias = $adapt->($delta, $h + 1, $h == $b);
+                $delta = 0;
+                $h++;
+            }
+        }
+        $delta++;
+        $n++;
+    }
+
+    return 'xn--' . $output;
+}
+
 my $opt_force_description =
     "Force physical removal. Without this, we simple remove the disk from the config file and create an additional configuration entry called 'unused[n]', which contains the volume ID. Unlink of unused[n] always cause physical removal.";
 
@@ -4652,7 +4838,20 @@ __PACKAGE__->register_method({
             if ($param->{name}) {
                 $newconf->{name} = $param->{name};
             } else {
-                $newconf->{name} = "Copy-of-VM-" . ($oldconf->{name} // $vmid);
+                # Build a default name by decoding the source's stored ASCII
+                # form back to Unicode, prefixing 'Copy-of-VM-', then encoding
+                # the whole thing back to a single IDN label so the result
+                # still passes the 'dns-name' schema validator on its way
+                # into the new VM config. The end result is that the cloned
+                # VM's stored name is a *single* xn--... label that decodes
+                # cleanly back to 'Copy-of-VM-<unicode-source-name>' in the
+                # web UI, instead of the previous 'Copy-of-VM-xn--...' shape
+                # which no decoder could round-trip. ASCII source names go
+                # through decode + re-encode unchanged.
+                my $base = defined($oldconf->{name})
+                    ? decode_punycode_text($oldconf->{name})
+                    : $vmid;
+                $newconf->{name} = encode_punycode_label("Copy-of-VM-" . $base);
             }
 
             if ($param->{description}) {
