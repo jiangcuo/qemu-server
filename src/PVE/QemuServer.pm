@@ -931,6 +931,7 @@ my $autoinstall_fmt = {
     },
     disk => {
         type => 'string',
+        format_description => 'device',
         pattern => '[A-Za-z0-9]+',
         optional => 1,
         description => 'Target disk for the installation. Linux device name (e.g. `vda`,'
@@ -939,24 +940,28 @@ my $autoinstall_fmt = {
     },
     locale => {
         type => 'string',
+        format_description => 'locale',
         pattern => '[A-Za-z0-9_.@-]+',
         optional => 1,
         description => 'System locale, e.g. `en_US.UTF-8` or `zh_CN.UTF-8`.',
     },
     keyboard => {
         type => 'string',
+        format_description => 'layout',
         pattern => '[A-Za-z0-9_:-]+',
         optional => 1,
         description => 'Keyboard layout, e.g. `us` (Linux) or `en-US` (Windows).',
     },
     productkey => {
         type => 'string',
+        format_description => 'key',
         pattern => '[A-Za-z0-9]{5}(?:-[A-Za-z0-9]{5}){4}',
         optional => 1,
         description => 'Windows product key.',
     },
     edition => {
         type => 'string',
+        format_description => 'index|name',
         pattern => '[^,;=]+',
         optional => 1,
         description => 'Windows image to install, either the image index or its name (e.g.'
