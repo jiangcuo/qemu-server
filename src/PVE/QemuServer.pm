@@ -903,6 +903,75 @@ my $cicustom_fmt = {
 };
 PVE::JSONSchema::register_format('pve-qm-cicustom', $cicustom_fmt);
 
+my $autoinstall_fmt = {
+    enabled => {
+        type => 'boolean',
+        default_key => 1,
+        default => 0,
+        description => 'Generate an unattended installation file instead of the regular'
+            . ' cloud-init data and put it on the cloud-init drive.',
+    },
+    type => {
+        type => 'string',
+        enum => ['windows', 'kickstart', 'ubuntu'],
+        optional => 1,
+        description => 'Installer type. `windows` generates `autounattend.xml`, `kickstart`'
+            . ' generates `ks.cfg` (RHEL, Rocky, Alma, Fedora, ...) and `ubuntu` generates a'
+            . ' subiquity autoinstall `user-data`. Defaults to `windows` for Windows OS types'
+            . ' and `kickstart` otherwise.',
+    },
+    file => {
+        type => 'string',
+        format => 'pve-volume-id',
+        format_description => 'volume',
+        optional => 1,
+        description => 'Use this snippet as installation file instead of generating one from the'
+            . ' cloud-init settings. Placeholders like `{{hostname}}` or `{{password}}` are'
+            . ' replaced.',
+    },
+    disk => {
+        type => 'string',
+        pattern => '[A-Za-z0-9]+',
+        optional => 1,
+        description => 'Target disk for the installation. Linux device name (e.g. `vda`,'
+            . ' `sda`, `nvme0n1`) or Windows disk number. Autodetected from the boot disk'
+            . ' by default.',
+    },
+    locale => {
+        type => 'string',
+        pattern => '[A-Za-z0-9_.@-]+',
+        optional => 1,
+        description => 'System locale, e.g. `en_US.UTF-8` or `zh_CN.UTF-8`.',
+    },
+    keyboard => {
+        type => 'string',
+        pattern => '[A-Za-z0-9_:-]+',
+        optional => 1,
+        description => 'Keyboard layout, e.g. `us` (Linux) or `en-US` (Windows).',
+    },
+    timezone => {
+        type => 'string',
+        pattern => '[A-Za-z0-9_/+. ()-]+',
+        optional => 1,
+        description => 'Time zone. Linux uses IANA names (`Asia/Shanghai`), Windows uses'
+            . ' Windows names (`China Standard Time`). Defaults to UTC.',
+    },
+    productkey => {
+        type => 'string',
+        pattern => '[A-Za-z0-9]{5}(?:-[A-Za-z0-9]{5}){4}',
+        optional => 1,
+        description => 'Windows product key.',
+    },
+    edition => {
+        type => 'string',
+        pattern => '[^,;=]+',
+        optional => 1,
+        description => 'Windows image to install, either the image index or its name (e.g.'
+            . ' `Windows 11 Pro`). Defaults to the first image.',
+    },
+};
+PVE::JSONSchema::register_format('pve-qm-autoinstall', $autoinstall_fmt);
+
 # any new option might need to be added to $cloudinitoptions in PVE::API2::Qemu
 my $confdesc_cloudinit = {
     citype => {
@@ -940,6 +1009,14 @@ my $confdesc_cloudinit = {
         description => 'cloud-init: Specify custom files to replace the automatically generated'
             . ' ones at start.',
         format => 'pve-qm-cicustom',
+    },
+    autoinstall => {
+        optional => 1,
+        type => 'string',
+        description => 'cloud-init: Put an unattended installation file (Windows'
+            . ' autounattend.xml, kickstart or Ubuntu autoinstall) on the cloud-init drive'
+            . ' instead of the regular cloud-init data.',
+        format => 'pve-qm-autoinstall',
     },
     searchdomain => {
         optional => 1,

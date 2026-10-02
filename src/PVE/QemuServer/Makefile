@@ -8,6 +8,7 @@ SOURCES=PCI.pm		\
 	Memory.pm	\
 	ImportDisk.pm	\
 	Cloudinit.pm	\
+	Autoinstall.pm	\
 	Agent.pm	\
 	Helpers.pm	\
 	Monitor.pm	\

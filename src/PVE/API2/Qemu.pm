@@ -247,6 +247,16 @@ my $check_storage_access = sub {
         "/storage/$settings->{vmstatestorage}",
         ['Datastore.AllocateSpace'],
     ) if defined($settings->{vmstatestorage});
+
+    if (defined(my $autoinstall = $settings->{autoinstall})) {
+        my $ai = PVE::JSONSchema::parse_property_string('pve-qm-autoinstall', $autoinstall);
+        if (my $volid = $ai->{file}) {
+            PVE::Storage::check_volume_access($rpcenv, $authuser, $storecfg, $vmid, $volid);
+            my ($vtype) = PVE::Storage::parse_volname($storecfg, $volid);
+            raise_param_exc({ autoinstall => "'$volid' is not in the snippets directory" })
+                if $vtype ne 'snippets';
+        }
+    }
 };
 
 my $check_storage_access_clone = sub {
@@ -793,6 +803,7 @@ my $diskoptions = {
 };
 
 my $cloudinitoptions = {
+    autoinstall => 1,
     cicustom => 1,
     cipassword => 1,
     citype => 1,
@@ -6523,7 +6534,7 @@ __PACKAGE__->register_method({
             type => {
                 description => 'Config type.',
                 type => 'string',
-                enum => ['user', 'network', 'meta'],
+                enum => ['user', 'network', 'meta', 'autoinstall'],
             },
         },
     },
