@@ -23,7 +23,10 @@ use PVE::QemuServer::Helpers;
 # provided by the pxvirt-virtio-win package
 our $VIRTIO_WIN_DIR = '/usr/share/pve-manager/virtio-win';
 my $VIRTIO_WIN_DRIVERS = [qw(viostor vioscsi NetKVM Balloon vioserial)];
-my $QEMU_GA_MSI = 'guest-agent/qemu-ga-x86_64.msi';
+my $QEMU_GA_MSI = {
+    x86_64 => 'guest-agent/qemu-ga-x86_64.msi',
+    aarch64 => 'guest-agent/qemu-ga-arm64.msi',
+};
 
 my $installer_types = {
     windows => {
@@ -676,9 +679,9 @@ sub generate_windows {
     $x .= "    " . $comp->('Microsoft-Windows-Shell-Setup');
     $x .= "      <ComputerName>" . xml_escape($computername) . "</ComputerName>\n";
     $x .= "    </component>\n";
-    if ($s->{qemu_ga}) {
+    if (my $qemu_ga = $s->{qemu_ga}) {
         # install the guest agent from the autoinstall ISO, its drive letter is not known
-        my $msi = $QEMU_GA_MSI =~ s|/|\\|gr;
+        my $msi = $qemu_ga =~ s|/|\\|gr;
         $x .= "    " . $comp->('Microsoft-Windows-Deployment');
         $x .= "      <RunSynchronous>\n";
         $x .= "        <RunSynchronousCommand wcm:action=\"add\"><Order>1</Order>"
@@ -833,14 +836,11 @@ sub get_files {
         }
 
         # current guest agent builds only support Windows 10 / Server 2016 and newer
-        if (
-            $settings->{arch} eq 'x86_64'
-            && $settings->{winversion} >= 10
-            && -f "$VIRTIO_WIN_DIR/$QEMU_GA_MSI"
-        ) {
-            $settings->{qemu_ga} = 1;
-            $extra_files->{"/$QEMU_GA_MSI"} =
-                PVE::Tools::file_get_contents("$VIRTIO_WIN_DIR/$QEMU_GA_MSI", 64 * 1024 * 1024);
+        my $msi = $QEMU_GA_MSI->{ $settings->{arch} };
+        if ($msi && $settings->{winversion} >= 10 && -f "$VIRTIO_WIN_DIR/$msi") {
+            $settings->{qemu_ga} = $msi;
+            $extra_files->{"/$msi"} =
+                PVE::Tools::file_get_contents("$VIRTIO_WIN_DIR/$msi", 64 * 1024 * 1024);
         }
     }
 
