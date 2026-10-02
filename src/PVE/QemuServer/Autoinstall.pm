@@ -211,6 +211,39 @@ sub get_target_disk {
     return;
 }
 
+# Language of the Windows image on the attached installation ISO. Setup shows the language
+# selection if the configured language is not available in the image.
+sub get_install_locale {
+    my ($conf, $edition) = @_;
+
+    return if !PVE::Storage->can('get_iso_info');
+
+    my $storecfg = PVE::Storage::config();
+    for my $ds (sort keys %$conf) {
+        next if $ds !~ m/^(?:ide|sata|scsi)\d+$/;
+        my $drive = PVE::QemuServer::Drive::parse_drive($ds, $conf->{$ds});
+        next if !PVE::QemuServer::Drive::drive_is_cdrom($drive, 1);
+        next if $drive->{file} eq 'none' || $drive->{file} eq 'cdrom';
+
+        # detection is optional, e.g. pxvirt-isoinfo is not installed
+        my $info = eval { PVE::Storage::get_iso_info($storecfg, $drive->{file}) };
+        next if !$info || ($info->{type} // '') ne 'windows';
+
+        # prefer the selected image, all images of an ISO usually have the same language
+        my @images = grep { ($_->{languages} // [])->[0] } ($info->{images} // [])->@*;
+        my ($image) = grep {
+            defined($edition) && ($_->{index} eq $edition || $_->{name} eq $edition)
+        } @images;
+        $image //= $images[0] or next;
+
+        my $language = $image->{languages}->[0];
+        my ($locale) = $language =~ m/^([a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*)$/ or next;
+        return $locale;
+    }
+
+    return;
+}
+
 sub get_host_timezone {
     if (-f '/etc/timezone') {
         my $tz = PVE::Tools::file_read_firstline('/etc/timezone');
@@ -298,6 +331,7 @@ sub get_template_variables {
         disk => $settings->{disk} // '',
         timezone => $settings->{timezone} // '',
         keyboard => $settings->{keyboard} // '',
+        locale => $settings->{locale} // '',
         productkey => $settings->{productkey} // '',
         edition => $settings->{edition} // '',
     };
@@ -568,7 +602,7 @@ sub generate_windows {
             . " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n";
     };
 
-    my $locale = 'en-US';
+    my $locale = $s->{locale} // 'en-US';
     my $input_locale = $s->{input_locale};
     my $timezone = PVE::QemuServer::Timezone::windows_timezone($s->{timezone});
     my $computername = substr($s->{hostname}, 0, 15);
@@ -905,6 +939,8 @@ sub get_files {
 
     my $extra_files = {};
     if ($type eq 'windows') {
+        $settings->{locale} = get_install_locale($conf, $settings->{edition});
+
         my $drivers = get_local_virtio_drivers($settings->{winversion}, $settings->{arch});
         $settings->{virtio_drivers} = $drivers;
         for my $driver (sort keys %$drivers) {
