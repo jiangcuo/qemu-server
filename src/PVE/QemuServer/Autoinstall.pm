@@ -20,6 +20,11 @@ use PVE::QemuServer::Helpers;
 # NOTE: PVE::QemuServer and PVE::QemuServer::Cloudinit use this module, so only
 # call into them with fully qualified names at runtime.
 
+# provided by the pxvirt-virtio-win package
+our $VIRTIO_WIN_DIR = '/usr/share/pve-manager/virtio-win';
+my $VIRTIO_WIN_DRIVERS = [qw(viostor vioscsi NetKVM Balloon vioserial)];
+my $QEMU_GA_MSI = 'guest-agent/qemu-ga-x86_64.msi';
+
 my $installer_types = {
     windows => {
         file => '/autounattend.xml',
@@ -481,16 +486,50 @@ my sub windows_locale {
     return $locale;
 }
 
+my sub windows_driver_versions {
+    my ($winversion) = @_;
+
+    return
+          $winversion >= 11 ? ['w11', '2k25', '2k22']
+        : $winversion >= 10 ? ['w10', '2k19', '2k16']
+        : $winversion >= 8 ? ['w8.1', 'w8', '2k12R2', '2k12']
+        : ['w7', '2k8R2'];
+}
+
+my sub windows_driver_arch {
+    my ($arch) = @_;
+    return $arch eq 'aarch64' ? 'ARM64' : $arch eq 'i386' ? 'x86' : 'amd64';
+}
+
+# Find the VirtIO drivers matching the guest in the local pxvirt-virtio-win package.
+# Returns a hash of driver name => directory, empty if the package is not installed.
+sub get_local_virtio_drivers {
+    my ($winversion, $arch) = @_;
+
+    my $res = {};
+    return $res if !-d $VIRTIO_WIN_DIR;
+
+    my $versions = windows_driver_versions($winversion);
+    my $driver_arch = windows_driver_arch($arch);
+    for my $driver (@$VIRTIO_WIN_DRIVERS) {
+        for my $version (@$versions) {
+            my $dir = "$VIRTIO_WIN_DIR/$driver/$version/$driver_arch";
+            if (-d $dir) {
+                $res->{$driver} = $dir;
+                last;
+            }
+        }
+    }
+    return $res;
+}
+
+# Fallback if the drivers are not available locally: point Windows Setup to an attached
+# virtio-win ISO.
 my sub windows_driver_paths {
     my ($s) = @_;
 
-    my $win = $s->{winversion};
-    my $versions =
-          $win >= 11 ? ['w11', '2k25', '2k22']
-        : $win >= 10 ? ['w10', '2k19', '2k16']
-        : $win >= 8 ? ['w8.1', 'w8', '2k12R2', '2k12']
-        : ['w7', '2k8R2'];
-    my $arch = $s->{arch} eq 'aarch64' ? 'ARM64' : $s->{arch} eq 'i386' ? 'x86' : 'amd64';
+    my $versions = windows_driver_versions($s->{winversion});
+    my $arch = windows_driver_arch($s->{arch});
 
     # the VirtIO driver ISO can end up on any of these letters
     my @paths;
@@ -541,16 +580,20 @@ sub generate_windows {
     $x .= "      <UserLocale>$locale</UserLocale>\n";
     $x .= "    </component>\n";
 
-    $x .= "    " . $comp->('Microsoft-Windows-PnpCustomizationsWinPE');
-    $x .= "      <DriverPaths>\n";
-    my $key = 1;
-    for my $path (windows_driver_paths($s)->@*) {
-        $x .= "        <PathAndCredentials wcm:action=\"add\" wcm:keyValue=\"$key\">"
-            . "<Path>$path</Path></PathAndCredentials>\n";
-        $key++;
+    # bundled drivers are put into $WinPEDriver$ on the same ISO, which Windows Setup loads
+    # automatically
+    if (!$s->{virtio_drivers}->%*) {
+        $x .= "    " . $comp->('Microsoft-Windows-PnpCustomizationsWinPE');
+        $x .= "      <DriverPaths>\n";
+        my $key = 1;
+        for my $path (windows_driver_paths($s)->@*) {
+            $x .= "        <PathAndCredentials wcm:action=\"add\" wcm:keyValue=\"$key\">"
+                . "<Path>$path</Path></PathAndCredentials>\n";
+            $key++;
+        }
+        $x .= "      </DriverPaths>\n";
+        $x .= "    </component>\n";
     }
-    $x .= "      </DriverPaths>\n";
-    $x .= "    </component>\n";
 
     $x .= "    " . $comp->('Microsoft-Windows-Setup');
     if ($s->{winversion} >= 11 && !($s->{tpm} && $s->{uefi})) {
@@ -634,6 +677,18 @@ sub generate_windows {
     $x .= "    " . $comp->('Microsoft-Windows-Shell-Setup');
     $x .= "      <ComputerName>" . xml_escape($computername) . "</ComputerName>\n";
     $x .= "    </component>\n";
+    if ($s->{qemu_ga}) {
+        # install the guest agent from the autoinstall ISO, its drive letter is not known
+        my $msi = $QEMU_GA_MSI =~ s|/|\\|gr;
+        $x .= "    " . $comp->('Microsoft-Windows-Deployment');
+        $x .= "      <RunSynchronous>\n";
+        $x .= "        <RunSynchronousCommand wcm:action=\"add\"><Order>1</Order>"
+            . "<Description>Install QEMU guest agent</Description>"
+            . "<Path>cmd.exe /c for %d in (D E F G H I J) do if exist %d:\\$msi"
+            . " msiexec.exe /i %d:\\$msi /qn /norestart</Path></RunSynchronousCommand>\n";
+        $x .= "      </RunSynchronous>\n";
+        $x .= "    </component>\n";
+    }
     $x .= "    " . $comp->('Microsoft-Windows-TerminalServices-LocalSessionManager');
     $x .= "      <fDenyTSConnections>false</fDenyTSConnections>\n";
     $x .= "    </component>\n";
@@ -763,6 +818,28 @@ sub get_files {
 
     my $settings = get_settings($conf, $vmid, $ai, $type);
 
+    my $extra_files = {};
+    if ($type eq 'windows') {
+        my $drivers = get_local_virtio_drivers($settings->{winversion}, $settings->{arch});
+        $settings->{virtio_drivers} = $drivers;
+        for my $driver (sort keys %$drivers) {
+            my $dir = $drivers->{$driver};
+            opendir(my $dh, $dir) or die "unable to open '$dir' - $!\n";
+            for my $name (sort readdir($dh)) {
+                next if !-f "$dir/$name";
+                $extra_files->{"/\$WinPEDriver\$/$driver/$name"} =
+                    PVE::Tools::file_get_contents("$dir/$name", 64 * 1024 * 1024);
+            }
+            closedir($dh);
+        }
+
+        if ($settings->{arch} eq 'x86_64' && -f "$VIRTIO_WIN_DIR/$QEMU_GA_MSI") {
+            $settings->{qemu_ga} = 1;
+            $extra_files->{"/$QEMU_GA_MSI"} =
+                PVE::Tools::file_get_contents("$VIRTIO_WIN_DIR/$QEMU_GA_MSI", 64 * 1024 * 1024);
+        }
+    }
+
     my $content;
     if (my $volid = $ai->{file}) {
         my $storecfg = PVE::Storage::config();
@@ -775,7 +852,7 @@ sub get_files {
 
     die "autoinstall file too big (> 3 MiB)\n" if length($content) > 3 * 1024 * 1024;
 
-    my $files = { $info->{file} => $content };
+    my $files = { %$extra_files, $info->{file} => $content };
     if ($type eq 'ubuntu') {
         my $instance_id = Digest::SHA::sha1_hex($content);
         $files->{'/meta-data'} = "instance-id: $instance_id\n";
