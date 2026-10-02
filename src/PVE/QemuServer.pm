@@ -929,29 +929,6 @@ my $autoinstall_fmt = {
             . ' cloud-init settings. Placeholders like `{{hostname}}` or `{{password}}` are'
             . ' replaced.',
     },
-    disk => {
-        type => 'string',
-        format_description => 'device',
-        pattern => '[A-Za-z0-9]+',
-        optional => 1,
-        description => 'Target disk for the installation. Linux device name (e.g. `vda`,'
-            . ' `sda`, `nvme0n1`) or Windows disk number. Autodetected from the boot disk'
-            . ' by default.',
-    },
-    locale => {
-        type => 'string',
-        format_description => 'locale',
-        pattern => '[A-Za-z0-9_.@-]+',
-        optional => 1,
-        description => 'System locale, e.g. `en_US.UTF-8` or `zh_CN.UTF-8`.',
-    },
-    keyboard => {
-        type => 'string',
-        format_description => 'layout',
-        pattern => '[A-Za-z0-9_:-]+',
-        optional => 1,
-        description => 'Keyboard layout, e.g. `us` (Linux) or `en-US` (Windows).',
-    },
     productkey => {
         type => 'string',
         format_description => 'key',

@@ -159,9 +159,8 @@ sub get_network_config {
 
 # Best effort guess of the device name the guest kernel assigns to the boot disk.
 sub get_target_disk {
-    my ($conf, $ai, $type) = @_;
+    my ($conf, $type) = @_;
 
-    return $ai->{disk} if defined($ai->{disk});
     return '0' if $type eq 'windows';
 
     my @disks;
@@ -231,7 +230,6 @@ sub get_settings {
             is_hashed_password($password) ? $password : PVE::Tools::encrypt_pw($password);
     }
 
-    my $locale = $ai->{locale};
     # Linux guests use the time zone of the host, Windows keeps its default
     my $timezone = $type eq 'windows' ? undef : get_host_timezone();
 
@@ -246,9 +244,7 @@ sub get_settings {
         nameservers => $nameservers // [],
         searchdomains => $searchdomains // [],
         networks => get_network_config($conf),
-        disk => get_target_disk($conf, $ai, $type),
-        locale => $locale,
-        keyboard => $ai->{keyboard},
+        disk => get_target_disk($conf, $type),
         timezone => $timezone,
         productkey => $ai->{productkey},
         edition => $ai->{edition},
@@ -275,8 +271,6 @@ sub get_template_variables {
         nameserver => join(' ', $settings->{nameservers}->@*),
         searchdomain => join(' ', $settings->{searchdomains}->@*),
         disk => $settings->{disk} // '',
-        locale => $settings->{locale} // '',
-        keyboard => $settings->{keyboard} // '',
         timezone => $settings->{timezone} // '',
         productkey => $settings->{productkey} // '',
         edition => $settings->{edition} // '',
@@ -313,13 +307,10 @@ sub render_template {
 sub generate_kickstart {
     my ($s) = @_;
 
-    my $locale = $s->{locale} // 'en_US.UTF-8';
-    my $keyboard = $s->{keyboard} // 'us';
-
     my $ks = "text\n";
     $ks .= "eula --agreed\n";
-    $ks .= "lang $locale\n";
-    $ks .= "keyboard --vckeymap=$keyboard\n";
+    $ks .= "lang en_US.UTF-8\n";
+    $ks .= "keyboard --vckeymap=us\n";
     $ks .= "timezone $s->{timezone} --utc\n";
     $ks .= "firstboot --disable\n";
     $ks .= "skipx\n";
@@ -396,15 +387,13 @@ sub generate_ubuntu {
         if !defined($s->{password_hash});
 
     my $username = $s->{username} // 'ubuntu';
-    my $locale = $s->{locale} // 'en_US.UTF-8';
-    my $keyboard = $s->{keyboard} // 'us';
 
     my $y = "#cloud-config\n";
     $y .= "autoinstall:\n";
     $y .= "  version: 1\n";
-    $y .= "  locale: " . yaml_quote($locale) . "\n";
+    $y .= "  locale: 'en_US.UTF-8'\n";
     $y .= "  keyboard:\n";
-    $y .= "    layout: " . yaml_quote($keyboard) . "\n";
+    $y .= "    layout: 'us'\n";
     $y .= "  timezone: " . yaml_quote($s->{timezone}) . "\n";
     $y .= "  identity:\n";
     $y .= "    hostname: " . yaml_quote($s->{hostname}) . "\n";
@@ -480,15 +469,6 @@ sub generate_ubuntu {
     return $y;
 }
 
-my sub windows_locale {
-    my ($locale) = @_;
-
-    return 'en-US' if !defined($locale);
-    $locale =~ s/[.@].*$//;
-    $locale =~ s/_/-/g;
-    return $locale;
-}
-
 my sub windows_driver_versions {
     my ($winversion) = @_;
 
@@ -562,12 +542,11 @@ sub generate_windows {
             . " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n";
     };
 
-    my $locale = windows_locale($s->{locale});
-    my $input_locale = $s->{keyboard} // $locale;
+    my $locale = 'en-US';
     my $computername = substr($s->{hostname}, 0, 15);
     my $username = $s->{username};
     my $password_x = xml_escape($password);
-    my $disk = $s->{disk} =~ m/^\d+$/ ? $s->{disk} : 0;
+    my $disk = $s->{disk};
 
     my $x = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
     $x .= "<unattend xmlns=\"urn:schemas-microsoft-com:unattend\">\n";
@@ -576,7 +555,7 @@ sub generate_windows {
     $x .= "  <settings pass=\"windowsPE\">\n";
     $x .= "    " . $comp->('Microsoft-Windows-International-Core-WinPE');
     $x .= "      <SetupUILanguage><UILanguage>$locale</UILanguage></SetupUILanguage>\n";
-    $x .= "      <InputLocale>" . xml_escape($input_locale) . "</InputLocale>\n";
+    $x .= "      <InputLocale>$locale</InputLocale>\n";
     $x .= "      <SystemLocale>$locale</SystemLocale>\n";
     $x .= "      <UILanguage>$locale</UILanguage>\n";
     $x .= "      <UserLocale>$locale</UserLocale>\n";
@@ -768,7 +747,7 @@ sub generate_windows {
     # oobeSystem pass
     $x .= "  <settings pass=\"oobeSystem\">\n";
     $x .= "    " . $comp->('Microsoft-Windows-International-Core');
-    $x .= "      <InputLocale>" . xml_escape($input_locale) . "</InputLocale>\n";
+    $x .= "      <InputLocale>$locale</InputLocale>\n";
     $x .= "      <SystemLocale>$locale</SystemLocale>\n";
     $x .= "      <UILanguage>$locale</UILanguage>\n";
     $x .= "      <UserLocale>$locale</UserLocale>\n";
