@@ -602,7 +602,8 @@ sub generate_windows {
             . " xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">\n";
     };
 
-    my $locale = $s->{locale} // 'en-US';
+    # language of the ISO, else the one of the time zone's country
+    my $locale = $s->{locale} // $s->{input_locale} // 'en-US';
     my $input_locale = $s->{input_locale};
     my $timezone = PVE::QemuServer::Timezone::windows_timezone($s->{timezone});
     my $computername = substr($s->{hostname}, 0, 15);
