@@ -949,13 +949,6 @@ my $autoinstall_fmt = {
         optional => 1,
         description => 'Keyboard layout, e.g. `us` (Linux) or `en-US` (Windows).',
     },
-    timezone => {
-        type => 'string',
-        pattern => '[A-Za-z0-9_/+. ()-]+',
-        optional => 1,
-        description => 'Time zone. Linux uses IANA names (`Asia/Shanghai`), Windows uses'
-            . ' Windows names (`China Standard Time`). Defaults to UTC.',
-    },
     productkey => {
         type => 'string',
         pattern => '[A-Za-z0-9]{5}(?:-[A-Za-z0-9]{5}){4}',

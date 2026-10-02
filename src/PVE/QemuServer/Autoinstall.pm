@@ -198,6 +198,17 @@ sub get_target_disk {
     return;
 }
 
+sub get_host_timezone {
+    if (-f '/etc/timezone') {
+        my $tz = PVE::Tools::file_read_firstline('/etc/timezone');
+        return $tz if defined($tz) && $tz =~ m|^[A-Za-z0-9_/+-]+$|;
+    }
+    if (my $link = readlink('/etc/localtime')) {
+        return $1 if $link =~ m|zoneinfo/([A-Za-z0-9_/+-]+)$|;
+    }
+    return 'UTC';
+}
+
 sub get_settings {
     my ($conf, $vmid, $ai, $type) = @_;
 
@@ -212,11 +223,8 @@ sub get_settings {
     }
 
     my $locale = $ai->{locale};
-    my $timezone = $ai->{timezone} // 'UTC';
-    if ($type eq 'windows' && $timezone =~ m|/|) {
-        warn "autoinstall: '$timezone' is not a Windows time zone name, using UTC\n";
-        $timezone = 'UTC';
-    }
+    # Linux guests use the time zone of the host, Windows keeps its default
+    my $timezone = $type eq 'windows' ? undef : get_host_timezone();
 
     return {
         vmid => $vmid,
@@ -625,7 +633,6 @@ sub generate_windows {
     $x .= "  <settings pass=\"specialize\">\n";
     $x .= "    " . $comp->('Microsoft-Windows-Shell-Setup');
     $x .= "      <ComputerName>" . xml_escape($computername) . "</ComputerName>\n";
-    $x .= "      <TimeZone>" . xml_escape($s->{timezone}) . "</TimeZone>\n";
     $x .= "    </component>\n";
     $x .= "    " . $comp->('Microsoft-Windows-TerminalServices-LocalSessionManager');
     $x .= "      <fDenyTSConnections>false</fDenyTSConnections>\n";
@@ -733,7 +740,6 @@ sub generate_windows {
         $x .= "        </LocalAccounts>\n";
     }
     $x .= "      </UserAccounts>\n";
-    $x .= "      <TimeZone>" . xml_escape($s->{timezone}) . "</TimeZone>\n";
     $x .= "    </component>\n";
     $x .= "  </settings>\n";
     $x .= "</unattend>\n";
