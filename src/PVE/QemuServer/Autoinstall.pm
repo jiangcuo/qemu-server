@@ -666,15 +666,39 @@ sub generate_windows {
     $x .= "      <ComputerName>" . xml_escape($computername) . "</ComputerName>\n";
     $x .= "      <TimeZone>" . xml_escape($timezone) . "</TimeZone>\n";
     $x .= "    </component>\n";
+    # commands run from the autoinstall ISO, its drive letter is not known
+    my @commands;
+    if ($s->{virtio_drivers}->%*) {
+        # $WinPEDriver$ only makes the drivers available to Windows Setup, also install them
+        # into the new system, e.g. NetKVM, Balloon and vioserial
+        my $dir = '%d:\\$WinPEDriver$';
+        push @commands,
+            [
+                'Install VirtIO drivers',
+                "cmd.exe /c for %d in (D E F G H I J) do if exist \"$dir\" pnputil.exe"
+                    . " /add-driver \"$dir\\*.inf\" /subdirs /install",
+            ];
+    }
     if (my $qemu_ga = $s->{qemu_ga}) {
-        # install the guest agent from the autoinstall ISO, its drive letter is not known
         my $msi = $qemu_ga =~ s|/|\\|gr;
+        push @commands,
+            [
+                'Install QEMU guest agent',
+                "cmd.exe /c for %d in (D E F G H I J) do if exist %d:\\$msi"
+                    . " msiexec.exe /i %d:\\$msi /qn /norestart",
+            ];
+    }
+    if (@commands) {
         $x .= "    " . $comp->('Microsoft-Windows-Deployment');
         $x .= "      <RunSynchronous>\n";
-        $x .= "        <RunSynchronousCommand wcm:action=\"add\"><Order>1</Order>"
-            . "<Description>Install QEMU guest agent</Description>"
-            . "<Path>cmd.exe /c for %d in (D E F G H I J) do if exist %d:\\$msi"
-            . " msiexec.exe /i %d:\\$msi /qn /norestart</Path></RunSynchronousCommand>\n";
+        my $order = 1;
+        for my $command (@commands) {
+            my ($description, $path) = @$command;
+            $x .= "        <RunSynchronousCommand wcm:action=\"add\"><Order>$order</Order>"
+                . "<Description>$description</Description>"
+                . "<Path>" . xml_escape($path) . "</Path></RunSynchronousCommand>\n";
+            $order++;
+        }
         $x .= "      </RunSynchronous>\n";
         $x .= "    </component>\n";
     }
