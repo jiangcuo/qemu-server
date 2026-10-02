@@ -929,6 +929,14 @@ my $autoinstall_fmt = {
             . ' cloud-init settings. Placeholders like `{{hostname}}` or `{{password}}` are'
             . ' replaced.',
     },
+    timezone => {
+        type => 'string',
+        format_description => 'timezone',
+        pattern => '[A-Za-z0-9_+/-]+',
+        optional => 1,
+        description => 'Time zone of the installed system, e.g. `Asia/Shanghai`. The keyboard'
+            . ' layout is derived from it. Defaults to the time zone of the host.',
+    },
     productkey => {
         type => 'string',
         format_description => 'key',

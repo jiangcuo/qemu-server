@@ -16,6 +16,7 @@ use PVE::Storage;
 use PVE::Tools;
 use PVE::QemuServer::Drive;
 use PVE::QemuServer::Helpers;
+use PVE::QemuServer::Timezone;
 
 # NOTE: PVE::QemuServer and PVE::QemuServer::Cloudinit use this module, so only
 # call into them with fully qualified names at runtime.
@@ -231,7 +232,8 @@ sub get_settings {
     }
 
     # Linux guests use the time zone of the host, Windows keeps its default
-    my $timezone = $type eq 'windows' ? undef : get_host_timezone();
+    my $timezone = $ai->{timezone} // get_host_timezone();
+    my ($keyboard, $input_locale) = PVE::QemuServer::Timezone::keyboard_layout($timezone)->@*;
 
     return {
         vmid => $vmid,
@@ -246,6 +248,8 @@ sub get_settings {
         networks => get_network_config($conf),
         disk => get_target_disk($conf, $type),
         timezone => $timezone,
+        keyboard => $keyboard,
+        input_locale => $input_locale,
         productkey => $ai->{productkey},
         edition => $ai->{edition},
         arch => PVE::QemuServer::Helpers::get_vm_arch($conf),
@@ -272,6 +276,7 @@ sub get_template_variables {
         searchdomain => join(' ', $settings->{searchdomains}->@*),
         disk => $settings->{disk} // '',
         timezone => $settings->{timezone} // '',
+        keyboard => $settings->{keyboard} // '',
         productkey => $settings->{productkey} // '',
         edition => $settings->{edition} // '',
     };
@@ -310,7 +315,7 @@ sub generate_kickstart {
     my $ks = "text\n";
     $ks .= "eula --agreed\n";
     $ks .= "lang en_US.UTF-8\n";
-    $ks .= "keyboard --vckeymap=us\n";
+    $ks .= "keyboard --xlayouts='$s->{keyboard}'\n";
     $ks .= "timezone $s->{timezone} --utc\n";
     $ks .= "firstboot --disable\n";
     $ks .= "skipx\n";
@@ -393,7 +398,7 @@ sub generate_ubuntu {
     $y .= "  version: 1\n";
     $y .= "  locale: 'en_US.UTF-8'\n";
     $y .= "  keyboard:\n";
-    $y .= "    layout: 'us'\n";
+    $y .= "    layout: " . yaml_quote($s->{keyboard}) . "\n";
     $y .= "  timezone: " . yaml_quote($s->{timezone}) . "\n";
     $y .= "  identity:\n";
     $y .= "    hostname: " . yaml_quote($s->{hostname}) . "\n";
@@ -543,6 +548,8 @@ sub generate_windows {
     };
 
     my $locale = 'en-US';
+    my $input_locale = $s->{input_locale};
+    my $timezone = PVE::QemuServer::Timezone::windows_timezone($s->{timezone});
     my $computername = substr($s->{hostname}, 0, 15);
     my $username = $s->{username};
     my $password_x = xml_escape($password);
@@ -555,7 +562,7 @@ sub generate_windows {
     $x .= "  <settings pass=\"windowsPE\">\n";
     $x .= "    " . $comp->('Microsoft-Windows-International-Core-WinPE');
     $x .= "      <SetupUILanguage><UILanguage>$locale</UILanguage></SetupUILanguage>\n";
-    $x .= "      <InputLocale>$locale</InputLocale>\n";
+    $x .= "      <InputLocale>$input_locale</InputLocale>\n";
     $x .= "      <SystemLocale>$locale</SystemLocale>\n";
     $x .= "      <UILanguage>$locale</UILanguage>\n";
     $x .= "      <UserLocale>$locale</UserLocale>\n";
@@ -657,6 +664,7 @@ sub generate_windows {
     $x .= "  <settings pass=\"specialize\">\n";
     $x .= "    " . $comp->('Microsoft-Windows-Shell-Setup');
     $x .= "      <ComputerName>" . xml_escape($computername) . "</ComputerName>\n";
+    $x .= "      <TimeZone>" . xml_escape($timezone) . "</TimeZone>\n";
     $x .= "    </component>\n";
     if (my $qemu_ga = $s->{qemu_ga}) {
         # install the guest agent from the autoinstall ISO, its drive letter is not known
@@ -747,7 +755,7 @@ sub generate_windows {
     # oobeSystem pass
     $x .= "  <settings pass=\"oobeSystem\">\n";
     $x .= "    " . $comp->('Microsoft-Windows-International-Core');
-    $x .= "      <InputLocale>$locale</InputLocale>\n";
+    $x .= "      <InputLocale>$input_locale</InputLocale>\n";
     $x .= "      <SystemLocale>$locale</SystemLocale>\n";
     $x .= "      <UILanguage>$locale</UILanguage>\n";
     $x .= "      <UserLocale>$locale</UserLocale>\n";
