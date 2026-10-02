@@ -252,7 +252,7 @@ sub get_host_timezone {
     if (my $link = readlink('/etc/localtime')) {
         return $1 if $link =~ m|zoneinfo/([A-Za-z0-9_/+-]+)$|;
     }
-    return 'UTC';
+    return;
 }
 
 sub get_domain_settings {
@@ -283,9 +283,11 @@ sub get_settings {
             is_hashed_password($password) ? $password : PVE::Tools::encrypt_pw($password);
     }
 
-    # Linux guests use the time zone of the host, Windows keeps its default
+    # the configured time zone, else the one of the host, else (Windows only) the one of the
+    # ISO language, see get_files
     my $timezone = $ai->{timezone} // get_host_timezone();
-    my ($keyboard, $input_locale) = PVE::QemuServer::Timezone::keyboard_layout($timezone)->@*;
+    my ($keyboard, $input_locale) =
+        PVE::QemuServer::Timezone::keyboard_layout($timezone // 'UTC')->@*;
 
     return {
         vmid => $vmid,
@@ -941,6 +943,14 @@ sub get_files {
     my $extra_files = {};
     if ($type eq 'windows') {
         $settings->{locale} = get_install_locale($conf, $settings->{edition});
+        if (!defined($settings->{timezone})) {
+            my $timezone = PVE::QemuServer::Timezone::locale_timezone($settings->{locale});
+            if (defined($timezone)) {
+                $settings->{timezone} = $timezone;
+                ($settings->{keyboard}, $settings->{input_locale}) =
+                    PVE::QemuServer::Timezone::keyboard_layout($timezone)->@*;
+            }
+        }
 
         my $drivers = get_local_virtio_drivers($settings->{winversion}, $settings->{arch});
         $settings->{virtio_drivers} = $drivers;
@@ -965,6 +975,8 @@ sub get_files {
                 PVE::Tools::file_get_contents("$VIRTIO_WIN_DIR/$msi", 64 * 1024 * 1024);
         }
     }
+
+    $settings->{timezone} //= 'UTC';
 
     my $content;
     if (my $volid = $ai->{file}) {

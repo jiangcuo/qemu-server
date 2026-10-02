@@ -643,6 +643,49 @@ sub windows_timezone {
     return $windows_timezones->{$timezone} // 'UTC';
 }
 
+# Time zones for languages spoken in a single time zone, used if neither a time zone is
+# configured nor the one of the host is known.
+my $locale_timezones = {
+    'bg-BG' => 'Europe/Sofia',
+    'cs-CZ' => 'Europe/Prague',
+    'da-DK' => 'Europe/Copenhagen',
+    'de-AT' => 'Europe/Vienna',
+    'de-CH' => 'Europe/Zurich',
+    'de-DE' => 'Europe/Berlin',
+    'el-GR' => 'Europe/Athens',
+    'en-GB' => 'Europe/London',
+    'en-IE' => 'Europe/Dublin',
+    'es-ES' => 'Europe/Madrid',
+    'fi-FI' => 'Europe/Helsinki',
+    'fr-BE' => 'Europe/Brussels',
+    'fr-FR' => 'Europe/Paris',
+    'he-IL' => 'Asia/Jerusalem',
+    'hu-HU' => 'Europe/Budapest',
+    'it-IT' => 'Europe/Rome',
+    'ja-JP' => 'Asia/Tokyo',
+    'ko-KR' => 'Asia/Seoul',
+    'nb-NO' => 'Europe/Oslo',
+    'nl-NL' => 'Europe/Amsterdam',
+    'pl-PL' => 'Europe/Warsaw',
+    'pt-PT' => 'Europe/Lisbon',
+    'ro-RO' => 'Europe/Bucharest',
+    'sk-SK' => 'Europe/Bratislava',
+    'sv-SE' => 'Europe/Stockholm',
+    'th-TH' => 'Asia/Bangkok',
+    'tr-TR' => 'Europe/Istanbul',
+    'uk-UA' => 'Europe/Kyiv',
+    'zh-CN' => 'Asia/Shanghai',
+    'zh-HK' => 'Asia/Hong_Kong',
+    'zh-TW' => 'Asia/Taipei',
+};
+
+sub locale_timezone {
+    my ($locale) = @_;
+
+    return if !defined($locale);
+    return $locale_timezones->{$locale};
+}
+
 my $zone_countries;
 
 my sub zone_country {
