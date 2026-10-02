@@ -29,6 +29,10 @@ my $QEMU_GA_MSI = {
     aarch64 => 'guest-agent/qemu-ga-arm64.msi',
 };
 
+my $SPECIALIZE_SCRIPT = '/autoinstall/specialize.cmd';
+my $SPECIALIZE_COMMAND = 'cmd.exe /c for %d in (D E F G H I J K L M N O P Q R S T U V W X Y Z) do'
+    . ' if exist %d:\\autoinstall\\specialize.cmd %d:\\autoinstall\\specialize.cmd';
+
 my $installer_types = {
     windows => {
         file => '/autounattend.xml',
@@ -218,6 +222,21 @@ sub get_host_timezone {
     return 'UTC';
 }
 
+sub get_domain_settings {
+    my ($conf) = @_;
+
+    my $name = $conf->{cidomain} or return;
+    die "autoinstall: joining domain '$name' requires cidomainuser and cidomainpassword\n"
+        if !defined($conf->{cidomainuser}) || !defined($conf->{cidomainpassword});
+
+    return {
+        name => $name,
+        user => $conf->{cidomainuser},
+        password => $conf->{cidomainpassword},
+        ou => $conf->{cidomainou},
+    };
+}
+
 sub get_settings {
     my ($conf, $vmid, $ai, $type) = @_;
 
@@ -252,6 +271,7 @@ sub get_settings {
         input_locale => $input_locale,
         productkey => $ai->{productkey},
         rdp => $ai->{rdp} ? 1 : 0,
+        domain => scalar(get_domain_settings($conf)),
         edition => $ai->{edition},
         arch => PVE::QemuServer::Helpers::get_vm_arch($conf),
         uefi => ($conf->{bios} // '') eq 'ovmf' ? 1 : 0,
@@ -656,6 +676,9 @@ sub generate_windows {
     if (my $productkey = $s->{productkey}) {
         $x .= "        <ProductKey><Key>" . uc($productkey) . "</Key>"
             . "<WillShowUI>OnError</WillShowUI></ProductKey>\n";
+    } else {
+        # skip the product key page, e.g. Windows Server media asks for a key otherwise
+        $x .= "        <ProductKey><WillShowUI>Never</WillShowUI></ProductKey>\n";
     }
     $x .= "      </UserData>\n";
     $x .= "    </component>\n";
@@ -667,49 +690,27 @@ sub generate_windows {
     $x .= "      <ComputerName>" . xml_escape($computername) . "</ComputerName>\n";
     $x .= "      <TimeZone>" . xml_escape($timezone) . "</TimeZone>\n";
     $x .= "    </component>\n";
-    # commands run from the autoinstall ISO, its drive letter is not known
-    my @commands;
-    if ($s->{virtio_drivers}->%*) {
-        # $WinPEDriver$ only makes the drivers available to Windows Setup, also install them
-        # into the new system, e.g. NetKVM, Balloon and vioserial
-        my $dir = '%d:\\$WinPEDriver$';
-        push @commands,
-            [
-                'Install VirtIO drivers',
-                "cmd.exe /c for %d in (D E F G H I J) do if exist \"$dir\" pnputil.exe"
-                    . " /add-driver \"$dir\\*.inf\" /subdirs /install",
-            ];
-    }
-    if ($s->{rdp}) {
-        # the rule group is given by its resource ID, which works for all languages
-        push @commands,
-            [
-                'Allow Remote Desktop in the firewall',
-                'netsh.exe advfirewall firewall set rule group="@FirewallAPI.dll,-28752"'
-                    . ' new enable=Yes',
-            ];
-    }
-    if (my $qemu_ga = $s->{qemu_ga}) {
-        my $msi = $qemu_ga =~ s|/|\\|gr;
-        push @commands,
-            [
-                'Install QEMU guest agent',
-                "cmd.exe /c for %d in (D E F G H I J) do if exist %d:\\$msi"
-                    . " msiexec.exe /i %d:\\$msi /qn /norestart",
-            ];
-    }
-    if (@commands) {
-        $x .= "    " . $comp->('Microsoft-Windows-Deployment');
-        $x .= "      <RunSynchronous>\n";
-        my $order = 1;
-        for my $command (@commands) {
-            my ($description, $path) = @$command;
-            $x .= "        <RunSynchronousCommand wcm:action=\"add\"><Order>$order</Order>"
-                . "<Description>$description</Description>"
-                . "<Path>" . xml_escape($path) . "</Path></RunSynchronousCommand>\n";
-            $order++;
+    # everything else is done by a script on the autoinstall ISO, see windows_specialize_script()
+    $x .= "    " . $comp->('Microsoft-Windows-Deployment');
+    $x .= "      <RunSynchronous>\n";
+    $x .= "        <RunSynchronousCommand wcm:action=\"add\"><Order>1</Order>"
+        . "<Description>Run autoinstall setup script</Description>"
+        . "<Path>" . xml_escape($SPECIALIZE_COMMAND) . "</Path></RunSynchronousCommand>\n";
+    $x .= "      </RunSynchronous>\n";
+    $x .= "    </component>\n";
+    if (my $domain = $s->{domain}) {
+        $x .= "    " . $comp->('Microsoft-Windows-UnattendedJoin');
+        $x .= "      <Identification>\n";
+        $x .= "        <Credentials>\n";
+        $x .= "          <Domain>" . xml_escape($domain->{name}) . "</Domain>\n";
+        $x .= "          <Username>" . xml_escape($domain->{user}) . "</Username>\n";
+        $x .= "          <Password>" . xml_escape($domain->{password}) . "</Password>\n";
+        $x .= "        </Credentials>\n";
+        $x .= "        <JoinDomain>" . xml_escape($domain->{name}) . "</JoinDomain>\n";
+        if (defined(my $ou = $domain->{ou})) {
+            $x .= "        <MachineObjectOU>" . xml_escape($ou) . "</MachineObjectOU>\n";
         }
-        $x .= "      </RunSynchronous>\n";
+        $x .= "      </Identification>\n";
         $x .= "    </component>\n";
     }
     if ($s->{rdp}) {
@@ -797,6 +798,16 @@ sub generate_windows {
     $x .= "      <UserLocale>$locale</UserLocale>\n";
     $x .= "    </component>\n";
     $x .= "    " . $comp->('Microsoft-Windows-Shell-Setup');
+    # log on once automatically, so the system is ready to use after the installation
+    my $autologon_user =
+        defined($username) && lc($username) ne 'administrator' ? $username : 'Administrator';
+    $x .= "      <AutoLogon>\n";
+    $x .= "        <Enabled>true</Enabled>\n";
+    $x .= "        <LogonCount>1</LogonCount>\n";
+    $x .= "        <Domain>" . xml_escape($computername) . "</Domain>\n" if $s->{domain};
+    $x .= "        <Username>" . xml_escape($autologon_user) . "</Username>\n";
+    $x .= "        <Password><Value>$password_x</Value><PlainText>true</PlainText></Password>\n";
+    $x .= "      </AutoLogon>\n";
     $x .= "      <OOBE>\n";
     $x .= "        <HideEULAPage>true</HideEULAPage>\n";
     $x .= "        <HideLocalAccountScreen>true</HideLocalAccountScreen>\n";
@@ -825,6 +836,55 @@ sub generate_windows {
     $x .= "</unattend>\n";
 
     return $x;
+}
+
+# Settings applied in the specialize pass. Drivers come from a VirtIO driver ISO (virtio-win) if one
+# is attached, otherwise from the drivers bundled on the autoinstall ISO.
+sub windows_specialize_script {
+    my ($s) = @_;
+
+    my @lines = (
+        '@echo off',
+        'set "SRC=%~d0"',
+        # do not require a network connection in the OOBE of Windows 11
+        'reg.exe add "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\OOBE" /v BypassNRO'
+            . ' /t REG_DWORD /d 1 /f',
+        # no automatic BitLocker device encryption
+        'reg.exe add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\BitLocker"'
+            . ' /v PreventDeviceEncryption /t REG_DWORD /d 1 /f',
+        # no hibernation and fast startup in a VM
+        'powercfg.exe /hibernate off',
+        'net.exe accounts /maxpwage:UNLIMITED',
+    );
+
+    if ($s->{rdp}) {
+        # the rule group is given by its resource ID, which works for all languages
+        push @lines, 'netsh.exe advfirewall firewall set rule group="@FirewallAPI.dll,-28752"'
+            . ' new enable=Yes';
+    }
+
+    my $bundled = '"%SRC%\\$WinPEDriver$"';
+    my $pnputil = "pnputil.exe /add-driver \"%SRC%\\\$WinPEDriver\$\\*.inf\" /subdirs /install";
+    if ($s->{arch} eq 'x86_64') {
+        push @lines,
+            'set "VIRTIO_MSI="',
+            'for %%d in (D E F G H I J K L M N O P Q R S T U V W X Y Z) do'
+                . ' if exist "%%d:\\virtio-win-gt-x64.msi" set "VIRTIO_MSI=%%d:\\virtio-win-gt-x64.msi"',
+            'if defined VIRTIO_MSI (',
+            '    msiexec.exe /i "%VIRTIO_MSI%" /qn /norestart',
+            ") else if exist $bundled (",
+            "    $pnputil",
+            ')';
+    } else {
+        push @lines, "if exist $bundled $pnputil";
+    }
+
+    if (my $qemu_ga = $s->{qemu_ga}) {
+        my $msi = '"%SRC%\\' . ($qemu_ga =~ s|/|\\|gr) . '"';
+        push @lines, "msiexec.exe /i $msi /qn /norestart";
+    }
+
+    return join("\r\n", @lines) . "\r\n";
 }
 
 my $generators = {
@@ -877,6 +937,8 @@ sub get_files {
         $content = render_template($content, get_template_variables($settings));
     } else {
         $content = $generators->{$type}->($settings);
+        $extra_files->{$SPECIALIZE_SCRIPT} = windows_specialize_script($settings)
+            if $type eq 'windows';
     }
 
     die "autoinstall file too big (> 3 MiB)\n" if length($content) > 3 * 1024 * 1024;
@@ -910,6 +972,9 @@ sub dump {
     my $dump_conf = $conf;
     if ($mask_password && defined($conf->{cipassword})) {
         $dump_conf = { %$conf, cipassword => '**********' };
+    }
+    if ($mask_password && defined($conf->{cidomainpassword})) {
+        $dump_conf = { %$dump_conf, cidomainpassword => '**********' };
     }
 
     my ($type, $files) = get_files($dump_conf, $vmid);

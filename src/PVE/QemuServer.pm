@@ -999,6 +999,29 @@ my $confdesc_cloudinit = {
             . ' ones at start.',
         format => 'pve-qm-cicustom',
     },
+    cidomain => {
+        optional => 1,
+        type => 'string',
+        format => 'dns-name',
+        description => 'cloud-init: Active Directory domain to join during the unattended'
+            . ' installation (Windows only).',
+    },
+    cidomainuser => {
+        optional => 1,
+        type => 'string',
+        description => 'cloud-init: User allowed to join computers to the domain.',
+    },
+    cidomainpassword => {
+        optional => 1,
+        type => 'string',
+        description => 'cloud-init: Password of the domain join user.',
+    },
+    cidomainou => {
+        optional => 1,
+        type => 'string',
+        description => 'cloud-init: Organizational unit for the computer account, e.g.'
+            . ' OU=Servers,DC=example,DC=com.',
+    },
     autoinstall => {
         optional => 1,
         type => 'string',

@@ -805,6 +805,10 @@ my $diskoptions = {
 my $cloudinitoptions = {
     autoinstall => 1,
     cicustom => 1,
+    cidomain => 1,
+    cidomainou => 1,
+    cidomainpassword => 1,
+    cidomainuser => 1,
     cipassword => 1,
     citype => 1,
     ciuser => 1,
@@ -1812,6 +1816,7 @@ __PACKAGE__->register_method({
             $conf = PVE::QemuConfig->load_current_config($param->{vmid}, $param->{current});
         }
         $conf->{cipassword} = '**********' if $conf->{cipassword};
+        $conf->{cidomainpassword} = '**********' if $conf->{cidomainpassword};
         return $conf;
 
     },
@@ -1873,9 +1878,10 @@ __PACKAGE__->register_method({
         my $pending_delete_hash =
             PVE::QemuConfig->parse_pending_delete($conf->{pending}->{delete});
 
-        $conf->{cipassword} = '**********' if defined($conf->{cipassword});
-        $conf->{pending}->{cipassword} = '********** '
-            if defined($conf->{pending}->{cipassword});
+        for my $opt (qw(cipassword cidomainpassword)) {
+            $conf->{$opt} = '**********' if defined($conf->{$opt});
+            $conf->{pending}->{$opt} = '********** ' if defined($conf->{pending}->{$opt});
+        }
 
         return PVE::GuestHelpers::config_with_pending_array($conf, $pending_delete_hash);
     },
@@ -1936,8 +1942,10 @@ __PACKAGE__->register_method({
 
         my $ci = $conf->{'special-sections'}->{cloudinit};
 
-        $conf->{cipassword} = '**********' if exists $conf->{cipassword};
-        $ci->{cipassword} = '**********' if exists $ci->{cipassword};
+        for my $opt (qw(cipassword cidomainpassword)) {
+            $conf->{$opt} = '**********' if exists $conf->{$opt};
+            $ci->{$opt} = '**********' if exists $ci->{$opt};
+        }
 
         my $res = [];
 
@@ -2048,7 +2056,8 @@ my $update_vm_api = sub {
 
     my @paramarr = (); # used for log message
     foreach my $key (sort keys %$param) {
-        my $value = $key eq 'cipassword' ? '<hidden>' : $param->{$key};
+        my $value =
+            $key eq 'cipassword' || $key eq 'cidomainpassword' ? '<hidden>' : $param->{$key};
         push @paramarr, "-$key", $value;
     }
 
