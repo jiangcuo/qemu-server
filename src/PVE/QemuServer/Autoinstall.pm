@@ -806,7 +806,9 @@ sub get_files {
         for my $driver (sort keys %$drivers) {
             my $dir = $drivers->{$driver};
             opendir(my $dh, $dir) or die "unable to open '$dir' - $!\n";
-            for my $name (sort readdir($dh)) {
+            for my $entry (sort readdir($dh)) {
+                # untaint, the names end up as file names on the autoinstall ISO
+                my ($name) = $entry =~ m/^([A-Za-z0-9][A-Za-z0-9._+-]*)$/ or next;
                 next if !-f "$dir/$name";
                 $extra_files->{"/\$WinPEDriver\$/$driver/$name"} =
                     PVE::Tools::file_get_contents("$dir/$name", 64 * 1024 * 1024);

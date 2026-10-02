@@ -56,6 +56,7 @@ sub commit_cloudinit_disk {
     my $content_size = 0;
     $content_size += length($_) for values %$files;
     my $needed = int(($content_size * 1.25 + 1024 * 1024) / (1024 * 1024) + 1) * 1024 * 1024;
+    ($needed) = $needed =~ m/^(\d+)$/; # untaint, derived from the file contents
     if ($size < $needed) {
         die "cloud-init drive too small for $content_size bytes of data, stop the VM to resize it\n"
             if PVE::QemuServer::Helpers::vm_running_locally($vmid);
