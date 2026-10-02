@@ -937,6 +937,12 @@ my $autoinstall_fmt = {
         description => 'Time zone of the installed system, e.g. `Asia/Shanghai`. The keyboard'
             . ' layout is derived from it. Defaults to the time zone of the host.',
     },
+    rdp => {
+        type => 'boolean',
+        optional => 1,
+        default => 0,
+        description => 'Windows: enable Remote Desktop and allow it in the firewall.',
+    },
     productkey => {
         type => 'string',
         format_description => 'key',

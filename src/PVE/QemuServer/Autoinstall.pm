@@ -251,6 +251,7 @@ sub get_settings {
         keyboard => $keyboard,
         input_locale => $input_locale,
         productkey => $ai->{productkey},
+        rdp => $ai->{rdp} ? 1 : 0,
         edition => $ai->{edition},
         arch => PVE::QemuServer::Helpers::get_vm_arch($conf),
         uefi => ($conf->{bios} // '') eq 'ovmf' ? 1 : 0,
@@ -679,6 +680,15 @@ sub generate_windows {
                     . " /add-driver \"$dir\\*.inf\" /subdirs /install",
             ];
     }
+    if ($s->{rdp}) {
+        # the rule group is given by its resource ID, which works for all languages
+        push @commands,
+            [
+                'Allow Remote Desktop in the firewall',
+                'netsh.exe advfirewall firewall set rule group="@FirewallAPI.dll,-28752"'
+                    . ' new enable=Yes',
+            ];
+    }
     if (my $qemu_ga = $s->{qemu_ga}) {
         my $msi = $qemu_ga =~ s|/|\\|gr;
         push @commands,
@@ -702,9 +712,11 @@ sub generate_windows {
         $x .= "      </RunSynchronous>\n";
         $x .= "    </component>\n";
     }
-    $x .= "    " . $comp->('Microsoft-Windows-TerminalServices-LocalSessionManager');
-    $x .= "      <fDenyTSConnections>false</fDenyTSConnections>\n";
-    $x .= "    </component>\n";
+    if ($s->{rdp}) {
+        $x .= "    " . $comp->('Microsoft-Windows-TerminalServices-LocalSessionManager');
+        $x .= "      <fDenyTSConnections>false</fDenyTSConnections>\n";
+        $x .= "    </component>\n";
+    }
 
     my @static = grep { $_->{ip} || $_->{ip6} } $s->{networks}->@*;
     if (@static) {
