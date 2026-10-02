@@ -833,7 +833,12 @@ sub get_files {
             closedir($dh);
         }
 
-        if ($settings->{arch} eq 'x86_64' && -f "$VIRTIO_WIN_DIR/$QEMU_GA_MSI") {
+        # current guest agent builds only support Windows 10 / Server 2016 and newer
+        if (
+            $settings->{arch} eq 'x86_64'
+            && $settings->{winversion} >= 10
+            && -f "$VIRTIO_WIN_DIR/$QEMU_GA_MSI"
+        ) {
             $settings->{qemu_ga} = 1;
             $extra_files->{"/$QEMU_GA_MSI"} =
                 PVE::Tools::file_get_contents("$VIRTIO_WIN_DIR/$QEMU_GA_MSI", 64 * 1024 * 1024);
