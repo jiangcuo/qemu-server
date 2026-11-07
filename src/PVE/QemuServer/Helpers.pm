@@ -3,6 +3,8 @@ package PVE::QemuServer::Helpers;
 use strict;
 use warnings;
 
+use IO::File;
+
 use File::stat;
 use JSON;
 
@@ -296,6 +298,20 @@ sub windows_version {
 sub needs_extraction {
     my ($vtype, $fmt) = @_;
     return $vtype eq 'import' && $fmt =~ m/^ova\+(.*)$/;
+}
+
+sub get_iscsi_initiator_name {
+    my $initiator;
+
+    my $fh = IO::File->new('/etc/iscsi/initiatorname.iscsi') || return;
+    while (defined(my $line = <$fh>)) {
+        next if $line !~ m/^\s*InitiatorName\s*=\s*([\.\-:\w]+)/;
+        $initiator = $1;
+        last;
+    }
+    $fh->close();
+
+    return $initiator;
 }
 
 1;

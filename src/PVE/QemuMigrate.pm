@@ -33,6 +33,7 @@ use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::Memory qw(get_current_memory);
 use PVE::QemuServer::QMPHelpers;
 use PVE::QemuServer;
+use PVE::QemuServer::BlockJob;
 
 use PVE::AbstractMigrate;
 use base qw(PVE::AbstractMigrate);
@@ -1229,23 +1230,23 @@ sub phase2 {
             my $bitmap = $target->{bitmap};
 
             $self->log('info', "$drive: start migration to $nbd_uri");
-            PVE::QemuServer::qemu_drive_mirror(
-                $vmid,
-                $drive,
-                $nbd_uri,
-                $vmid,
-                undef,
+            my $source_info = { vmid => $vmid, drive => $source_drive };
+            $source_info->{bitmap} = $bitmap if defined($bitmap);
+            my $dest_info = { volid => $nbd_uri };
+            my $mirror_opts = {};
+            $mirror_opts->{bwlimit} = $bwlimit if defined($bwlimit);
+            PVE::QemuServer::BlockJob::mirror(
+                $source_info,
+                $dest_info,
                 $self->{storage_migration_jobs},
                 'skip',
-                undef,
-                $bwlimit,
-                $bitmap,
+                $mirror_opts,
             );
         }
 
         if (PVE::QemuServer::QMPHelpers::runs_at_least_qemu_version($vmid, 8, 2)) {
             $self->log('info', "switching mirror jobs to actively synced mode");
-            PVE::QemuServer::qemu_drive_mirror_switch_to_active_mode(
+            PVE::QemuServer::BlockJob::qemu_drive_mirror_switch_to_active_mode(
                 $vmid,
                 $self->{storage_migration_jobs},
             );
@@ -1377,12 +1378,13 @@ sub phase2 {
         }
 
         my $status = $stat->{status};
-        if (defined($status) && $status =~ m/^(setup)$/im) {
+        if (defined($status) && $status =~ m/^(cancelling|setup|wait-unplug)$/im) {
+            $self->log('info', "migration in status '$status' - waiting for transition");
             sleep(1);
             next;
         }
 
-        if (!defined($status) || $status !~ m/^(active|completed|failed|cancelled)$/im) {
+        if (!defined($status) || $status !~ m/^(active|cancelled|completed|device|failed)$/im) {
             die $merr if $merr;
             die "unable to parse migration status '$status' - aborting\n";
         }
@@ -1422,7 +1424,7 @@ sub phase2 {
             die "aborting\n";
         }
 
-        if ($status ne 'active') {
+        if ($status ne 'active' && $status ne 'device') {
             $self->log('info', "migration status: $status");
             last;
         }
@@ -1509,7 +1511,7 @@ sub phase2 {
         # to avoid it trying to re-establish it. We are in blockjob ready state,
         # thus, this command changes to it to blockjob complete (see qapi docs)
         eval {
-            PVE::QemuServer::qemu_drive_mirror_monitor(
+            PVE::QemuServer::BlockJob::qemu_drive_mirror_monitor(
                 $vmid, undef, $self->{storage_migration_jobs}, 'cancel',
             );
         };
@@ -1555,7 +1557,12 @@ sub phase2_cleanup {
 
     # cleanup resources on target host
     if ($self->{storage_migration}) {
-        eval { PVE::QemuServer::qemu_blockjobs_cancel($vmid, $self->{storage_migration_jobs}) };
+        eval {
+            PVE::QemuServer::BlockJob::qemu_blockjobs_cancel(
+                $vmid,
+                $self->{storage_migration_jobs},
+            );
+        };
         if (my $err = $@) {
             $self->log('err', $err);
         }

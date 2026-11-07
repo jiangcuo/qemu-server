@@ -29,6 +29,7 @@ use PVE::Format qw(render_duration render_bytes);
 
 use PVE::QemuConfig;
 use PVE::QemuServer;
+use PVE::QemuServer::Blockdev;
 use PVE::QemuServer::Drive qw(checked_volume_format);
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Machine;
@@ -156,7 +157,7 @@ sub prepare {
         if ($ds eq 'tpmstate0') {
             # TPM drive only exists for backup, which is reflected in the name
             $diskinfo->{qmdevice} = 'drive-tpmstate0-backup';
-            $task->{tpmpath} = $path;
+            $task->{'tpm-volid'} = $volid;
         }
 
         if (-b $path) {
@@ -474,24 +475,25 @@ my $query_backup_status_loop = sub {
 my $attach_tpmstate_drive = sub {
     my ($self, $task, $vmid) = @_;
 
-    return if !$task->{tpmpath};
+    return if !$task->{'tpm-volid'};
 
     # unconditionally try to remove the tpmstate-named drive - it only exists
     # for backing up, and avoids errors if left over from some previous event
-    eval { PVE::QemuServer::qemu_drivedel($vmid, "tpmstate0-backup"); };
+    eval { PVE::QemuServer::Blockdev::detach_tpm_backup_node($vmid); };
 
     $self->loginfo('attaching TPM drive to QEMU for backup');
 
-    my $drive = "file=$task->{tpmpath},if=none,read-only=on,id=drive-tpmstate0-backup";
-    $drive =~ s/\\/\\\\/g;
-    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"", 60);
-    die "attaching TPM drive failed - $ret\n" if $ret !~ m/OK/s;
+    my $drive = { file => $task->{'tpm-volid'}, interface => 'tpmstate', index => 0 };
+    my $extra_options = { 'tpm-backup' => 1, 'read-only' => 1 };
+    PVE::QemuServer::Blockdev::attach($self->{storecfg}, $vmid, $drive, $extra_options);
 };
 
 my $detach_tpmstate_drive = sub {
     my ($task, $vmid) = @_;
-    return if !$task->{tpmpath} || !PVE::QemuServer::check_running($vmid);
-    eval { PVE::QemuServer::qemu_drivedel($vmid, "tpmstate0-backup"); };
+
+    return if !$task->{'tpm-volid'} || !PVE::QemuServer::Helpers::vm_running_locally($vmid);
+
+    eval { PVE::QemuServer::Blockdev::detach_tpm_backup_node($vmid); };
 };
 
 my sub add_backup_performance_options {
@@ -627,9 +629,8 @@ my sub detach_fleecing_images {
 
     for my $di ($disks->@*) {
         if (my $volid = $di->{'fleece-volid'}) {
-            my $devid = "$di->{qmdevice}-fleecing";
-            $devid =~ s/^drive-//; # re-added by qemu_drivedel()
-            eval { PVE::QemuServer::qemu_drivedel($vmid, $devid) };
+            my $node_name = "$di->{qmdevice}-fleecing";
+            eval { PVE::QemuServer::Blockdev::detach($vmid, $node_name) };
         }
     }
 }
@@ -647,15 +648,22 @@ my sub attach_fleecing_images {
         if (my $volid = $di->{'fleece-volid'}) {
             $self->loginfo("$di->{qmdevice}: attaching fleecing image $volid to QEMU");
 
-            my $path = PVE::Storage::path($self->{storecfg}, $volid);
-            my $devid = "$di->{qmdevice}-fleecing";
-            my $drive = "file=$path,if=none,id=$devid,format=$format,discard=unmap";
+            my ($interface, $index) = PVE::QemuServer::Drive::parse_drive_interface($di->{virtdev});
+            my $drive = {
+                file => $volid,
+                interface => $interface,
+                index => $index,
+                format => $format,
+                discard => 'on',
+            };
+
+            my $options = { 'fleecing' => 1 };
+            $options->{'tpm-backup'} = 1 if $interface eq 'tpmstate';
             # Specify size explicitly, to make it work if storage backend rounded up size for
             # fleecing image when allocating.
-            $drive .= ",size=$di->{'block-node-size'}" if $format eq 'raw';
-            $drive =~ s/\\/\\\\/g;
-            my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"", 60);
-            die "attaching fleecing image $volid failed - $ret\n" if $ret !~ m/OK/s;
+            $options->{size} = $di->{'block-node-size'} if $format eq 'raw';
+
+            PVE::QemuServer::Blockdev::attach($self->{storecfg}, $vmid, $drive, $options);
         }
     }
 }
@@ -1116,14 +1124,25 @@ sub qga_fs_thaw {
 sub query_block_node_sizes {
     my ($self, $vmid, $disks) = @_;
 
-    my $block_info = mon_cmd($vmid, "query-block");
-    $block_info = { map { $_->{device} => $_ } $block_info->@* };
+    my $block_info = PVE::QemuServer::Blockdev::get_block_info($vmid);
 
     for my $diskinfo ($disks->@*) {
         my $drive_key = $diskinfo->{virtdev};
-        $drive_key .= "-backup" if $drive_key eq 'tpmstate0';
-        my $block_node_size =
-            eval { $block_info->{"drive-$drive_key"}->{inserted}->{image}->{'virtual-size'}; };
+
+        my $block_node_size;
+        if ($drive_key eq 'tpmstate0') {
+            # There is no front-end device for TPM state, so it's not included in the result of
+            # get_block_info(). Note that it is always attached with the same explicit node name.
+            my $named_block_node_info = mon_cmd($vmid, 'query-named-block-nodes');
+            for my $info ($named_block_node_info->@*) {
+                next if $info->{'node-name'} ne 'drive-tpmstate0-backup';
+                $block_node_size = $info->{image}->{'virtual-size'};
+                last;
+            }
+        } else {
+            $block_node_size =
+                eval { $block_info->{$drive_key}->{inserted}->{image}->{'virtual-size'}; };
+        }
         if (!$block_node_size) {
             $self->loginfo(
                 "could not determine block node size of drive '$drive_key' - using fallback");

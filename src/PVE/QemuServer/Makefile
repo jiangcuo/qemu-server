@@ -3,6 +3,9 @@ PREFIX=/usr
 PERLDIR=$(PREFIX)/share/perl5
 
 SOURCES=PCI.pm		\
+	Blockdev.pm	\
+	BlockJob.pm	\
+	QemuImage.pm	\
 	RNG.pm		\
 	USB.pm		\
 	Memory.pm	\

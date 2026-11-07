@@ -17,9 +17,13 @@ sub qmp_cmd {
 
     my $res;
 
-    my $timeout;
+    my ($timeout, $noerr);
     if ($cmd->{arguments}) {
         $timeout = delete $cmd->{arguments}->{timeout};
+        # If 'noerr' is set, a failing QMP command (or a timeout) does not die, but the result is a
+        # hash reference with an 'error' key. Still dies if the VM is not running or the monitor
+        # socket cannot be reached.
+        $noerr = delete $cmd->{arguments}->{noerr};
     }
 
     eval {
@@ -28,7 +32,7 @@ sub qmp_cmd {
         if (-e $sname) { # test if VM is reasonably new and supports qmp/qga
             my $qmpclient = PVE::QMPClient->new();
 
-            $res = $qmpclient->cmd($vmid, $cmd, $timeout);
+            $res = $qmpclient->cmd($vmid, $cmd, $timeout, $noerr);
         } else {
             die "unable to open monitor socket\n";
         }

@@ -22,6 +22,7 @@ our @EXPORT_OK = qw(
     drive_is_cdrom
     drive_is_read_only
     get_scsi_devicetype
+    storage_allows_io_uring_default
     parse_drive
     print_drive
     max_spdk_disks
@@ -108,7 +109,7 @@ sub get_iso_path {
 # Returns the path that can be used on the QEMU commandline and in QMP commands as well as the
 # checked format of the drive.
 sub get_path_and_format {
-    my ($storecfg, $vmid, $drive, $live_restore_name) = @_;
+    my ($storecfg, $drive, $live_restore_name) = @_;
 
     my $path;
     my $volid = $drive->{file};
@@ -876,17 +877,21 @@ sub drive_is_read_only {
 #        [,aio=native|threads][,discard=ignore|on][,detect_zeroes=on|off]
 #        [,iothread=on][,serial=serial][,model=model]
 
+sub parse_drive_interface {
+    my ($key) = @_;
+
+    if ($key =~ m/^([^\d]+)(\d+)$/) {
+        return ($1, $2);
+    }
+
+    die "unable to parse drive interface $key\n";
+}
+
 sub parse_drive {
     my ($key, $data, $with_alloc) = @_;
 
-    my ($interface, $index);
-
-    if ($key =~ m/^([^\d]+)(\d+)$/) {
-        $interface = $1;
-        $index = $2;
-    } else {
-        return;
-    }
+    my ($interface, $index) = eval { parse_drive_interface($key) };
+    return if $@;
 
     my $desc_hash = $with_alloc ? $drivedesc_hash_with_alloc : $drivedesc_hash;
 
@@ -964,6 +969,9 @@ sub print_drive {
 
 sub get_drive_id {
     my ($drive) = @_;
+
+    die "get_drive_id: no interface\n" if !defined($drive->{interface});
+    die "get_drive_id: no index\n" if !defined($drive->{index});
     return "$drive->{interface}$drive->{index}";
 }
 
@@ -1182,4 +1190,69 @@ sub get_scsi_device_type {
 
     return $devicetype;
 }
+sub storage_allows_io_uring_default {
+    my ($scfg, $cache_direct) = @_;
+
+    # io_uring with cache mode writeback or writethrough on krbd will hang...
+    return if $scfg && $scfg->{type} eq 'rbd' && $scfg->{krbd} && !$cache_direct;
+
+    # io_uring with cache mode writeback or writethrough on LVM will hang, without cache only
+    # sometimes, just plain disable...
+    return if $scfg && $scfg->{type} eq 'lvm';
+
+    # io_uring causes problems when used with CIFS since kernel 5.15
+    # Some discussion: https://www.spinics.net/lists/linux-cifs/msg26734.html
+    return if $scfg && $scfg->{type} eq 'cifs';
+
+    return 1;
+}
+
+sub drive_uses_cache_direct {
+    my ($drive, $scfg) = @_;
+
+    my $cache_direct = 0;
+
+    if (my $cache = $drive->{cache}) {
+        $cache_direct = $cache =~ /^(?:off|none|directsync)$/;
+    } elsif (!drive_is_cdrom($drive) && !($scfg && $scfg->{type} eq 'btrfs' && !$scfg->{nocow})) {
+        $cache_direct = 1;
+    }
+
+    return $cache_direct;
+}
+
+sub aio_cmdline_option {
+    my ($scfg, $drive, $cache_direct) = @_;
+
+    return $drive->{aio} if $drive->{aio};
+
+    if (storage_allows_io_uring_default($scfg, $cache_direct)) {
+        # io_uring supports all cache modes
+        return 'io_uring';
+    } else {
+        # aio native works only with O_DIRECT
+        if ($cache_direct) {
+            return 'native';
+        } else {
+            return 'threads';
+        }
+    }
+}
+
+# must not be called for CD-ROMs
+sub detect_zeroes_cmdline_option {
+    my ($drive) = @_;
+
+    die "cannot use detect-zeroes for CD-ROM\n" if drive_is_cdrom($drive);
+
+    if (defined($drive->{detect_zeroes}) && !$drive->{detect_zeroes}) {
+        return 'off';
+    } elsif ($drive->{discard}) {
+        return $drive->{discard} eq 'on' ? 'unmap' : 'on';
+    }
+
+    # This used to be our default with discard not being specified:
+    return 'on';
+}
+
 1;

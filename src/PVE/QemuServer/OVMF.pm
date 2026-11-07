@@ -50,7 +50,7 @@ sub ensure_ms_2023_cert_enrolled {
 
     PVE::Storage::activate_volumes($storecfg, [$efidisk->{file}]);
 
-    my ($path) = PVE::QemuServer::Drive::get_path_and_format($storecfg, $vmid, $efidisk);
+    my ($path) = PVE::QemuServer::Drive::get_path_and_format($storecfg, $efidisk);
 
     eval {
         # virt-fw-vars will only apply the --microsoft-kek option when combined with

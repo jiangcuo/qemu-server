@@ -525,6 +525,7 @@ my sub create_disks : prototype($$$$$$$$$$$) {
                         $live_import_mapping->{$ds} = {
                             path => $path,
                             format => $source_format,
+                            volid => $source,
                         };
                         $live_import_mapping->{$ds}->{'delete-after-finish'} = $source
                             if $needs_extraction;
@@ -569,6 +570,7 @@ my sub create_disks : prototype($$$$$$$$$$$) {
                         $live_import_mapping->{$ds} = {
                             path => $source,
                             format => $source_format,
+                            volid => $source,
                         };
                     } else {
                         (undef, $dst_volid) = PVE::QemuServer::ImportDisk::do_import(
@@ -4759,7 +4761,7 @@ __PACKAGE__->register_method({
                 PVE::AccessControl::add_vm_to_pool($newid, $pool) if $pool;
             };
             if (my $err = $@) {
-                eval { PVE::QemuServer::qemu_blockjobs_cancel($vmid, $jobs) };
+                eval { PVE::QemuServer::BlockJob::qemu_blockjobs_cancel($vmid, $jobs) };
                 sleep 1; # some storage like rbd need to wait before release volume - really?
 
                 foreach my $volid (@$newvollist) {

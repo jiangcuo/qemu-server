@@ -93,7 +93,7 @@ sub start_spdk {
     $cpu_mask = get_cpu_mask($conf->{affinity}) if $conf->{affinity};
 
     my $drive = parse_drive($opt, $conf->{$opt});
-    my ($path, $format) = PVE::QemuServer::Drive::get_path_and_format($storecfg, $vmid,$drive);
+    my ($path, $format) = PVE::QemuServer::Drive::get_path_and_format($storecfg, $drive);
     my ($storeid, $volname) = PVE::Storage::parse_volume_id($drive->{file}, 1);
     my $scfg = PVE::Storage::storage_config($storecfg, $storeid);
 

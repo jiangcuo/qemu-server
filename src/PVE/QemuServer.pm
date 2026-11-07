@@ -53,6 +53,8 @@ use PVE::Tools
 use PVE::QMPClient;
 use PVE::QemuConfig;
 use PVE::QemuConfig::NoWrite;
+use PVE::QemuServer::Blockdev;
+use PVE::QemuServer::BlockJob;
 use PVE::QemuServer::Helpers qw(config_aware_timeout min_version kvm_user_version windows_version);
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CGroup;
@@ -66,6 +68,7 @@ use PVE::QemuServer::MetaInfo;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::OVMF;
 use PVE::QemuServer::PCI qw(print_pci_addr print_pcie_addr print_pcie_root_port parse_hostpci);
+use PVE::QemuServer::QemuImage;
 use PVE::QemuServer::QMPHelpers qw(qemu_deviceadd qemu_devicedel qemu_objectadd qemu_objectdel);
 use PVE::QemuServer::RNG qw(parse_rng print_rng_device_commandline print_rng_object_commandline);
 use PVE::QemuServer::USB;
@@ -1508,17 +1511,25 @@ sub print_drivedevice_full {
     my $device = '';
     my $maxdev = 0;
 
+    my $machine_version = extract_version($machine_type, kvm_user_version());
+    my $has_write_cache = 1; # whether the device has a 'write-cache' option
+    my $has_error_options = 1; # whether the device has 'rerror' and 'werror' options
+
     my $drive_id = PVE::QemuServer::Drive::get_drive_id($drive);
     if ($drive->{interface} eq 'virtio') {
         my $pciaddr = print_pci_addr("$drive_id", $bridges, $arch);
-        $device = "virtio-blk-pci,drive=drive-$drive_id,id=${drive_id}${pciaddr}";
+        $device = 'virtio-blk-pci';
+        # for the switch to -blockdev, there is no blockdev for 'none'
+        if (!min_version($machine_version, 10, 0) || $drive->{file} ne 'none') {
+            $device .= ",drive=drive-$drive_id";
+        }
+        $device .= ",id=${drive_id}${pciaddr}";
         $device .= ",iothread=iothread-$drive_id" if $drive->{iothread};
     } elsif ($drive->{interface} eq 'scsi') {
 
         my ($maxdev, $controller, $controller_prefix) = scsihw_infos($conf, $drive);
         my $unit = $drive->{index} % $maxdev;
 
-        my $machine_version = extract_version($machine_type, kvm_user_version());
         my $device_type =
             PVE::QemuServer::Drive::get_scsi_device_type($drive, $storecfg, $machine_version);
 
@@ -1528,14 +1539,27 @@ sub print_drivedevice_full {
             $device = "scsi-$device_type,bus=$controller_prefix$controller.0,channel=0,scsi-id=0"
                 . ",lun=$drive->{index}";
         }
-        $device .= ",drive=drive-$drive_id,id=$drive_id";
+        # for the switch to -blockdev, there is no blockdev for 'none'
+        if (!min_version($machine_version, 10, 0) || $drive->{file} ne 'none') {
+            $device .= ",drive=drive-$drive_id";
+        }
+        $device .= ",id=$drive_id";
+
+        # For the switch to -blockdev, the SCSI device ID needs to be explicitly specified. Note
+        # that only scsi-cd and scsi-hd have a 'device_id' option.
+        if (
+            min_version($machine_version, 10, 0) && ($device_type eq 'cd' || $device_type eq 'hd')
+        ) {
+            $device .= ",device_id=drive-${drive_id}";
+        }
 
         if ($drive->{ssd} && ($device_type eq 'block' || $device_type eq 'hd')) {
             $device .= ",rotation_rate=1";
         }
         $device .= ",wwn=$drive->{wwn}" if $drive->{wwn};
 
-        # only scsi-hd and scsi-cd support passing vendor and product information
+        # only scsi-hd and scsi-cd support passing vendor and product information and have a
+        # 'write-cache' option
         if ($device_type eq 'hd' || $device_type eq 'cd') {
             if (my $vendor = $drive->{vendor}) {
                 $device .= ",vendor=$vendor";
@@ -1543,6 +1567,8 @@ sub print_drivedevice_full {
             if (my $product = $drive->{product}) {
                 $device .= ",product=$product";
             }
+        } else {
+            $has_write_cache = 0;
         }
 
     } elsif ($drive->{interface} eq 'ide' || $drive->{interface} eq 'sata') {
@@ -1562,13 +1588,25 @@ sub print_drivedevice_full {
 
         my $device_type = ($drive->{media} && $drive->{media} eq 'cdrom') ? "cd" : "hd";
 
+        # With ide-hd, the inserted block node needs to be marked as writable too, but -blockdev
+        # will complain if it's marked as writable but the actual backing device is read-only (e.g.
+        # read-only base LV). IDE/SATA do not support being configured as read-only, the most
+        # similar is using ide-cd instead of ide-hd, with most of the code and configuration shared
+        # in QEMU. Since a template is never actually started, the front-end device is never
+        # accessed. The backup only accesses the inserted block node, so it does not matter for the
+        # backup if the type is 'ide-cd' instead.
+        $device_type = 'cd' if $conf->{template} && min_version($machine_version, 10, 0);
+
         $device = "ide-$device_type";
         if ($drive->{interface} eq 'ide') {
             $device .= ",bus=ide.$controller,unit=$unit";
         } else {
             $device .= ",bus=ahci$controller.$unit";
         }
-        $device .= ",drive=drive-$drive_id,id=$drive_id";
+        if (!min_version($machine_version, 10, 0) || $drive->{file} ne 'none') {
+            $device .= ",drive=drive-$drive_id";
+        }
+        $device .= ",id=$drive_id";
 
         if ($device_type eq 'hd') {
             if (my $model = $drive->{model}) {
@@ -1586,9 +1624,14 @@ sub print_drivedevice_full {
     } elsif ($drive->{interface} eq 'nvme') {
         my $maxdev = ($drive->{interface} eq 'nvme') ? $PVE::QemuServer::Drive::MAX_NVME_DISKS : 6;
         $device = "nvme,id=$drive_id";
-        $device .= ",drive=drive-$drive_id";
-        $device .= ",use-intel-id=on",
-	} else {
+        # for the switch to -blockdev, there is no blockdev for 'none'
+        if (!min_version($machine_version, 10, 0) || $drive->{file} ne 'none') {
+            $device .= ",drive=drive-$drive_id";
+        }
+        $device .= ",use-intel-id=on";
+        # QEMU's nvme device has a 'write-cache' option, but no 'rerror'/'werror' options
+        $has_error_options = 0;
+    } else {
         die "unsupported interface type";
     }
 
@@ -1604,52 +1647,22 @@ sub print_drivedevice_full {
         $device .= ",serial=$serial";
     }
 
+    if (min_version($machine_version, 10, 0)) { # for the switch to -blockdev
+        if (!drive_is_cdrom($drive) && $has_write_cache) {
+            my $write_cache = 'on';
+            if (my $cache = $drive->{cache}) {
+                $write_cache = 'off' if $cache eq 'writethrough' || $cache eq 'directsync';
+            }
+            $device .= ",write-cache=$write_cache";
+        }
+        if ($has_error_options) {
+            for my $o (qw(rerror werror)) {
+                $device .= ",$o=$drive->{$o}" if defined($drive->{$o});
+            }
+        }
+    }
+
     return $device;
-}
-
-sub get_initiator_name {
-    my $initiator;
-
-    my $fh = IO::File->new('/etc/iscsi/initiatorname.iscsi') || return;
-    while (defined(my $line = <$fh>)) {
-        next if $line !~ m/^\s*InitiatorName\s*=\s*([\.\-:\w]+)/;
-        $initiator = $1;
-        last;
-    }
-    $fh->close();
-
-    return $initiator;
-}
-
-my sub storage_allows_io_uring_default {
-    my ($scfg, $cache_direct) = @_;
-
-    # io_uring with cache mode writeback or writethrough on krbd will hang...
-    return if $scfg && $scfg->{type} eq 'rbd' && $scfg->{krbd} && !$cache_direct;
-
-    # io_uring with cache mode writeback or writethrough on LVM will hang, without cache only
-    # sometimes, just plain disable...
-    return if $scfg && $scfg->{type} eq 'lvm';
-
-    # io_uring causes problems when used with CIFS since kernel 5.15
-    # Some discussion: https://www.spinics.net/lists/linux-cifs/msg26734.html
-    return if $scfg && $scfg->{type} eq 'cifs';
-
-    return 1;
-}
-
-my sub drive_uses_cache_direct {
-    my ($drive, $scfg) = @_;
-
-    my $cache_direct = 0;
-
-    if (my $cache = $drive->{cache}) {
-        $cache_direct = $cache =~ /^(?:off|none|directsync)$/;
-    } elsif (!drive_is_cdrom($drive) && !($scfg && $scfg->{type} eq 'btrfs' && !$scfg->{nocow})) {
-        $cache_direct = 1;
-    }
-
-    return $cache_direct;
 }
 
 sub print_drive_commandline_full {
@@ -1662,7 +1675,14 @@ sub print_drive_commandline_full {
     my $vtype = $storeid ? (PVE::Storage::parse_volname($storecfg, $drive->{file}))[0] : undef;
 
     my ($path, $format) =
-        PVE::QemuServer::Drive::get_path_and_format($storecfg, $vmid, $drive, $live_restore_name);
+        PVE::QemuServer::Drive::get_path_and_format($storecfg, $drive, $live_restore_name);
+
+    if ($scfg && $scfg->{'snapshot-as-volume-chain'} && $format && $format eq 'qcow2') {
+        # the print_drive_commandline_full() function is only used if machine version is < 10.0
+        die "storage for '$drive->{file}' is configured for snapshots as a volume chain - this"
+            . " requires QEMU machine version >= 10.0. See"
+            . " https://pve.proxmox.com/wiki/QEMU_Machine_Version_Upgrade\n";
+    }
 
     my $is_rbd = $path =~ m/^rbd:/;
 
@@ -1713,12 +1733,12 @@ sub print_drive_commandline_full {
         $opts .= ",format=$format";
     }
 
-    my $cache_direct = drive_uses_cache_direct($drive, $scfg);
+    my $cache_direct = PVE::QemuServer::Drive::drive_uses_cache_direct($drive, $scfg);
 
     $opts .= ",cache=none" if !$drive->{cache} && $cache_direct;
 
     if (!$drive->{aio}) {
-        if ($io_uring && storage_allows_io_uring_default($scfg, $cache_direct)) {
+        if ($io_uring && PVE::QemuServer::Drive::storage_allows_io_uring_default($scfg, $cache_direct)) {
             # io_uring supports all cache modes
             $opts .= ",aio=io_uring";
         } else {
@@ -3255,8 +3275,20 @@ sub vmstatus {
             $totalrdbytes = $totalrdbytes + $blockstat->{stats}->{rd_bytes};
             $totalwrbytes = $totalwrbytes + $blockstat->{stats}->{wr_bytes};
 
-            $blockstat->{device} =~ s/drive-//;
-            $res->{$vmid}->{blockstat}->{ $blockstat->{device} } = $blockstat->{stats};
+            # With the switch to -blockdev, the block backend in QEMU has no name, so need to also
+            # consider the qdev ID. Note that empty CD-ROM drives do not have a node name, so that
+            # cannot be used as a fallback instead of the qdev ID.
+            my $drive_id;
+            if ($blockstat->{device}) {
+                $drive_id = $blockstat->{device} =~ s/drive-//r;
+            } elsif ($blockstat->{qdev}) {
+                $drive_id = PVE::QemuServer::Blockdev::qdev_id_to_drive_id($blockstat->{qdev});
+            } else {
+                print "blockstats callback: unexpected missing drive ID\n";
+                next;
+            }
+
+            $res->{$vmid}->{blockstat}->{$drive_id} = $blockstat->{stats};
         }
         $res->{$vmid}->{diskread} = $totalrdbytes;
         $res->{$vmid}->{diskwrite} = $totalwrbytes;
@@ -3734,6 +3766,81 @@ my sub get_vga_properties {
     return ($vga, $qxlnum);
 }
 
+sub get_current_vm_volumes {
+    my ($storecfg, $conf) = @_;
+
+    my $volumes = [];
+
+    PVE::QemuConfig->foreach_volume_full(
+        $conf,
+        { extra_keys => ['vmstate'] },
+        sub {
+            my ($ds, $drive) = @_;
+
+            if (PVE::Storage::parse_volume_id($drive->{file}, 1)) {
+                check_volume_storage_type($storecfg, $drive->{file});
+                push $volumes->@*, $drive->{file};
+            }
+        },
+    );
+
+    return $volumes;
+}
+
+my sub generate_ovmf_blockdev {
+    my ($conf, $storecfg, $vmid, $arch, $q35, $machine_version, $readonly) = @_;
+
+    my $drive = $conf->{efidisk0} ? parse_drive('efidisk0', $conf->{efidisk0}) : undef;
+
+    my $amd_sev_type = get_amd_sev_type($conf);
+    die "Attempting to configure SEV-SNP with pflash devices instead of using `-bios`\n"
+        if $amd_sev_type && $amd_sev_type eq 'snp';
+
+    my ($ovmf_code, $ovmf_vars) = get_ovmf_files($arch, $drive, $q35, $amd_sev_type);
+
+    my $ovmf_code_blockdev = {
+        driver => 'raw',
+        file => { driver => 'file', filename => "$ovmf_code" },
+        'node-name' => 'pflash0',
+        'read-only' => JSON::true,
+    };
+
+    my $format;
+
+    if ($drive) {
+        my ($storeid, $volname) = PVE::Storage::parse_volume_id($drive->{file}, 1);
+        $format = $drive->{format};
+        if ($storeid) {
+            $format //= checked_volume_format($storecfg, $drive->{file});
+        } elsif (!defined($format)) {
+            die "efidisk format must be specified\n";
+        }
+    } else {
+        log_warn("no efidisk configured! Using temporary efivars disk.");
+        my $path = "/tmp/$vmid-ovmf.fd";
+        PVE::Tools::file_copy($ovmf_vars, $path, -s $ovmf_vars);
+        $drive = { file => $path, interface => 'efidisk', index => 0 };
+        $format = 'raw';
+    }
+
+    # Prior to -blockdev, QEMU's default 'writeback' cache mode was used for EFI disks, rather than
+    # the Proxmox VE default 'none'. Use that for -blockdev too, to avoid bug #3329.
+    $drive->{cache} = 'writeback' if !$drive->{cache};
+
+    my $extra_blockdev_options = {};
+    $extra_blockdev_options->{'read-only'} = 1 if $readonly;
+
+    $extra_blockdev_options->{size} = -s $ovmf_vars if $format eq 'raw';
+
+    my $throttle_group = PVE::QemuServer::Blockdev::generate_throttle_group($drive);
+
+    my $ovmf_vars_blockdev = PVE::QemuServer::Blockdev::generate_drive_blockdev(
+        $storecfg, $drive, $machine_version, $extra_blockdev_options,
+    );
+
+    return ($ovmf_code_blockdev, $ovmf_vars_blockdev, $throttle_group);
+}
+
 sub config_to_command {
     my (
         $storecfg,
@@ -3910,6 +4017,22 @@ sub config_to_command {
                 log_warn("EFI disks are not supported with SEV-SNP and will be ignored");
             }
             push $cmd->@*, '-bios', get_ovmf_files($arch, undef, undef, $amd_sev_type);
+        } elsif ($version_guard->(10, 0, 0)) { # for the switch to -blockdev
+            my ($code_blockdev, $vars_blockdev, $throttle_group) = generate_ovmf_blockdev(
+                $conf,
+                $storecfg,
+                $vmid,
+                $arch,
+                $q35,
+                $machine_version,
+                PVE::QemuConfig->is_template($conf),
+            );
+
+            push $cmd->@*, '-object', to_json($throttle_group, { canonical => 1 });
+            push $cmd->@*, '-blockdev', to_json($code_blockdev, { canonical => 1 });
+            push $cmd->@*, '-blockdev', to_json($vars_blockdev, { canonical => 1 });
+            push $machineFlags->@*, "pflash0=$code_blockdev->{'node-name'}",
+                "pflash1=$vars_blockdev->{'node-name'}";
         } else {
             my ($code_drive_str, $var_drive_str) =
                 print_ovmf_drive_commandlines($conf, $storecfg, $vmid, $arch, $q35, $version_guard);
@@ -4239,7 +4362,7 @@ sub config_to_command {
     my $scsihw = defined($conf->{scsihw}) ? $conf->{scsihw} : $defaults->{scsihw};
 
     # Add iscsi initiator name if available
-    if (my $initiator = get_initiator_name()) {
+    if (my $initiator = PVE::QemuServer::Helpers::get_iscsi_initiator_name()) {
         push @$devices, '-iscsi', "initiator-name=$initiator";
     }
 
@@ -4323,24 +4446,43 @@ sub config_to_command {
             }
 
             my $live_restore = $live_restore_backing->{$ds};
-            my $live_blockdev_name = undef;
-            if ($live_restore) {
-                $live_blockdev_name = $live_restore->{name};
-                push @$devices, '-blockdev', $live_restore->{blockdev};
+
+            if (min_version($machine_version, 10, 0)) { # for the switch to -blockdev
+                if ($drive->{file} ne 'none') {
+                    my $throttle_group =
+                        PVE::QemuServer::Blockdev::generate_throttle_group($drive);
+                    push @$cmd, '-object', to_json($throttle_group, { canonical => 1 });
+
+                    my $extra_blockdev_options = {};
+                    $extra_blockdev_options->{'live-restore'} = $live_restore if $live_restore;
+                    $extra_blockdev_options->{'read-only'} = 1
+                        if PVE::QemuConfig->is_template($conf);
+
+                    my $blockdev = PVE::QemuServer::Blockdev::generate_drive_blockdev(
+                        $storecfg, $drive, $machine_version, $extra_blockdev_options,
+                    );
+                    push @$devices, '-blockdev', to_json($blockdev, { canonical => 1 });
+                }
+            } else {
+                my $live_blockdev_name = undef;
+                if ($live_restore) {
+                    $live_blockdev_name = $live_restore->{name};
+                    push @$devices, '-blockdev', $live_restore->{blockdev};
+                }
+
+                my $drive_cmd = print_drive_commandline_full(
+                    $storecfg,
+                    $vmid,
+                    $drive,
+                    $live_blockdev_name,
+                    min_version($kvmver, 6, 0),
+                );
+
+                # extra protection for templates, but SATA and IDE don't support it..
+                $drive_cmd .= ',readonly=on' if drive_is_read_only($conf, $drive);
+
+                push @$devices, '-drive', $drive_cmd;
             }
-
-            my $drive_cmd = print_drive_commandline_full(
-                $storecfg,
-                $vmid,
-                $drive,
-                $live_blockdev_name,
-                min_version($kvmver, 6, 0),
-            );
-
-            # extra protection for templates, but SATA and IDE don't support it..
-            $drive_cmd .= ',readonly=on' if drive_is_read_only($conf, $drive);
-
-            push @$devices, '-drive', $drive_cmd;
             push @$devices, '-device',
                 print_drivedevice_full(
                     $storecfg, $conf, $vmid, $drive, $bridges, $arch, $machine_type,
@@ -4531,11 +4673,13 @@ sub vm_devices_list {
         $devices_to_check = $to_check;
     }
 
+    # Block device IDs need to be checked at the qdev level, since with '-blockdev', the 'device'
+    # property will not be set.
     my $resblock = mon_cmd($vmid, 'query-block');
-    foreach my $block (@$resblock) {
-        if ($block->{device} =~ m/^drive-(\S+)/) {
-            $devices->{$1} = 1;
-        }
+    for my $block ($resblock->@*) {
+        my $qdev_id = $block->{qdev} or next;
+        my $drive_id = PVE::QemuServer::Blockdev::qdev_id_to_drive_id($qdev_id);
+        $devices->{$drive_id} = 1;
     }
 
     my $resmice = mon_cmd($vmid, 'query-mice');
@@ -4702,7 +4846,7 @@ sub vm_deviceunplug {
         qemu_iothread_del($vmid, $deviceid, $device);
     } elsif ($deviceid =~ m/^(virtioscsi|scsihw)(\d+)$/) {
         qemu_devicedel($vmid, $deviceid);
-        qemu_devicedelverify($vmid, $deviceid);
+        qemu_devicedelverify($vmid, $deviceid, 15);
     } elsif ($deviceid =~ m/^(scsi)(\d+)$/) {
         my $device = parse_drive($deviceid, $conf->{$deviceid});
 
@@ -4764,30 +4908,46 @@ sub qemu_iothread_del {
 sub qemu_driveadd {
     my ($storecfg, $vmid, $device) = @_;
 
-    my $kvmver = get_running_qemu_version($vmid);
-    my $io_uring = min_version($kvmver, 6, 0);
-    my $drive = print_drive_commandline_full($storecfg, $vmid, $device, undef, $io_uring);
-    $drive =~ s/\\/\\\\/g;
-    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"", 60);
+    my $machine_type = PVE::QemuServer::Machine::get_current_qemu_machine($vmid);
 
-    # If the command succeeds qemu prints: "OK"
-    return 1 if $ret =~ m/OK/s;
+    # for the switch to -blockdev
+    if (PVE::QemuServer::Machine::is_machine_version_at_least($machine_type, 10, 0)) {
+        PVE::QemuServer::Blockdev::attach($storecfg, $vmid, $device, {});
+        return 1;
+    } else {
+        my $kvmver = get_running_qemu_version($vmid);
+        my $io_uring = min_version($kvmver, 6, 0);
+        my $drive = print_drive_commandline_full($storecfg, $vmid, $device, undef, $io_uring);
+        $drive =~ s/\\/\\\\/g;
+        my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_add auto \"$drive\"", 60);
 
-    die "adding drive failed: $ret\n";
+        # If the command succeeds qemu prints: "OK"
+        return 1 if $ret =~ m/OK/s;
+
+        die "adding drive failed: $ret\n";
+    }
 }
 
 sub qemu_drivedel {
     my ($vmid, $deviceid) = @_;
 
-    my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_del drive-$deviceid", 10 * 60);
-    $ret =~ s/^\s+//;
+    my $machine_type = PVE::QemuServer::Machine::get_current_qemu_machine($vmid);
 
-    return 1 if $ret eq "";
+    # for the switch to -blockdev
+    if (PVE::QemuServer::Machine::is_machine_version_at_least($machine_type, 10, 0)) {
+        PVE::QemuServer::Blockdev::detach($vmid, "drive-$deviceid", { 'follow-backing' => 1 });
+        return 1;
+    } else {
+        my $ret = PVE::QemuServer::Monitor::hmp_cmd($vmid, "drive_del drive-$deviceid", 10 * 60);
+        $ret =~ s/^\s+//;
 
-    # NB: device not found errors mean the drive was auto-deleted and we ignore the error
-    return 1 if $ret =~ m/Device \'.*?\' not found/s;
+        return 1 if $ret eq "";
 
-    die "deleting drive $deviceid failed : $ret\n";
+        # NB: device not found errors mean the drive was auto-deleted and we ignore the error
+        return 1 if $ret =~ m/Device \'.*?\' not found/s;
+
+        die "deleting drive $deviceid failed : $ret\n";
+    }
 }
 
 sub qemu_deviceaddverify {
@@ -4803,12 +4963,14 @@ sub qemu_deviceaddverify {
 }
 
 sub qemu_devicedelverify {
-    my ($vmid, $deviceid) = @_;
+    my ($vmid, $deviceid, $timeout) = @_;
+
+    $timeout //= 5;
 
     # need to verify that the device is correctly removed as device_del
     # is async and empty return is not reliable
 
-    for (my $i = 0; $i <= 5; $i++) {
+    for (my $i = 0; $i <= $timeout; $i++) {
         my $devices_list = vm_devices_list($vmid);
         return 1 if !defined($devices_list->{$deviceid});
         sleep 1;
@@ -5018,80 +5180,14 @@ sub qemu_cpu_hotplug {
     }
 }
 
-sub qemu_block_set_io_throttle {
-    my (
-        $vmid,
-        $deviceid,
-        $bps,
-        $bps_rd,
-        $bps_wr,
-        $iops,
-        $iops_rd,
-        $iops_wr,
-        $bps_max,
-        $bps_rd_max,
-        $bps_wr_max,
-        $iops_max,
-        $iops_rd_max,
-        $iops_wr_max,
-        $bps_max_length,
-        $bps_rd_max_length,
-        $bps_wr_max_length,
-        $iops_max_length,
-        $iops_rd_max_length,
-        $iops_wr_max_length,
-    ) = @_;
-
-    return if !check_running($vmid);
-
-    mon_cmd(
-        $vmid, "block_set_io_throttle",
-        device => $deviceid,
-        bps => int($bps),
-        bps_rd => int($bps_rd),
-        bps_wr => int($bps_wr),
-        iops => int($iops),
-        iops_rd => int($iops_rd),
-        iops_wr => int($iops_wr),
-        bps_max => int($bps_max),
-        bps_rd_max => int($bps_rd_max),
-        bps_wr_max => int($bps_wr_max),
-        iops_max => int($iops_max),
-        iops_rd_max => int($iops_rd_max),
-        iops_wr_max => int($iops_wr_max),
-        bps_max_length => int($bps_max_length),
-        bps_rd_max_length => int($bps_rd_max_length),
-        bps_wr_max_length => int($bps_wr_max_length),
-        iops_max_length => int($iops_max_length),
-        iops_rd_max_length => int($iops_rd_max_length),
-        iops_wr_max_length => int($iops_wr_max_length),
-    );
-
-}
-
 sub qemu_block_resize {
     my ($vmid, $deviceid, $storecfg, $volid, $size) = @_;
-
-    my $running = check_running($vmid);
 
     if ($deviceid =~ /^spdk/) {
         die "spdk block is not supported online resize yet!\n";
     }
 
-    PVE::Storage::volume_resize($storecfg, $volid, $size, $running);
-
-    return if !$running;
-
-    my $padding = (1024 - $size % 1024) % 1024;
-    $size = $size + $padding;
-
-    mon_cmd(
-        $vmid,
-        "block_resize",
-        device => $deviceid,
-        size => int($size),
-        timeout => 60,
-    );
+    PVE::QemuServer::Blockdev::resize($vmid, $deviceid, $storecfg, $volid, $size);
 }
 
 sub qemu_volume_snapshot {
@@ -5952,7 +6048,7 @@ sub vmconfig_update_disk {
                         $old_drive->{iops_wr_max_length})
                 ) {
 
-                    qemu_block_set_io_throttle(
+                    PVE::QemuServer::Blockdev::set_io_throttle(
                         $vmid,
                         "drive-$opt",
                         ($drive->{mbps} || 0) * 1024 * 1024,
@@ -5981,29 +6077,14 @@ sub vmconfig_update_disk {
             }
 
         } else { # cdrom
+            eval { PVE::QemuServer::Blockdev::change_medium($storecfg, $vmid, $opt, $drive); };
+            my $err = $@;
 
-            if ($drive->{file} eq 'none') {
-                mon_cmd($vmid, "eject", force => JSON::true, id => "$opt");
-                if (drive_is_cloudinit($old_drive)) {
-                    vmconfig_register_unused_drive($storecfg, $vmid, $conf, $old_drive);
-                }
-            } else {
-                my ($path, $format) =
-                    PVE::QemuServer::Drive::get_path_and_format($storecfg, $vmid, $drive);
-
-                # force eject if locked
-                mon_cmd($vmid, "eject", force => JSON::true, id => "$opt");
-
-                if ($path) {
-                    mon_cmd(
-                        $vmid,
-                        "blockdev-change-medium",
-                        id => "$opt",
-                        filename => "$path",
-                        format => "$format",
-                    );
-                }
+            if ($drive->{file} eq 'none' && drive_is_cloudinit($old_drive)) {
+                vmconfig_register_unused_drive($storecfg, $vmid, $conf, $old_drive);
             }
+
+            die $err if $err;
 
             return 1;
         }
@@ -6041,18 +6122,7 @@ sub vmconfig_update_cloudinit_drive {
     my $running = PVE::QemuServer::check_running($vmid);
 
     if ($running) {
-        my ($path, $format) =
-            PVE::QemuServer::Drive::get_path_and_format($storecfg, $vmid, $cloudinit_drive);
-        if ($path) {
-            mon_cmd($vmid, "eject", force => JSON::true, id => "$cloudinit_ds");
-            mon_cmd(
-                $vmid,
-                "blockdev-change-medium",
-                id => "$cloudinit_ds",
-                filename => "$path",
-                format => "$format",
-            );
-        }
+        PVE::QemuServer::Blockdev::change_medium($storecfg, $vmid, $cloudinit_ds, $cloudinit_drive);
     }
 }
 
@@ -6301,18 +6371,30 @@ sub vm_start_nolock {
         print "Resuming suspended VM\n";
     }
 
+    # With -blockdev, it is necessary to activate the volumes before generating the command line
+    my $current_volumes = get_current_vm_volumes($storecfg, $conf);
+    PVE::Storage::activate_volumes($storecfg, $current_volumes);
+
     # Note that for certain cases like templates, the configuration is minimized, so need to ensure
     # the rest of the function here uses the same configuration that was used to build the command
-    (my $cmd, my $vollist, my $spice_port, my $pci_devices, $conf) = config_to_command(
-        $storecfg,
-        $vmid,
-        $conf,
-        $defaults,
-        $forcemachine,
-        $forcecpu,
-        $params->{'live-restore-backing'},
-        $params->{'nets-host-mtu'},
-    );
+    (my $cmd, my $vollist, my $spice_port, my $pci_devices);
+    eval {
+        ($cmd, $vollist, $spice_port, $pci_devices, $conf) = config_to_command(
+            $storecfg,
+            $vmid,
+            $conf,
+            $defaults,
+            $forcemachine,
+            $forcecpu,
+            $params->{'live-restore-backing'},
+            $params->{'nets-host-mtu'},
+        );
+    };
+    if (my $err = $@) {
+        eval { PVE::Storage::deactivate_volumes($storecfg, $current_volumes); };
+        warn $@ if $@;
+        die $err;
+    }
 
     my $migration_ip;
     my $get_migration_ip = sub {
@@ -6618,14 +6700,13 @@ sub vm_start_nolock {
             $migrate_storage_uri = "nbd:${localip}:${storage_migrate_port}";
         }
 
-        my $block_info = mon_cmd($vmid, "query-block");
-        $block_info = { map { $_->{device} => $_ } $block_info->@* };
+        my $block_info = PVE::QemuServer::Blockdev::get_block_info($vmid);
 
         foreach my $opt (sort keys %$nbd) {
             my $drivestr = $nbd->{$opt}->{drivestr};
             my $volid = $nbd->{$opt}->{volid};
 
-            my $block_node = $block_info->{"drive-$opt"}->{inserted}->{'node-name'};
+            my $block_node = $block_info->{$opt}->{inserted}->{'node-name'};
 
             mon_cmd(
                 $vmid,
@@ -6736,9 +6817,18 @@ sub vm_commandline {
 
     my $defaults = load_defaults();
 
+    my $running = PVE::QemuServer::Helpers::vm_running_locally($vmid);
+
+    # With -blockdev, it is necessary to activate the volumes before generating the command line.
+    # There might be concurrent operations on the volumes, so do not deactivate afterwards.
+    if (!$running) {
+        my $volumes = get_current_vm_volumes($storecfg, $conf);
+        PVE::Storage::activate_volumes($storecfg, $volumes);
+    }
+
     my $cmd = config_to_command($storecfg, $vmid, $conf, $defaults, $forcemachine, $forcecpu);
     # if the vm is not running, we need to clean up the reserved/created devices
-    if (!PVE::QemuServer::Helpers::vm_running_locally($vmid)) {
+    if (!$running) {
         eval { cleanup_pci_devices($vmid, $conf) };
         warn $@ if $@;
     }
@@ -8049,7 +8139,7 @@ sub restore_external_archive {
                     'is-zero-initialized' => $sparseinit,
                     'source-path-format' => $source_format,
                 };
-                qemu_img_convert($source_path, $d->{volid}, $d->{size}, $convert_opts);
+                PVE::QemuServer::QemuImage::convert($source_path, $d->{volid}, $d->{size}, $convert_opts);
             };
             my $err = $@;
             eval { $backup_provider->restore_vm_volume_cleanup($volname, $d->{devname}, {}); };
@@ -8122,10 +8212,22 @@ sub pbs_live_restore {
         print "restoring '$ds' to '$drive->{file}'\n";
 
         my $pbs_name = "drive-${confname}-pbs";
-        $live_restore_backing->{$confname} = {
-            name => $pbs_name,
-            blockdev => print_pbs_blockdev($pbs_conf, $pbs_name),
-        };
+
+        $live_restore_backing->{$confname} = { name => $pbs_name };
+
+        # add blockdev information
+        my $machine_type = PVE::QemuServer::Machine::get_vm_machine($conf, undef, $conf->{arch});
+        my $machine_version = PVE::QemuServer::Machine::extract_version(
+            $machine_type,
+            PVE::QemuServer::Helpers::kvm_user_version(),
+        );
+        if (min_version($machine_version, 10, 0)) { # for the switch to -blockdev
+            $live_restore_backing->{$confname}->{blockdev} =
+                PVE::QemuServer::Blockdev::generate_pbs_blockdev($pbs_conf, $pbs_name);
+        } else {
+            $live_restore_backing->{$confname}->{blockdev} =
+                print_pbs_blockdev($pbs_conf, $pbs_name);
+        }
     }
 
     my $drives_streamed = 0;
@@ -8153,24 +8255,27 @@ sub pbs_live_restore {
         # removes itself once all backing images vanish with 'auto-remove=on')
         my $jobs = {};
         for my $ds (sort keys %$restored_disks) {
+            my $node_name = PVE::QemuServer::Blockdev::get_node_name_below_throttle($vmid, $ds);
             my $job_id = "restore-$ds";
             mon_cmd(
                 $vmid, 'block-stream',
                 'job-id' => $job_id,
-                device => "$ds",
+                device => "$node_name",
                 'auto-dismiss' => JSON::false,
             );
             $jobs->{$job_id} = {};
         }
 
         mon_cmd($vmid, 'cont');
-        qemu_drive_mirror_monitor($vmid, undef, $jobs, 'auto', 0, 'stream');
+        PVE::QemuServer::BlockJob::qemu_drive_mirror_monitor(
+            $vmid, undef, $jobs, 'auto', 0, 'stream',
+        );
 
         print "restore-drive jobs finished successfully, removing all tracking block devices"
             . " to disconnect from Proxmox Backup Server\n";
 
         for my $ds (sort keys %$restored_disks) {
-            mon_cmd($vmid, 'blockdev-del', 'node-name' => "$ds-pbs");
+            PVE::QemuServer::Blockdev::detach($vmid, "$ds-pbs");
         }
 
         close($qmeventd_fd);
@@ -8199,6 +8304,8 @@ sub pbs_live_restore {
 sub live_import_from_files {
     my ($mapping, $vmid, $conf, $restore_options) = @_;
 
+    my $storecfg = PVE::Storage::config();
+
     my $live_restore_backing = {};
     my $sources_to_remove = [];
     for my $dev (keys %$mapping) {
@@ -8209,24 +8316,41 @@ sub live_import_from_files {
             if !exists($conf->{$dev});
 
         my $info = $mapping->{$dev};
-        my ($format, $path) = $info->@{qw(format path)};
+        my ($format, $path, $volid) = $info->@{qw(format path volid)};
         die "missing path for '$dev' mapping\n" if !$path;
+        die "missing volid for '$dev' mapping\n" if !$volid;
         die "missing format for '$dev' mapping\n" if !$format;
         die "invalid format '$format' for '$dev' mapping\n"
             if !grep { $format eq $_ } qw(raw qcow2 vmdk);
 
-        $live_restore_backing->{$dev} = {
-            name => "drive-$dev-restore",
-            blockdev => "driver=$format,node-name=drive-$dev-restore"
+        $live_restore_backing->{$dev} = { name => "drive-$dev-restore" };
+
+        my $machine_type = PVE::QemuServer::Machine::get_vm_machine($conf, undef, $conf->{arch});
+        my $machine_version = PVE::QemuServer::Machine::extract_version(
+            $machine_type,
+            PVE::QemuServer::Helpers::kvm_user_version(),
+        );
+        if (min_version($machine_version, 10, 0)) { # for the switch to -blockdev
+            my ($interface, $index) = PVE::QemuServer::Drive::parse_drive_interface($dev);
+            my $drive = { file => $volid, interface => $interface, index => $index };
+            my $blockdev = PVE::QemuServer::Blockdev::generate_drive_blockdev(
+                $storecfg,
+                $drive,
+                $machine_version,
+                { 'no-throttle' => 1 },
+            );
+            $live_restore_backing->{$dev}->{blockdev} = $blockdev;
+        } else {
+            $live_restore_backing->{$dev}->{blockdev} =
+                "driver=$format,node-name=drive-$dev-restore"
                 . ",read-only=on"
-                . ",file.driver=file,file.filename=$path",
-        };
+                . ",file.driver=file,file.filename=$path";
+        }
 
         my $source_volid = $info->{'delete-after-finish'};
         push $sources_to_remove->@*, $source_volid if defined($source_volid);
     }
 
-    my $storecfg = PVE::Storage::config();
     eval {
 
         # make sure HA doesn't interrupt our restore by stopping the VM
@@ -8251,23 +8375,27 @@ sub live_import_from_files {
         # removes itself once all backing images vanish with 'auto-remove=on')
         my $jobs = {};
         for my $ds (sort keys %$live_restore_backing) {
+            my $node_name =
+                PVE::QemuServer::Blockdev::get_node_name_below_throttle($vmid, "drive-$ds");
             my $job_id = "restore-$ds";
             mon_cmd(
                 $vmid, 'block-stream',
                 'job-id' => $job_id,
-                device => "drive-$ds",
+                device => "$node_name",
                 'auto-dismiss' => JSON::false,
             );
             $jobs->{$job_id} = {};
         }
 
         mon_cmd($vmid, 'cont');
-        qemu_drive_mirror_monitor($vmid, undef, $jobs, 'auto', 0, 'stream');
+        PVE::QemuServer::BlockJob::qemu_drive_mirror_monitor(
+            $vmid, undef, $jobs, 'auto', 0, 'stream',
+        );
 
         print "restore-drive jobs finished successfully, removing all tracking block devices\n";
 
         for my $ds (sort keys %$live_restore_backing) {
-            mon_cmd($vmid, 'blockdev-del', 'node-name' => "drive-$ds-restore");
+            PVE::QemuServer::Blockdev::detach($vmid, "drive-$ds-restore");
         }
 
         close($qmeventd_fd);
@@ -8701,436 +8829,26 @@ sub template_create : prototype($$;$) {
     );
 }
 
-sub convert_iscsi_path {
-    my ($path) = @_;
-
-    if ($path =~ m|^iscsi://([^/]+)/([^/]+)/(.+)$|) {
-        my $portal = $1;
-        my $target = $2;
-        my $lun = $3;
-
-        my $initiator_name = get_initiator_name();
-
-        return "file.driver=iscsi,file.transport=tcp,file.initiator-name=$initiator_name,"
-            . "file.portal=$portal,file.target=$target,file.lun=$lun,driver=raw";
-    }
-
-    die "cannot convert iscsi path '$path', unknown format\n";
-}
-
 # The possible options are:
 # bwlimit - The bandwidth limit in KiB/s.
 # is-zero-initialized - If the destination image is zero-initialized.
 # snapname - Use this snapshot of the source image.
 # source-path-format - Indicate the format of the source when the source is a path. For PVE-managed
 # volumes, the format from the storage layer is always used.
-sub qemu_img_convert {
-    my ($src_volid, $dst_volid, $size, $opts) = @_;
-
-    my ($bwlimit, $snapname) = $opts->@{qw(bwlimit snapname)};
-
-    my $storecfg = PVE::Storage::config();
-    my ($src_storeid) = PVE::Storage::parse_volume_id($src_volid, 1);
-    my ($dst_storeid) = PVE::Storage::parse_volume_id($dst_volid, 1);
-
-    die "destination '$dst_volid' is not a valid volid form qemu-img convert\n" if !$dst_storeid;
-
-    my $cachemode;
-    my $src_path;
-    my $src_is_iscsi = 0;
-    my $src_format;
-
-    if ($src_storeid) {
-        PVE::Storage::activate_volumes($storecfg, [$src_volid], $snapname);
-        my $src_scfg = PVE::Storage::storage_config($storecfg, $src_storeid);
-        $src_format = checked_volume_format($storecfg, $src_volid);
-        $src_path = PVE::Storage::path($storecfg, $src_volid, $snapname);
-        $src_is_iscsi = ($src_path =~ m|^iscsi://|);
-        $cachemode = 'none' if $src_scfg->{type} eq 'zfspool';
-    } elsif (-f $src_volid || -b $src_volid) {
-        $src_path = $src_volid;
-        if ($opts->{'source-path-format'}) {
-            $src_format = $opts->{'source-path-format'};
-        } elsif ($src_path =~ m/\.($PVE::QemuServer::Drive::QEMU_FORMAT_RE)$/) {
-            $src_format = $1;
-        }
-    }
-
-    die "source '$src_volid' is not a valid volid nor path for qemu-img convert\n" if !$src_path;
-
-    my $dst_scfg = PVE::Storage::storage_config($storecfg, $dst_storeid);
-    my $dst_format = checked_volume_format($storecfg, $dst_volid);
-    my $dst_path = PVE::Storage::path($storecfg, $dst_volid);
-    my $dst_is_iscsi = ($dst_path =~ m|^iscsi://|);
-
-    my $cmd = [];
-    push @$cmd, '/usr/bin/qemu-img', 'convert', '-p', '-n';
-    push @$cmd, '-l', "snapshot.name=$snapname"
-        if $snapname && $src_format && $src_format eq "qcow2";
-    push @$cmd, '-t', 'none' if $dst_scfg->{type} eq 'zfspool';
-    push @$cmd, '-T', $cachemode if defined($cachemode);
-    push @$cmd, '-r', "${bwlimit}K" if defined($bwlimit);
-
-    if ($src_is_iscsi) {
-        push @$cmd, '--image-opts';
-        $src_path = convert_iscsi_path($src_path);
-    } elsif ($src_format) {
-        push @$cmd, '-f', $src_format;
-    }
-
-    if ($dst_is_iscsi) {
-        push @$cmd, '--target-image-opts';
-        $dst_path = convert_iscsi_path($dst_path);
-    } else {
-        push @$cmd, '-O', $dst_format;
-    }
-
-    push @$cmd, $src_path;
-
-    if (!$dst_is_iscsi && $opts->{'is-zero-initialized'}) {
-        push @$cmd, "zeroinit:$dst_path";
-    } else {
-        push @$cmd, $dst_path;
-    }
-
-    my $parser = sub {
-        my $line = shift;
-        if ($line =~ m/\((\S+)\/100\%\)/) {
-            my $percent = $1;
-            my $transferred = int($size * $percent / 100);
-            my $total_h = render_bytes($size, 1);
-            my $transferred_h = render_bytes($transferred, 1);
-
-            print "transferred $transferred_h of $total_h ($percent%)\n";
-        }
-
-    };
-
-    eval { run_command($cmd, timeout => undef, outfunc => $parser); };
-    my $err = $@;
-    die "copy failed: $err" if $err;
-}
-
-sub qemu_drive_mirror {
-    my (
-        $vmid,
-        $drive,
-        $dst_volid,
-        $vmiddst,
-        $is_zero_initialized,
-        $jobs,
-        $completion,
-        $qga,
-        $bwlimit,
-        $src_bitmap,
-    ) = @_;
-
-    $jobs = {} if !$jobs;
-
-    my $qemu_target;
-    my $format;
-    $jobs->{"drive-$drive"} = {};
-
-    if ($dst_volid =~ /^nbd:/) {
-        $qemu_target = $dst_volid;
-        $format = "nbd";
-    } else {
-        my $storecfg = PVE::Storage::config();
-
-        $format = checked_volume_format($storecfg, $dst_volid);
-
-        my $dst_path = PVE::Storage::path($storecfg, $dst_volid);
-
-        $qemu_target = $is_zero_initialized ? "zeroinit:$dst_path" : $dst_path;
-    }
-
-    my $opts = {
-        timeout => 10,
-        device => "drive-$drive",
-        mode => "existing",
-        sync => "full",
-        target => $qemu_target,
-        'auto-dismiss' => JSON::false,
-    };
-    $opts->{format} = $format if $format;
-
-    if (defined($src_bitmap)) {
-        $opts->{sync} = 'incremental';
-        $opts->{bitmap} = $src_bitmap;
-        print "drive mirror re-using dirty bitmap '$src_bitmap'\n";
-    }
-
-    if (defined($bwlimit)) {
-        $opts->{speed} = $bwlimit * 1024;
-        print "drive mirror is starting for drive-$drive with bandwidth limit: ${bwlimit} KB/s\n";
-    } else {
-        print "drive mirror is starting for drive-$drive\n";
-    }
-
-    # if a job already runs for this device we get an error, catch it for cleanup
-    eval { mon_cmd($vmid, "drive-mirror", %$opts); };
-    if (my $err = $@) {
-        eval { PVE::QemuServer::qemu_blockjobs_cancel($vmid, $jobs) };
-        warn "$@\n" if $@;
-        die "mirroring error: $err\n";
-    }
-
-    qemu_drive_mirror_monitor($vmid, $vmiddst, $jobs, $completion, $qga);
-}
-
 # $completion can be either
 # 'complete': wait until all jobs are ready, block-job-complete them (default)
 # 'cancel': wait until all jobs are ready, block-job-cancel them
 # 'skip': wait until all jobs are ready, return with block jobs in ready state
 # 'auto': wait until all jobs disappear, only use for jobs which complete automatically
-sub qemu_drive_mirror_monitor {
-    my ($vmid, $vmiddst, $jobs, $completion, $qga, $op) = @_;
-
-    $completion //= 'complete';
-    $op //= "mirror";
-
-    eval {
-        my $err_complete = 0;
-
-        my $starttime = time();
-        while (1) {
-            die "block job ('$op') timed out\n" if $err_complete > 300;
-
-            my $stats = mon_cmd($vmid, "query-block-jobs");
-            my $ctime = time();
-
-            my $running_jobs = {};
-            for my $stat (@$stats) {
-                next if $stat->{type} ne $op;
-                $running_jobs->{ $stat->{device} } = $stat;
-            }
-
-            my $readycounter = 0;
-
-            for my $job_id (sort keys %$jobs) {
-                my $job = $running_jobs->{$job_id};
-
-                my $vanished = !defined($job);
-                my $complete = defined($jobs->{$job_id}->{complete}) && $vanished;
-                if ($complete || ($vanished && $completion eq 'auto')) {
-                    print "$job_id: $op-job finished\n";
-                    delete $jobs->{$job_id};
-                    next;
-                }
-
-                die "$job_id: '$op' has been cancelled\n" if !defined($job);
-
-                qemu_handle_concluded_blockjob($vmid, $job_id, $job)
-                    if $job && $job->{status} eq 'concluded';
-
-                my $busy = $job->{busy};
-                my $ready = $job->{ready};
-                if (my $total = $job->{len}) {
-                    my $transferred = $job->{offset} || 0;
-                    my $remaining = $total - $transferred;
-                    my $percent = sprintf "%.2f", ($transferred * 100 / $total);
-
-                    my $duration = $ctime - $starttime;
-                    my $total_h = render_bytes($total, 1);
-                    my $transferred_h = render_bytes($transferred, 1);
-
-                    my $status = sprintf(
-                        "transferred $transferred_h of $total_h ($percent%%) in %s",
-                        render_duration($duration),
-                    );
-
-                    if ($ready) {
-                        if ($busy) {
-                            $status .= ", still busy"; # shouldn't even happen? but mirror is weird
-                        } else {
-                            $status .= ", ready";
-                        }
-                    }
-                    print "$job_id: $status\n" if !$jobs->{$job_id}->{ready};
-                    $jobs->{$job_id}->{ready} = $ready;
-                }
-
-                $readycounter++ if $job->{ready};
-            }
-
-            last if scalar(keys %$jobs) == 0;
-
-            if ($readycounter == scalar(keys %$jobs)) {
-                print "all '$op' jobs are ready\n";
-
-                # do the complete later (or has already been done)
-                last if $completion eq 'skip' || $completion eq 'auto';
-
-                if ($vmiddst && $vmiddst != $vmid) {
-                    my $agent_running = $qga && qga_check_running($vmid);
-                    if ($agent_running) {
-                        print "freeze filesystem\n";
-                        eval { mon_cmd($vmid, "guest-fsfreeze-freeze"); };
-                        warn $@ if $@;
-                    } else {
-                        print "suspend vm\n";
-                        eval { PVE::QemuServer::vm_suspend($vmid, 1); };
-                        warn $@ if $@;
-                    }
-
-                    # if we clone a disk for a new target vm, we don't switch the disk
-                    PVE::QemuServer::qemu_blockjobs_cancel($vmid, $jobs);
-
-                    if ($agent_running) {
-                        print "unfreeze filesystem\n";
-                        eval { mon_cmd($vmid, "guest-fsfreeze-thaw"); };
-                        warn $@ if $@;
-                    } else {
-                        print "resume vm\n";
-                        eval { PVE::QemuServer::vm_resume($vmid, 1, 1); };
-                        warn $@ if $@;
-                    }
-
-                    last;
-                } else {
-
-                    for my $job_id (sort keys %$jobs) {
-                        # try to switch the disk if source and destination are on the same guest
-                        print "$job_id: Completing block job...\n";
-
-                        my $op;
-                        if ($completion eq 'complete') {
-                            $op = 'block-job-complete';
-                        } elsif ($completion eq 'cancel') {
-                            $op = 'block-job-cancel';
-                        } else {
-                            die "invalid completion value: $completion\n";
-                        }
-                        eval { mon_cmd($vmid, $op, device => $job_id) };
-                        my $err = $@;
-                        if ($err && $err =~ m/cannot be completed/) {
-                            print "$job_id: block job cannot be completed, trying again.\n";
-                            $err_complete++;
-                        } elsif ($err) {
-                            die "$job_id: block job cannot be completed - $err\n";
-                        } else {
-                            print "$job_id: Completed successfully.\n";
-                            $jobs->{$job_id}->{complete} = 1;
-                        }
-                    }
-                }
-            }
-            sleep 1;
-        }
-    };
-    my $err = $@;
-
-    if ($err) {
-        eval { PVE::QemuServer::qemu_blockjobs_cancel($vmid, $jobs) };
-        die "block job ($op) error: $err";
-    }
-}
-
 # If the job was started with auto-dismiss=false, it's necessary to dismiss it manually. Using this
 # option is useful to get the error for failed jobs here. QEMU's job lock should make it impossible
 # to see a job in 'concluded' state when auto-dismiss=true.
 # $info is the 'BlockJobInfo' for the job returned by query-block-jobs.
-sub qemu_handle_concluded_blockjob {
-    my ($vmid, $job_id, $info) = @_;
-
-    eval { mon_cmd($vmid, 'job-dismiss', id => $job_id); };
-    log_warn("$job_id: failed to dismiss job - $@") if $@;
-
-    die "$job_id: $info->{error} (io-status: $info->{'io-status'})\n" if $info->{error};
-}
-
-sub qemu_blockjobs_cancel {
-    my ($vmid, $jobs) = @_;
-
-    foreach my $job (keys %$jobs) {
-        print "$job: Cancelling block job\n";
-        eval { mon_cmd($vmid, "block-job-cancel", device => $job); };
-        $jobs->{$job}->{cancel} = 1;
-    }
-
-    while (1) {
-        my $stats = mon_cmd($vmid, "query-block-jobs");
-
-        my $running_jobs = {};
-        foreach my $stat (@$stats) {
-            $running_jobs->{ $stat->{device} } = $stat;
-        }
-
-        foreach my $job (keys %$jobs) {
-            my $info = $running_jobs->{$job};
-            eval {
-                qemu_handle_concluded_blockjob($vmid, $job, $info)
-                    if $info && $info->{status} eq 'concluded';
-            };
-            log_warn($@) if $@; # only warn and proceed with canceling other jobs
-
-            if (defined($jobs->{$job}->{cancel}) && !defined($info)) {
-                print "$job: Done.\n";
-                delete $jobs->{$job};
-            }
-        }
-
-        last if scalar(keys %$jobs) == 0;
-
-        sleep 1;
-    }
-}
-
 # Callers should version guard this (only available with a binary >= QEMU 8.2)
-sub qemu_drive_mirror_switch_to_active_mode {
-    my ($vmid, $jobs) = @_;
-
-    my $switching = {};
-
-    for my $job (sort keys $jobs->%*) {
-        print "$job: switching to actively synced mode\n";
-
-        eval {
-            mon_cmd(
-                $vmid,
-                "block-job-change",
-                id => $job,
-                type => 'mirror',
-                'copy-mode' => 'write-blocking',
-            );
-            $switching->{$job} = 1;
-        };
-        die "could not switch mirror job $job to active mode - $@\n" if $@;
-    }
-
-    while (1) {
-        my $stats = mon_cmd($vmid, "query-block-jobs");
-
-        my $running_jobs = {};
-        $running_jobs->{ $_->{device} } = $_ for $stats->@*;
-
-        for my $job (sort keys $switching->%*) {
-            die "$job: vanished while switching to active mode\n" if !$running_jobs->{$job};
-
-            my $info = $running_jobs->{$job};
-            if ($info->{status} eq 'concluded') {
-                qemu_handle_concluded_blockjob($vmid, $job, $info);
-                # The 'concluded' state should occur here if and only if the job failed, so the
-                # 'die' below should be unreachable, but play it safe.
-                die "$job: expected job to have failed, but no error was set\n";
-            }
-
-            if ($info->{'actively-synced'}) {
-                print "$job: successfully switched to actively synced mode\n";
-                delete $switching->{$job};
-            }
-        }
-
-        last if scalar(keys $switching->%*) == 0;
-
-        sleep 1;
-    }
-}
-
 # Check for bug #4525: drive-mirror will open the target drive with the same aio setting as the
 # source, but some storages have problems with io_uring, sometimes even leading to crashes.
 my sub clone_disk_check_io_uring {
-    my ($src_drive, $storecfg, $src_storeid, $dst_storeid, $use_drive_mirror) = @_;
+    my ($vmid, $src_drive, $storecfg, $src_storeid, $dst_storeid, $use_drive_mirror) = @_;
 
     return if !$use_drive_mirror;
 
@@ -9141,17 +8859,22 @@ my sub clone_disk_check_io_uring {
     my $src_scfg = PVE::Storage::storage_config($storecfg, $src_storeid);
     my $dst_scfg = PVE::Storage::storage_config($storecfg, $dst_storeid);
 
-    my $cache_direct = drive_uses_cache_direct($src_drive);
+    my $cache_direct = PVE::QemuServer::Drive::drive_uses_cache_direct($src_drive, $src_scfg);
 
     my $src_uses_io_uring;
     if ($src_drive->{aio}) {
         $src_uses_io_uring = $src_drive->{aio} eq 'io_uring';
     } else {
-        $src_uses_io_uring = storage_allows_io_uring_default($src_scfg, $cache_direct);
+        # With the switch to -blockdev and blockdev-mirror, the aio setting will be changed on the
+        # fly if not explicitly set.
+        my $machine_type = PVE::QemuServer::Machine::get_current_qemu_machine($vmid);
+        return if PVE::QemuServer::Machine::is_machine_version_at_least($machine_type, 10, 0);
+
+        $src_uses_io_uring = PVE::QemuServer::Drive::storage_allows_io_uring_default($src_scfg, $cache_direct);
     }
 
     die "target storage is known to cause issues with aio=io_uring (used by current drive)\n"
-        if $src_uses_io_uring && !storage_allows_io_uring_default($dst_scfg, $cache_direct);
+        if $src_uses_io_uring && !PVE::QemuServer::Drive::storage_allows_io_uring_default($dst_scfg, $cache_direct);
 }
 
 sub clone_disk {
@@ -9217,7 +8940,9 @@ sub clone_disk {
             $dst_format = 'raw';
             $size = PVE::QemuServer::Drive::TPMSTATE_DISK_SIZE;
         } else {
-            clone_disk_check_io_uring($drive, $storecfg, $src_storeid, $storeid, $use_drive_mirror);
+            clone_disk_check_io_uring(
+                $vmid, $drive, $storecfg, $src_storeid, $storeid, $use_drive_mirror,
+            );
 
             $size = PVE::Storage::volume_size_info($storecfg, $drive->{file}, 10);
         }
@@ -9238,23 +8963,28 @@ sub clone_disk {
             # if this is the case, we have to complete any block-jobs still there from
             # previous drive-mirrors
             if (($completion && $completion eq 'complete') && (scalar(keys %$jobs) > 0)) {
-                qemu_drive_mirror_monitor($vmid, $newvmid, $jobs, $completion, $qga);
+                PVE::QemuServer::BlockJob::qemu_drive_mirror_monitor(
+                    $vmid, $newvmid, $jobs, $completion, $qga,
+                );
             }
             goto no_data_clone;
         }
 
         my $sparseinit = PVE::Storage::volume_has_feature($storecfg, 'sparseinit', $newvolid);
         if ($use_drive_mirror) {
-            qemu_drive_mirror(
-                $vmid,
-                $src_drivename,
-                $newvolid,
-                $newvmid,
-                $sparseinit,
+            my $source_info = { vmid => $vmid, drive => $drive };
+            my $dest_info = { volid => $newvolid };
+            $dest_info->{'zero-initialized'} = 1 if $sparseinit;
+            $dest_info->{vmid} = $newvmid if defined($newvmid);
+            my $mirror_opts = {};
+            $mirror_opts->{'guest-agent'} = 1 if $qga;
+            $mirror_opts->{bwlimit} = $bwlimit if defined($bwlimit);
+            PVE::QemuServer::BlockJob::mirror(
+                $source_info,
+                $dest_info,
                 $jobs,
                 $completion,
-                $qga,
-                $bwlimit,
+                $mirror_opts,
             );
         } else {
             if ($dst_drivename eq 'efidisk0') {
@@ -9284,7 +9014,7 @@ sub clone_disk {
                     'is-zero-initialized' => $sparseinit,
                     snapname => $snapname,
                 };
-                qemu_img_convert($drive->{file}, $newvolid, $size, $opts);
+                PVE::QemuServer::QemuImage::convert($drive->{file}, $newvolid, $size, $opts);
             }
         }
     }
@@ -9369,7 +9099,7 @@ sub create_efidisk($$$$$$$$) {
     my $volid = PVE::Storage::vdisk_alloc($storecfg, $storeid, $vmid, $fmt, undef, $vars_size);
     PVE::Storage::activate_volumes($storecfg, [$volid]);
 
-    qemu_img_convert($ovmf_vars, $volid, $vars_size_b);
+    PVE::QemuServer::QemuImage::convert($ovmf_vars, $volid, $vars_size_b);
     my $size = PVE::Storage::volume_size_info($storecfg, $volid, 3);
 
     if (

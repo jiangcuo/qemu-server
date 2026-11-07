@@ -86,7 +86,7 @@ sub queue_cmd {
 
 # execute a single command
 sub cmd {
-    my ($self, $vmid, $cmd, $timeout) = @_;
+    my ($self, $vmid, $cmd, $timeout, $noerr) = @_;
 
     my $result;
 
@@ -119,7 +119,19 @@ sub cmd {
             # that are executed upon thaw, so use 3 minutes to be on the safe side.
             $timeout = 3 * 60;
         } elsif (
+            $cmd->{execute} eq 'blockdev-add'
+            || $cmd->{execute} eq 'device_add'
+            || $cmd->{execute} eq 'device_del'
+            || $cmd->{execute} eq 'netdev_add'
+            || $cmd->{execute} eq 'netdev_del'
+            || $cmd->{execute} eq 'object-add'
+            || $cmd->{execute} eq 'object-del'
+        ) {
+            $timeout = 60;
+        } elsif (
             $cmd->{execute} eq 'backup-cancel'
+            || $cmd->{execute} eq 'blockdev-del'
+            || $cmd->{execute} eq 'blockdev-mirror'
             || $cmd->{execute} eq 'blockdev-snapshot-delete-internal-sync'
             || $cmd->{execute} eq 'blockdev-snapshot-internal-sync'
             || $cmd->{execute} eq 'block-job-cancel'
@@ -143,8 +155,11 @@ sub cmd {
 
     $self->queue_execute($timeout, 2);
 
-    die "VM $vmid qmp command '$cmd->{execute}' failed - $queue_info->{error}"
-        if defined($queue_info->{error});
+    if (defined($queue_info->{error})) {
+        die "VM $vmid qmp command '$cmd->{execute}' failed - $queue_info->{error}" if !$noerr;
+        $result = { error => $queue_info->{error} };
+        $result->{'error-is-timeout'} = 1 if $queue_info->{'error-is-timeout'};
+    }
 
     return $result;
 }
@@ -471,6 +486,7 @@ sub mux_timeout {
 
     if (my $queue_info = &$lookup_queue_info($self, $fh)) {
         $queue_info->{error} = "got timeout\n";
+        $queue_info->{'error-is-timeout'} = 1;
         $self->{mux}->inbuffer($fh, ''); # clear to avoid warnings
     }
 
