@@ -1,3 +1,10 @@
+qemu-server (8.4.8+pxvirt2) bookworm; urgency=medium
+
+  * Revert set uuid for mdev.
+  * migration: allow offline migration with NVMe disks
+
+ -- Lierfang Support Team <itsupport@lierfang.com>  Sat, 07 Nov 2026 14:50:32 +0800
+
 qemu-server (8.4.8+pxvirt1) bookworm; urgency=medium
 
   * Update version 
