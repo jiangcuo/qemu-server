@@ -14,6 +14,7 @@ use PVE::Tools qw(get_host_arch);
 
 use base 'Exporter';
 our @EXPORT_OK = qw(
+    get_iscsi_initiator_name
     min_version
     config_aware_timeout
     kvm_user_version

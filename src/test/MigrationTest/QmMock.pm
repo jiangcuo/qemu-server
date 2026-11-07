@@ -43,6 +43,26 @@ sub fork_worker {
 
 # mocked modules
 
+my sub mocked_mon_cmd {
+    my ($vmid, $command, %params) = @_;
+
+    if ($command eq 'nbd-server-start') {
+        return;
+    } elsif ($command eq 'block-export-add') {
+        return;
+    } elsif ($command eq 'query-block') {
+        return [];
+    } elsif ($command eq 'qom-set') {
+        return;
+    }
+    die "mon_cmd (mocked) - implement me: $command";
+}
+
+my $qemu_server_blockdev_module = Test::MockModule->new("PVE::QemuServer::Blockdev");
+$qemu_server_blockdev_module->mock(
+    mon_cmd => \&mocked_mon_cmd,
+);
+
 my $inotify_module = Test::MockModule->new("PVE::INotify");
 $inotify_module->mock(
     nodename => sub {
@@ -113,20 +133,7 @@ $MigrationTest::Shared::storage_module->mock(
 );
 
 $MigrationTest::Shared::qemu_server_module->mock(
-    mon_cmd => sub {
-        my ($vmid, $command, %params) = @_;
-
-        if ($command eq 'nbd-server-start') {
-            return;
-        } elsif ($command eq 'block-export-add') {
-            return;
-        } elsif ($command eq 'query-block') {
-            return [];
-        } elsif ($command eq 'qom-set') {
-            return;
-        }
-        die "mon_cmd (mocked) - implement me: $command";
-    },
+    mon_cmd => \&mocked_mon_cmd,
     run_command => sub {
         my ($cmd_full, %param) = @_;
 

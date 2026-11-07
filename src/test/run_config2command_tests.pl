@@ -21,6 +21,7 @@ use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Monitor;
 use PVE::QemuServer::QMPHelpers;
 use PVE::QemuServer::CPUConfig;
+use PVE::Storage;
 
 my $base_env = {
     storage_config => {
@@ -33,6 +34,15 @@ my $base_env = {
                 path => '/var/lib/vz',
                 type => 'dir',
                 shared => 0,
+            },
+            localsnapext => {
+                content => {
+                    images => 1,
+                },
+                path => '/var/lib/vzsnapext',
+                type => 'dir',
+                shared => 0,
+                'snapshot-as-volume-chain' => 1,
             },
             noimages => {
                 content => {
@@ -248,11 +258,68 @@ $qemu_server_module->mock(
     get_host_arch => sub() {
         return $current_test->{host_arch} // 'x86_64';
     },
-    get_initiator_name => sub {
+    get_iscsi_initiator_name => sub {
         return 'iqn.1993-08.org.debian:01:aabbccddeeff';
     },
     cleanup_pci_devices => {
         # do nothing
+    },
+);
+
+my $storage_module = Test::MockModule->new("PVE::Storage");
+$storage_module->mock(
+    activate_volumes => sub {
+        return;
+    },
+    deactivate_volumes => sub {
+        return;
+    },
+    volume_snapshot_info => sub {
+        my ($cfg, $volid) = @_;
+
+        my ($storeid, $volname) = PVE::Storage::parse_volume_id($volid);
+
+        my $snapshots = {};
+        if ($storeid eq 'localsnapext') {
+            $snapshots = {
+                current => {
+                    file => 'var/lib/vzsnapext/images/8006/vm-8006-disk-0.qcow2',
+                    parent => 'snap2',
+                },
+                snap2 => {
+                    file => '/var/lib/vzsnapext/images/8006/snap2-vm-8006-disk-0.qcow2',
+                    parent => 'snap1',
+                },
+                snap1 => {
+                    file => '/var/lib/vzsnapext/images/8006/snap1-vm-8006-disk-0.qcow2',
+                },
+            };
+        } elsif ($storeid eq 'lvm-store') {
+            $snapshots = {
+                current => {
+                    file => '/dev/veegee/vm-8006-disk-0.qcow2',
+                    parent => 'snap2',
+                },
+                snap2 => {
+                    file => '/dev/veegee/snap2-vm-8006-disk-0.qcow2',
+                    parent => 'snap1',
+                },
+                snap1 => {
+                    file => '/dev/veegee/snap1-vm-8006-disk-0.qcow2',
+                },
+            };
+        }
+        return $snapshots;
+    },
+);
+
+my $file_stat_module = Test::MockModule->new("File::stat");
+$file_stat_module->mock(
+    stat => sub {
+        my ($path) = @_;
+        my $st = $file_stat_module->original('stat')->('./run_config2command_tests.pl');
+        $st->[2] = 25008 if $path =~ m!/dev/!; # block device
+        return $st;
     },
 );
 
@@ -263,6 +330,13 @@ $zfsplugin_module->mock(
     },
     zfs_get_lun_number => sub {
         return "0";
+    },
+);
+
+my $rbdplugin_module = Test::MockModule->new("PVE::Storage::RBDPlugin");
+$rbdplugin_module->mock(
+    rbd_volume_config_set => sub {
+        return;
     },
 );
 

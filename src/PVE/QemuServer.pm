@@ -55,7 +55,8 @@ use PVE::QemuConfig;
 use PVE::QemuConfig::NoWrite;
 use PVE::QemuServer::Blockdev;
 use PVE::QemuServer::BlockJob;
-use PVE::QemuServer::Helpers qw(config_aware_timeout min_version kvm_user_version windows_version);
+use PVE::QemuServer::Helpers
+    qw(config_aware_timeout get_iscsi_initiator_name min_version kvm_user_version windows_version);
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CGroup;
 use PVE::QemuServer::CPUConfig
@@ -4362,7 +4363,7 @@ sub config_to_command {
     my $scsihw = defined($conf->{scsihw}) ? $conf->{scsihw} : $defaults->{scsihw};
 
     # Add iscsi initiator name if available
-    if (my $initiator = PVE::QemuServer::Helpers::get_iscsi_initiator_name()) {
+    if (my $initiator = get_iscsi_initiator_name()) {
         push @$devices, '-iscsi', "initiator-name=$initiator";
     }
 

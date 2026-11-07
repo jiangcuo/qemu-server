@@ -8,7 +8,7 @@ use lib qw(..);
 use Test::More;
 use Test::MockModule;
 
-use PVE::QemuServer;
+use PVE::QemuServer::QemuImage;
 
 my $vmid = 8006;
 my $storage_config = {
@@ -19,6 +19,15 @@ my $storage_config = {
             },
             path => "/var/lib/vz",
             type => "dir",
+            shared => 0,
+        },
+        localsnapext => {
+            content => {
+                images => 1,
+            },
+            path => "/var/lib/vzsnapext",
+            type => "dir",
+            'snapshot-as-volume-chain' => 1,
             shared => 0,
         },
         btrfs => {
@@ -60,6 +69,14 @@ my $storage_config = {
             content => {
                 images => 1,
             },
+        },
+        "lvm-store" => {
+            vgname => "pve",
+            type => "lvm",
+            content => {
+                images => 1,
+            },
+            'snapshot-as-volume-chain' => 1,
         },
         "zfs-over-iscsi" => {
             type => "zfs",
@@ -469,9 +486,121 @@ my $tests = [
             "/var/lib/vz/images/$vmid/vm-$vmid-disk-0.raw",
         ],
     },
+    {
+        name => "qcow2_external_snapshot",
+        parameters => [
+            "localsnapext:$vmid/vm-$vmid-disk-0.qcow2",
+            "local:$vmid/vm-$vmid-disk-0.raw",
+            1024 * 10,
+            { snapname => 'foo' },
+        ],
+        expected => [
+            "/usr/bin/qemu-img",
+            "convert",
+            "-p",
+            "-n",
+            "-f",
+            "qcow2",
+            "-O",
+            "raw",
+            "/var/lib/vzsnapext/images/$vmid/snap-foo-vm-$vmid-disk-0.qcow2",
+            "/var/lib/vz/images/$vmid/vm-$vmid-disk-0.raw",
+        ],
+    },
+    {
+        name => "lvmqcow2_external_snapshot",
+        parameters => [
+            "lvm-store:vm-$vmid-disk-0.qcow2",
+            "local:$vmid/vm-$vmid-disk-0.raw",
+            1024 * 10,
+            { snapname => 'foo' },
+        ],
+        expected => [
+            "/usr/bin/qemu-img",
+            "convert",
+            "-p",
+            "-n",
+            "-f",
+            "qcow2",
+            "-O",
+            "raw",
+            "/dev/pve/snap_vm-$vmid-disk-0_foo.qcow2",
+            "/var/lib/vz/images/$vmid/vm-$vmid-disk-0.raw",
+        ],
+    },
+    {
+        name => "qcow2_external_snapshot_target",
+        parameters => [
+            "local:$vmid/vm-$vmid-disk-0.raw",
+            "localsnapext:$vmid/vm-$vmid-disk-target.qcow2",
+            1024 * 10,
+        ],
+        expected => [
+            "/usr/bin/qemu-img",
+            "convert",
+            "-p",
+            "-n",
+            "-f",
+            "raw",
+            "--target-image-opts",
+            "/var/lib/vz/images/$vmid/vm-$vmid-disk-0.raw",
+            "discard-no-unref=true,driver=qcow2,file.driver=file"
+                . ",file.filename=/var/lib/vzsnapext/images/$vmid/vm-$vmid-disk-target.qcow2",
+        ],
+    },
+    {
+        name => "qcow2_external_snapshot_target_zeroinit",
+        parameters => [
+            "local:$vmid/vm-$vmid-disk-0.raw",
+            "localsnapext:$vmid/vm-$vmid-disk-target.qcow2",
+            1024 * 10,
+            { 'is-zero-initialized' => 1 },
+        ],
+        expected => [
+            "/usr/bin/qemu-img",
+            "convert",
+            "-p",
+            "-n",
+            "-f",
+            "raw",
+            "--target-image-opts",
+            "/var/lib/vz/images/$vmid/vm-$vmid-disk-0.raw",
+            "driver=zeroinit,file.discard-no-unref=true,file.driver=qcow2,file.file.driver=file"
+                . ",file.file.filename=/var/lib/vzsnapext/images/$vmid/vm-$vmid-disk-target.qcow2",
+        ],
+    },
+    {
+        name => "lvmqcow2_external_snapshot_target",
+        parameters => [
+            "local:$vmid/vm-$vmid-disk-0.raw", "lvm-store:vm-$vmid-disk-target.qcow2",
+            1024 * 10,
+        ],
+        expected => [
+            "/usr/bin/qemu-img",
+            "convert",
+            "-p",
+            "-n",
+            "-f",
+            "raw",
+            "--target-image-opts",
+            "/var/lib/vz/images/$vmid/vm-$vmid-disk-0.raw",
+            "discard-no-unref=true,driver=qcow2,file.driver=host_device"
+                . ",file.filename=/dev/pve/vm-$vmid-disk-target.qcow2",
+        ],
+    },
 ];
 
 my $command;
+
+my $file_stat_module = Test::MockModule->new("File::stat");
+$file_stat_module->mock(
+    stat => sub {
+        my ($path) = @_;
+        my $st = $file_stat_module->original('stat')->('./run_qemu_img_convert_tests.pl');
+        $st->[2] = 25008 if $path =~ m!/dev/!; # block device
+        return $st;
+    },
+);
 
 my $storage_module = Test::MockModule->new("PVE::Storage");
 $storage_module->mock(
@@ -480,6 +609,17 @@ $storage_module->mock(
     },
     activate_volumes => sub {
         return 1;
+    },
+    volume_snapshot_info => sub {
+        my ($cfg, $volid) = @_;
+        if (
+            $volid eq "lvm-store:vm-$vmid-disk-target.qcow2"
+            || $volid eq "localsnapext:$vmid/vm-$vmid-disk-target.qcow2"
+        ) {
+            # target volumes don't have snapshots
+            return {};
+        }
+        die "mocked volume_snapshot_info called with unexpected volid $volid\n";
     },
 );
 
@@ -498,21 +638,24 @@ $zfsplugin_module->mock(
     },
 );
 
-# we use the exported run_command so we have to mock it there
-my $qemu_server_module = Test::MockModule->new("PVE::QemuServer");
-$qemu_server_module->mock(
+my $qemu_server_helpers_module = Test::MockModule->new("PVE::QemuServer::Helpers");
+$qemu_server_helpers_module->mock(
+    get_iscsi_initiator_name => sub {
+        return "foobar";
+    },
+);
+
+my $tools_module = Test::MockModule->new("PVE::Tools");
+$tools_module->mock(
     run_command => sub {
         $command = shift;
-    },
-    get_initiator_name => sub {
-        return "foobar";
     },
 );
 
 foreach my $test (@$tests) {
     my $name = $test->{name};
     my $expected = $test->{expected};
-    eval { PVE::QemuServer::qemu_img_convert(@{ $test->{parameters} }) };
+    eval { PVE::QemuServer::QemuImage::convert(@{ $test->{parameters} }) };
     if (my $err = $@) {
         is($err, $expected, $name);
     } elsif (defined($command)) {

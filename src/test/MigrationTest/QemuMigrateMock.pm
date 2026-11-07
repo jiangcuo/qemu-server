@@ -9,6 +9,7 @@ use Test::MockModule;
 use MigrationTest::Shared;
 
 use PVE::API2::Qemu;
+use PVE::QemuServer::Drive;
 use PVE::Storage;
 use PVE::Tools qw(file_set_contents file_get_contents);
 
@@ -126,47 +127,6 @@ $MigrationTest::Shared::qemu_server_module->mock(
     kvm_user_version => sub {
         return "5.0.0";
     },
-    qemu_blockjobs_cancel => sub {
-        return;
-    },
-    qemu_drive_mirror => sub {
-        my (
-            $vmid,
-            $drive,
-            $dst_volid,
-            $vmiddst,
-            $is_zero_initialized,
-            $jobs,
-            $completion,
-            $qga,
-            $bwlimit,
-            $src_bitmap,
-        ) = @_;
-
-        die "drive_mirror with wrong vmid: '$vmid'\n" if $vmid ne $test_vmid;
-        die "qemu_drive_mirror '$drive' error\n"
-            if $fail_config->{qemu_drive_mirror} && $fail_config->{qemu_drive_mirror} eq $drive;
-
-        my $nbd_info = decode_json(file_get_contents("${RUN_DIR_PATH}/nbd_info"));
-        die "target does not expect drive mirror for '$drive'\n"
-            if !defined($nbd_info->{$drive});
-        delete $nbd_info->{$drive};
-        file_set_contents("${RUN_DIR_PATH}/nbd_info", to_json($nbd_info));
-    },
-    qemu_drive_mirror_monitor => sub {
-        my ($vmid, $vmiddst, $jobs, $completion, $qga) = @_;
-
-        if (
-            $fail_config->{qemu_drive_mirror_monitor}
-            && $fail_config->{qemu_drive_mirror_monitor} eq $completion
-        ) {
-            die "qemu_drive_mirror_monitor '$completion' error\n";
-        }
-        return;
-    },
-    qemu_drive_mirror_switch_to_active_mode => sub {
-        return;
-    },
     set_migration_caps => sub {
         return;
     },
@@ -192,6 +152,64 @@ $MigrationTest::Shared::qemu_server_module->mock(
     },
 );
 
+my sub common_mirror_mock {
+    my ($vmid, $drive_id) = @_;
+
+    die "drive_mirror with wrong vmid: '$vmid'\n" if $vmid ne $test_vmid;
+    die "qemu_drive_mirror '$drive_id' error\n"
+        if $fail_config->{qemu_drive_mirror} && $fail_config->{qemu_drive_mirror} eq $drive_id;
+
+    my $nbd_info = decode_json(file_get_contents("${RUN_DIR_PATH}/nbd_info"));
+    die "target does not expect drive mirror for '$drive_id'\n"
+        if !defined($nbd_info->{$drive_id});
+    delete $nbd_info->{$drive_id};
+    file_set_contents("${RUN_DIR_PATH}/nbd_info", to_json($nbd_info));
+}
+
+my $qemu_server_blockjob_module = Test::MockModule->new("PVE::QemuServer::BlockJob");
+$qemu_server_blockjob_module->mock(
+    qemu_blockjobs_cancel => sub {
+        return;
+    },
+    qemu_drive_mirror => sub {
+        my (
+            $vmid,
+            $drive_id,
+            $dst_volid,
+            $vmiddst,
+            $is_zero_initialized,
+            $jobs,
+            $completion,
+            $qga,
+            $bwlimit,
+            $src_bitmap,
+        ) = @_;
+
+        common_mirror_mock($vmid, $drive_id);
+    },
+    blockdev_mirror => sub {
+        my ($source, $dest, $jobs, $completion, $options) = @_;
+
+        my $drive_id = PVE::QemuServer::Drive::get_drive_id($source->{drive});
+
+        common_mirror_mock($source->{vmid}, $drive_id);
+    },
+    qemu_drive_mirror_monitor => sub {
+        my ($vmid, $vmiddst, $jobs, $completion, $qga) = @_;
+
+        if (
+            $fail_config->{qemu_drive_mirror_monitor}
+            && $fail_config->{qemu_drive_mirror_monitor} eq $completion
+        ) {
+            die "qemu_drive_mirror_monitor '$completion' error\n";
+        }
+        return;
+    },
+    qemu_drive_mirror_switch_to_active_mode => sub {
+        return;
+    },
+);
+
 my $qemu_server_cpuconfig_module = Test::MockModule->new("PVE::QemuServer::CPUConfig");
 $qemu_server_cpuconfig_module->mock(
     get_cpu_from_running_vm => sub {
@@ -212,6 +230,11 @@ $qemu_server_helpers_module->mock(
 my $qemu_server_machine_module = Test::MockModule->new("PVE::QemuServer::Machine");
 $qemu_server_machine_module->mock(
     qemu_machine_pxe => sub {
+        die "invalid test: no runningmachine specified\n"
+            if !defined($vm_status->{runningmachine});
+        return $vm_status->{runningmachine};
+    },
+    get_current_qemu_machine => sub {
         die "invalid test: no runningmachine specified\n"
             if !defined($vm_status->{runningmachine});
         return $vm_status->{runningmachine};

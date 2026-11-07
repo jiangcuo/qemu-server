@@ -393,8 +393,8 @@ sub qmp_cmd {
 
 # BEGIN redefine PVE::QemuServer methods
 
-sub do_snapshots_with_qemu {
-    return 0;
+sub do_snapshots_type {
+    return 'storage';
 }
 
 sub vm_start {
