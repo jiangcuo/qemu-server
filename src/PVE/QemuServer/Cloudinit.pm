@@ -15,11 +15,12 @@ use PVE::Storage;
 use PVE::QemuServer;
 use PVE::QemuServer::Drive qw(checked_volume_format);
 use PVE::QemuServer::Helpers;
+use PVE::QemuServer::Autoinstall;
 
 use constant CLOUDINIT_DISK_SIZE => 4 * 1024 * 1024; # 4MiB in bytes
 
 sub commit_cloudinit_disk {
-    my ($conf, $vmid, $drive, $volname, $storeid, $files, $label) = @_;
+    my ($conf, $vmid, $drive, $volname, $storeid, $files, $label, $joliet) = @_;
 
     my $path = "/run/pve/cloudinit/$vmid/";
     mkpath $path;
@@ -47,13 +48,30 @@ sub commit_cloudinit_disk {
         PVE::Storage::vdisk_alloc($storecfg, $storeid, $vmid, $format, $name, $size);
         $size *= 1024; # vdisk alloc takes KB, qemu-img dd's osize takes byte
     }
+
     my $plugin = PVE::Storage::Plugin->lookup($scfg->{type});
     $plugin->activate_volume($storeid, $scfg, $volname);
 
+    # autoinstall can add drivers, make sure the image fits (ISO overhead + 25% + 1 MiB)
+    my $content_size = 0;
+    $content_size += length($_) for values %$files;
+    my $needed = int(($content_size * 1.25 + 1024 * 1024) / (1024 * 1024) + 1) * 1024 * 1024;
+    ($needed) = $needed =~ m/^(\d+)$/; # untaint, derived from the file contents
+    if ($size < $needed) {
+        die "cloud-init drive too small for $content_size bytes of data, stop the VM to resize it\n"
+            if PVE::QemuServer::Helpers::vm_running_locally($vmid);
+        print "resizing cloud-init drive to " . ($needed / (1024 * 1024)) . " MiB\n";
+        PVE::Storage::volume_resize($storecfg, $drive->{file}, $needed, 0);
+        $size = $needed;
+    }
+
     print "generating cloud-init ISO\n";
+    my $genisoimage = ['genisoimage', '-quiet', '-iso-level', '3', '-R'];
+    push @$genisoimage, '-J' if $joliet;
+    push @$genisoimage, '-V', $label, $path;
     eval {
         run_command([
-            ['genisoimage', '-quiet', '-iso-level', '3', '-R', '-V', $label, $path],
+            $genisoimage,
             [
                 'qemu-img',
                 'dd',
@@ -696,6 +714,11 @@ sub generate_cloudinit_config {
 
             return if !$volname || $volname !~ m/vm-$vmid-cloudinit/;
 
+            if (PVE::QemuServer::Autoinstall::is_enabled($conf)) {
+                PVE::QemuServer::Autoinstall::generate($conf, $vmid, $drive, $volname, $storeid);
+                return;
+            }
+
             my $generator = $cloudinit_methods->{$format}
                 or die "missing cloudinit methods for format '$format'\n";
 
@@ -725,7 +748,9 @@ sub dump_cloudinit_config {
 
     my $format = get_cloudinit_format($conf);
 
-    if ($type eq 'user') {
+    if ($type eq 'autoinstall') {
+        return PVE::QemuServer::Autoinstall::dump($conf, $vmid, $mask_password);
+    } elsif ($type eq 'user') {
         return cloudinit_userdata($conf, $vmid, $mask_password);
     } elsif ($type eq 'network') {
         if ($format eq 'nocloud') {

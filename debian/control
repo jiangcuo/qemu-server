@@ -62,6 +62,7 @@ Depends: dbus,
          ${perl:Depends},
          ${shlibs:Depends},
 Recommends: libpve-network-perl (>= 0.8.3),
+            pxvirt-virtio-win,
             proxmox-backup-file-restore (>= 2.1.9-2),
             virtiofsd,
 Suggests: pve-edk2-firmware-aarch64, pve-edk2-firmware-riscv,pxvirt-spdk

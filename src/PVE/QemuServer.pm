@@ -903,6 +903,64 @@ my $cicustom_fmt = {
 };
 PVE::JSONSchema::register_format('pve-qm-cicustom', $cicustom_fmt);
 
+my $autoinstall_fmt = {
+    enabled => {
+        type => 'boolean',
+        default_key => 1,
+        default => 0,
+        description => 'Generate an unattended installation file instead of the regular'
+            . ' cloud-init data and put it on the cloud-init drive.',
+    },
+    type => {
+        type => 'string',
+        enum => ['windows', 'kickstart', 'ubuntu'],
+        optional => 1,
+        description => 'Installer type. `windows` generates `autounattend.xml`, `kickstart`'
+            . ' generates `ks.cfg` (RHEL, Rocky, Alma, Fedora, ...) and `ubuntu` generates a'
+            . ' subiquity autoinstall `user-data`. Defaults to `windows` for Windows OS types'
+            . ' and `kickstart` otherwise.',
+    },
+    file => {
+        type => 'string',
+        format => 'pve-volume-id',
+        format_description => 'volume',
+        optional => 1,
+        description => 'Use this snippet as installation file instead of generating one from the'
+            . ' cloud-init settings. Placeholders like `{{hostname}}` or `{{password}}` are'
+            . ' replaced.',
+    },
+    timezone => {
+        type => 'string',
+        format_description => 'timezone',
+        pattern => '[A-Za-z0-9_+/-]+',
+        optional => 1,
+        description => 'Time zone of the installed system, e.g. `Asia/Shanghai`. The keyboard'
+            . ' layout is derived from it. Defaults to the time zone of the host.',
+    },
+    rdp => {
+        type => 'boolean',
+        optional => 1,
+        default => 0,
+        description => 'Windows: enable Remote Desktop and allow it in the firewall.',
+    },
+    productkey => {
+        type => 'string',
+        format_description => 'key',
+        pattern => '[A-Za-z0-9]{5}(?:-[A-Za-z0-9]{5}){4}',
+        optional => 1,
+        description => 'Windows product key.',
+    },
+    edition => {
+        type => 'string',
+        format_description => 'index|name',
+        pattern => '[^,;=]+',
+        optional => 1,
+        description => 'Windows image to install, either the image index or its name (e.g.'
+            . ' `Windows 11 Pro`). Defaults to the first image.',
+    },
+};
+PVE::JSONSchema::register_format('pve-qm-autoinstall', $autoinstall_fmt);
+
 # any new option might need to be added to $cloudinitoptions in PVE::API2::Qemu
 my $confdesc_cloudinit = {
     citype => {
@@ -940,6 +998,37 @@ my $confdesc_cloudinit = {
         description => 'cloud-init: Specify custom files to replace the automatically generated'
             . ' ones at start.',
         format => 'pve-qm-cicustom',
+    },
+    cidomain => {
+        optional => 1,
+        type => 'string',
+        format => 'dns-name',
+        description => 'cloud-init: Active Directory domain to join during the unattended'
+            . ' installation (Windows only).',
+    },
+    cidomainuser => {
+        optional => 1,
+        type => 'string',
+        description => 'cloud-init: User allowed to join computers to the domain.',
+    },
+    cidomainpassword => {
+        optional => 1,
+        type => 'string',
+        description => 'cloud-init: Password of the domain join user.',
+    },
+    cidomainou => {
+        optional => 1,
+        type => 'string',
+        description => 'cloud-init: Organizational unit for the computer account, e.g.'
+            . ' OU=Servers,DC=example,DC=com.',
+    },
+    autoinstall => {
+        optional => 1,
+        type => 'string',
+        description => 'cloud-init: Put an unattended installation file (Windows'
+            . ' autounattend.xml, kickstart or Ubuntu autoinstall) on the cloud-init drive'
+            . ' instead of the regular cloud-init data.',
+        format => 'pve-qm-autoinstall',
     },
     searchdomain => {
         optional => 1,
