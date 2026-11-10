@@ -30,6 +30,7 @@ use PVE::Format qw(render_duration render_bytes);
 use PVE::QemuConfig;
 use PVE::QemuServer;
 use PVE::QemuServer::Drive qw(checked_volume_format);
+use PVE::QemuServer::Events;
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Machine;
 use PVE::QemuServer::Monitor qw(mon_cmd);
@@ -289,13 +290,24 @@ sub archive {
     my $opts = $self->{vzdump}->{opts};
     my $scfg = $opts->{scfg};
 
-    if ($self->{vzdump}->{opts}->{pbs}) {
-        $self->archive_pbs($task, $vmid);
-    } elsif ($self->{vzdump}->{'backup-provider'}) {
-        $self->archive_external($task, $vmid);
-    } else {
-        $self->archive_vma($task, $vmid, $filename, $comp);
+    my $conf = eval { PVE::QemuConfig->load_config($vmid) };
+    my $data = { mode => $task->{mode}, storage => $opts->{storage} };
+    PVE::QemuServer::Events::emit($vmid, 'PRE_BACKUP', $data, $conf);
+
+    eval {
+        if ($self->{vzdump}->{opts}->{pbs}) {
+            $self->archive_pbs($task, $vmid);
+        } elsif ($self->{vzdump}->{'backup-provider'}) {
+            $self->archive_external($task, $vmid);
+        } else {
+            $self->archive_vma($task, $vmid, $filename, $comp);
+        }
+    };
+    if (my $err = $@) {
+        PVE::QemuServer::Events::emit($vmid, 'BACKUP_FAILED', { %$data, error => "$err" }, $conf);
+        die $err;
     }
+    PVE::QemuServer::Events::emit($vmid, 'POST_BACKUP', $data, $conf);
 }
 
 my $bitmap_action_to_human = sub {

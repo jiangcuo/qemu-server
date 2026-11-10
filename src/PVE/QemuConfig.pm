@@ -10,6 +10,7 @@ use PVE::INotify;
 use PVE::JSONSchema;
 use PVE::QemuServer::CPUConfig;
 use PVE::QemuServer::Drive;
+use PVE::QemuServer::Events;
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer;
@@ -206,6 +207,47 @@ sub get_backup_volumes {
     PVE::QemuConfig->foreach_volume($conf, $test_volume);
 
     return $return_volumes;
+}
+
+# report snapshot operations as VM events (hookscript phases and qmeventd)
+my sub with_events {
+    my ($class, $vmid, $what, $data, $code) = @_;
+
+    my $conf = eval { $class->load_config($vmid) };
+    PVE::QemuServer::Events::emit($vmid, "PRE_$what", $data, $conf);
+
+    my $res = eval { $code->() };
+    if (my $err = $@) {
+        PVE::QemuServer::Events::emit($vmid, "${what}_FAILED", { %$data, error => "$err" }, $conf);
+        die $err;
+    }
+
+    PVE::QemuServer::Events::emit($vmid, "POST_$what", $data, $conf);
+    return $res;
+}
+
+sub snapshot_create {
+    my ($class, $vmid, $snapname, @rest) = @_;
+    return with_events(
+        $class, $vmid, 'SNAPSHOT', { snapname => $snapname },
+        sub { $class->SUPER::snapshot_create($vmid, $snapname, @rest) },
+    );
+}
+
+sub snapshot_delete {
+    my ($class, $vmid, $snapname, @rest) = @_;
+    return with_events(
+        $class, $vmid, 'SNAPSHOT_DELETE', { snapname => $snapname },
+        sub { $class->SUPER::snapshot_delete($vmid, $snapname, @rest) },
+    );
+}
+
+sub snapshot_rollback {
+    my ($class, $vmid, $snapname, @rest) = @_;
+    return with_events(
+        $class, $vmid, 'ROLLBACK', { snapname => $snapname },
+        sub { $class->SUPER::snapshot_rollback($vmid, $snapname, @rest) },
+    );
 }
 
 sub __snapshot_assert_no_blockers {

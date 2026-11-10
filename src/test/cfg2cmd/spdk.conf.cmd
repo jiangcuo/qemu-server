@@ -15,6 +15,7 @@
   -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
   -m 2048 \
   -object 'memory-backend-memfd,id=virtiofs-mem,size=2048M,share=on' \
+  -action 'panic=none' \
   -global 'PIIX4_PM.disable_s3=1' \
   -global 'PIIX4_PM.disable_s4=1' \
   -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pci.0,addr=0x1e' \
@@ -27,7 +28,8 @@
   -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
   -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -device 'pvpanic-pci,id=pvpanic,bus=pci.1,addr=0x1f' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
   -chardev 'socket,id=spdk_vhost_scsi_0,path=/var/tmp/vm-8006-spdk0' \
   -device 'vhost-user-scsi-pci,chardev=spdk_vhost_scsi_0,bus=pci.2,addr=0x19,num_queues=4' \
-  -machine 'memory-backend=virtiofs-mem,type=pc+pve1'
+  -machine 'memory-backend=virtiofs-mem,type=pc+pve2'

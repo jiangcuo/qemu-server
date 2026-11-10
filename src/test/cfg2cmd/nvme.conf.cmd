@@ -13,6 +13,7 @@
   -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
   -cpu max \
   -m 512 \
+  -action 'panic=none' \
   -readconfig /usr/share/qemu-server/pve-port.cfg \
   -device 'qemu-xhci,id=ehci,bus=pcie.0,addr=0x1' \
   -device 'qemu-xhci,p2=15,p3=15,id=xhci,bus=pcie.0,addr=0xa' \
@@ -24,7 +25,8 @@
   -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
   -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pcie.0,addr=0x3,free-page-reporting=on' \
+  -device 'pvpanic-pci,id=pvpanic,bus=pcie.2,addr=0x1c' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
   -drive 'file=/var/lib/vz/images/8006/vm-8006-disk-0.raw,if=none,id=drive-nvme0,discard=on,format=raw,cache=none,aio=io_uring,detect-zeroes=unmap' \
   -device 'nvme,id=nvme0,drive=drive-nvme0,use-intel-id=on,serial=lierfangnvme0' \
-  -machine 'accel=tcg,type=virt+pve1'
+  -machine 'accel=tcg,type=virt+pve2'

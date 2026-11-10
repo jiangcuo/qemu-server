@@ -11,8 +11,24 @@ CFLAGS += -O2 -Werror -Wall -Wextra -Wpedantic -Wtype-limits -Wl,-z,relro -std=g
 CFLAGS += $(shell $(PKG_CONFIG) --cflags json-c glib-2.0)
 LDFLAGS += $(shell $(PKG_CONFIG) --libs json-c glib-2.0)
 
-qmeventd: qmeventd.c
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+SOURCES = qmeventd.c qmeventd-log.c qmeventd-monitor.c
+HEADERS = qmeventd.h qmeventd-log.h qmeventd-monitor.h
+
+qmeventd: $(SOURCES) $(HEADERS)
+	$(CC) $(CFLAGS) -o $@ $(SOURCES) $(LDFLAGS)
+
+qmeventd-monitor-test: qmeventd-monitor-test.c qmeventd-monitor.c qmeventd-monitor.h
+	$(CC) $(CFLAGS) -o $@ qmeventd-monitor-test.c qmeventd-monitor.c $(LDFLAGS)
+
+.PHONY: unit-test
+unit-test: qmeventd-monitor-test
+	./qmeventd-monitor-test
+
+# plus an end-to-end run of the daemon against a fake QEMU and guest agent
+# (needs python3, not part of the package build)
+.PHONY: test
+test: unit-test qmeventd
+	python3 test-qmeventd-events.py ./qmeventd
 
 docs: qmeventd.8
 
@@ -28,4 +44,4 @@ install: qmeventd docs
 .PHONY: clean
 clean:
 	$(MAKE) cleanup-docgen
-	rm -rf qmeventd
+	rm -rf qmeventd qmeventd-monitor-test

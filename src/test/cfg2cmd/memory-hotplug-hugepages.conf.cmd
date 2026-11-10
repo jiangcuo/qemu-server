@@ -51,6 +51,7 @@
   -device 'pc-dimm,id=dimm14,memdev=mem-dimm14,node=0' \
   -object 'memory-backend-file,id=mem-dimm15,size=1024M,mem-path=/run/hugepages/kvm/1048576kB,share=on,prealloc=yes' \
   -device 'pc-dimm,id=dimm15,memdev=mem-dimm15,node=1' \
+  -action 'panic=none' \
   -global 'PIIX4_PM.disable_s3=1' \
   -global 'PIIX4_PM.disable_s4=1' \
   -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pci.0,addr=0x1e' \
@@ -64,5 +65,6 @@
   -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
   -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -device 'pvpanic-pci,id=pvpanic,bus=pci.1,addr=0x1f' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
-  -machine 'type=pc+pve1'
+  -machine 'type=pc+pve2'

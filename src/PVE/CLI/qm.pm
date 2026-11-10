@@ -33,10 +33,12 @@ use PVE::QemuConfig;
 use PVE::QemuServer::Drive qw(is_valid_drivename parse_drive print_drive);
 use PVE::QemuServer::Helpers;
 use PVE::QemuServer::Agent qw(agent_available);
+use PVE::QemuServer::Events;
 use PVE::QemuServer::ImportDisk;
 use PVE::QemuServer::Monitor qw(mon_cmd);
 use PVE::QemuServer::OVMF;
 use PVE::QemuServer::QMPHelpers;
+use PVE::QemuServer::VMHook;
 use PVE::QemuServer;
 
 use PVE::CLIHandler;
@@ -1047,6 +1049,66 @@ __PACKAGE__->register_method({
 });
 
 __PACKAGE__->register_method({
+    name => 'event',
+    path => 'event',
+    method => 'POST',
+    protected => 1,
+    description => "Handle a VM event reported by qmeventd: run the hookscript phase of the"
+        . " event and the configured 'vmhook' actions. Called by qmeventd, one event at a time"
+        . " per VM.",
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            vmid => get_standard_option('pve-vmid'),
+            event => {
+                type => 'string',
+                pattern => '[A-Z][A-Z_]*',
+                maxLength => 64,
+                description => "The event name, e.g. GUEST_CRASH.",
+            },
+            data => {
+                type => 'string',
+                optional => 1,
+                maxLength => 128 * 1024,
+                description => "The event as JSON, as reported by qmeventd.",
+            },
+        },
+    },
+    returns => { type => 'null' },
+    code => sub {
+        my ($param) = @_;
+
+        my $vmid = $param->{vmid};
+        my $event = $param->{event};
+
+        return if !-f PVE::QemuConfig->config_file($vmid);
+
+        my $ev = {};
+        if (defined($param->{data})) {
+            $ev = eval { decode_json($param->{data}) } // {};
+            warn "unable to parse event data - $@" if $@;
+        }
+
+        my $conf = PVE::QemuConfig->load_config($vmid);
+
+        if ($event eq 'STARTED') {
+            # tell qmeventd what to monitor and whether to dispatch further events
+            PVE::QemuServer::configure_events($vmid, $conf);
+            # qmeventd restarted and found the VM already running, no new start
+            return if $ev->{data} && $ev->{data}->{reconnect};
+        }
+
+        my $phase = PVE::QemuServer::Events::event_to_phase($event, $ev->{data});
+        PVE::GuestHelpers::exec_hookscript($conf, $vmid, $phase, 0);
+
+        PVE::QemuServer::VMHook::handle_event($vmid, $conf, $event, $ev);
+
+        return;
+    },
+});
+
+__PACKAGE__->register_method({
     name => 'cleanup',
     path => 'cleanup',
     method => 'POST',
@@ -1424,6 +1486,8 @@ our $cmddef = {
     importovf => [__PACKAGE__, 'importovf', ['vmid', 'manifest', 'storage']],
 
     cleanup => [__PACKAGE__, 'cleanup', ['vmid', 'clean-shutdown', 'guest-requested'], {%node}],
+
+    event => [__PACKAGE__, 'event', ['vmid', 'event', 'data'], {%node}],
 
     cloudinit => {
         dump => [

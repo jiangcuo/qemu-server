@@ -771,6 +771,7 @@ my $generaloptions = {
     'bios' => 1,
     'description' => 1,
     'gicversion' =>1,
+    'heartbeat' => 1,
     'kernel' =>1,
     'keyboard' => 1,
     'localtime' => 1,
@@ -997,6 +998,11 @@ my $check_vm_modify_config_perm = sub {
         } elsif ($cloudinitoptions->{$opt} || $opt =~ m/^ipconfig\d+$/) {
             $rpcenv->check_vm_perm(
                 $authuser, $vmid, $pool, ['VM.Config.Cloudinit', 'VM.Config.Network'], 1,
+            );
+        } elsif ($opt eq 'vmhook') {
+            # vmhook rules reset/stop/pause the VM and take snapshots on their own
+            $rpcenv->check_vm_perm(
+                $authuser, $vmid, $pool, ['VM.Config.Options', 'VM.PowerMgmt', 'VM.Snapshot'],
             );
         } elsif ($opt eq 'vmstate') {
             # the user needs Disk and PowerMgmt privileges to change the vmstate
@@ -1405,6 +1411,11 @@ __PACKAGE__->register_method({
                 }
 
                 PVE::QemuServer::create_ifaces_ipams_ips($restored_conf, $vmid) if $unique;
+
+                PVE::QemuServer::Events::emit(
+                    $vmid, 'POST_RESTORE', { archive => $archive->{volid} // $archive->{path} },
+                    $restored_conf,
+                );
             };
 
             # ensure no old replication state are exists
@@ -3519,6 +3530,12 @@ __PACKAGE__->register_method({
                 type => 'boolean',
                 optional => 1,
             },
+            heartbeat => {
+                description => "Guest state reported by qmeventd: disabled, booting, ok, lost,"
+                    . " no-response, hang, crashed, paused or stopping.",
+                type => 'string',
+                optional => 1,
+            },
             clipboard => {
                 description => 'Enable a specific clipboard. If not set, depending on'
                     . ' the display type the SPICE one will be added.',
@@ -3547,6 +3564,12 @@ __PACKAGE__->register_method({
             $status->{clipboard} = $vga->{clipboard};
         }
         $status->{agent} = 1 if PVE::QemuServer::get_qga_key($conf, 'enabled');
+
+        if ($status->{status} eq 'running') {
+            my $events = eval { PVE::QemuServer::Events::query_status(1) } // {};
+            $status->{heartbeat} = $events->{ $param->{vmid} }->{heartbeat}
+                if $events->{ $param->{vmid} };
+        }
 
         return $status;
     },
@@ -4685,6 +4708,10 @@ __PACKAGE__->register_method({
 
             PVE::Firewall::clone_vmfw_conf($vmid, $newid);
 
+            my $clone_data =
+                { newid => $newid, full => scalar(keys %$fullclone) ? 1 : 0, target => $target };
+            PVE::QemuServer::Events::emit($vmid, 'PRE_CLONE', $clone_data, $oldconf);
+
             my $newvollist = [];
             my $jobs = {};
 
@@ -4793,6 +4820,8 @@ __PACKAGE__->register_method({
 
                 die "clone failed: $err";
             }
+
+            PVE::QemuServer::Events::emit($vmid, 'POST_CLONE', $clone_data, $oldconf);
 
             return;
         };

@@ -39,9 +39,11 @@ our $PVE_MACHINE_VERSION = {
         },
     },
     '10.0' => {
-        highest => 1,
+        highest => 2,
         revisions => {
             '+pve1' => 'Introduction of pveX versioning, no changes.',
+            '+pve2' => 'Guest crash notification: pvpanic-pci device, Hyper-V crash MSRs for'
+                . ' Windows 8+, a guest panic is reported without pausing the VM.',
         },
     },
 };

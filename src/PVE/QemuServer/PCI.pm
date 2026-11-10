@@ -258,6 +258,7 @@ sub get_pci_addr_map {
             'spdk3' => { bus => 2, addr => 25 },
             'spdk4' => { bus => 2, addr => 26 },
             'spdk5' => { bus => 2, addr => 27 },
+            'pvpanic' => { bus => 2, addr => 28 },
             'virtioscsi0' => { bus => 3, addr => 1 },
             'virtioscsi1' => { bus => 3, addr => 2 },
             'virtioscsi2' => { bus => 3, addr => 3 },
@@ -356,6 +357,7 @@ sub get_pci_addr_map {
             'pci.4' => { bus => 1, addr => 28 },
             'rng0' => { bus => 1, addr => 29 },
             'pci.2-igd' => { bus => 1, addr => 30 }, # replaces pci.2 in case a legacy IGD device is passed through
+            'pvpanic' => { bus => 1, addr => 31 },
             'virtio6' => { bus => 2, addr => 1 },
             'virtio7' => { bus => 2, addr => 2 },
             'virtio8' => { bus => 2, addr => 3 },

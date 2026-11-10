@@ -11,6 +11,7 @@ SOURCES=PCI.pm		\
 	Autoinstall.pm	\
 	Timezone.pm	\
 	Agent.pm	\
+	Events.pm	\
 	Helpers.pm	\
 	Monitor.pm	\
 	Machine.pm	\
@@ -21,7 +22,8 @@ SOURCES=PCI.pm		\
 	QMPHelpers.pm	\
 	Spdk.pm	\
 	OVMF.pm	\
-	Virtiofs.pm
+	Virtiofs.pm	\
+	VMHook.pm
 
 
 .PHONY: install

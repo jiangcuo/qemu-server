@@ -15,6 +15,7 @@
   -cpu max \
   -m 2048 \
   -object 'memory-backend-memfd,id=virtiofs-mem,size=2048M,share=on' \
+  -action 'panic=none' \
   -readconfig /usr/share/qemu-server/pve-port.cfg \
   -device 'qemu-xhci,id=ehci,bus=pcie.0,addr=0x1' \
   -device 'qemu-xhci,p2=15,p3=15,id=xhci,bus=pcie.0,addr=0xa' \
@@ -31,6 +32,7 @@
   -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
   -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pcie.0,addr=0x3,free-page-reporting=on' \
+  -device 'pvpanic-pci,id=pvpanic,bus=pcie.2,addr=0x1c' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
   -netdev 'type=tap,id=net1,ifname=tap8006i1,script=/usr/libexec/qemu-server/pve-bridge,downscript=/usr/libexec/qemu-server/pve-bridgedown' \
   -device 'virtio-net-pci,mac=BC:24:11:A3:DA:B1,netdev=net1,bus=pcie.1,addr=0x4,id=net1,rx_queue_size=1024,tx_queue_size=256,bootindex=300' \
@@ -38,4 +40,4 @@
   -device 'virtio-net-pci,mac=BC:24:11:A3:DA:B2,netdev=net2,bus=pcie.1,addr=0x5,id=net2,rx_queue_size=1024,tx_queue_size=256,bootindex=301' \
   -chardev 'socket,id=spdk_vhost_scsi_0,path=/var/tmp/vm-8006-spdk0' \
   -device 'vhost-user-scsi-pci,chardev=spdk_vhost_scsi_0,bus=pcie.2,addr=0x16,num_queues=4' \
-  -machine 'memory-backend=virtiofs-mem,accel=tcg,type=virt+pve1,gic-version=max'
+  -machine 'memory-backend=virtiofs-mem,accel=tcg,type=virt+pve2,gic-version=max'

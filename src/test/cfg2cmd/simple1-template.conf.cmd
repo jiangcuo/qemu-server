@@ -15,6 +15,7 @@
   -nographic \
   -cpu qemu64 \
   -m 512 \
+  -action 'panic=none' \
   -global 'PIIX4_PM.disable_s3=1' \
   -global 'PIIX4_PM.disable_s4=1' \
   -device 'pci-bridge,id=pci.1,chassis_nr=1,bus=pci.0,addr=0x1e' \
@@ -22,6 +23,7 @@
   -device 'piix3-usb-uhci,id=uhci,bus=pci.0,addr=0x1.0x2' \
   -device 'usb-tablet,id=tablet,bus=uhci.0,port=1' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -device 'pvpanic-pci,id=pvpanic,bus=pci.1,addr=0x1f' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
   -drive 'if=none,id=drive-ide2,media=cdrom,aio=io_uring' \
   -device 'ide-cd,bus=ide.1,unit=0,drive=drive-ide2,id=ide2,bootindex=200' \
@@ -31,5 +33,5 @@
   -device 'ahci,id=ahci0,multifunction=on,bus=pci.0,addr=0x7' \
   -drive 'file=/var/lib/vz/images/8006/base-8006-disk-0.qcow2,if=none,id=drive-sata0,discard=on,format=qcow2,cache=none,aio=io_uring,detect-zeroes=unmap' \
   -device 'ide-hd,bus=ahci0.0,drive=drive-sata0,id=sata0' \
-  -machine 'accel=tcg,smm=off,type=pc+pve1' \
+  -machine 'accel=tcg,smm=off,type=pc+pve2' \
   -snapshot

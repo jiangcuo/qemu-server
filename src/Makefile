@@ -12,6 +12,7 @@ install:
 test:
 	$(MAKE) -C test
 	$(MAKE) -C bin $@
+	$(MAKE) -C qmeventd unit-test
 
 .PHONY: clean
 clean:

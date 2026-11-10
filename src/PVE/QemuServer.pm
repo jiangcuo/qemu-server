@@ -58,6 +58,7 @@ use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CGroup;
 use PVE::QemuServer::CPUConfig
     qw(print_cpu_device get_cpu_options get_cpu_bitness is_native_arch get_amd_sev_object get_amd_sev_type);
+use PVE::QemuServer::Events;
 use PVE::QemuServer::Drive
     qw(is_valid_drivename checked_volume_format drive_is_cloudinit drive_is_cdrom drive_is_read_only parse_drive print_drive);
 use PVE::QemuServer::Machine;
@@ -70,6 +71,7 @@ use PVE::QemuServer::QMPHelpers qw(qemu_deviceadd qemu_devicedel qemu_objectadd 
 use PVE::QemuServer::RNG qw(parse_rng print_rng_device_commandline print_rng_object_commandline);
 use PVE::QemuServer::USB;
 use PVE::QemuServer::Virtiofs qw(max_virtiofs start_all_virtiofsd);
+use PVE::QemuServer::VMHook;
 use PVE::QemuServer::Spdk qw(start_all_spdk);
 use PVE::QemuServer::Spdk qw(start_all_spdk);
 
@@ -819,6 +821,23 @@ EODESCR
         format => 'pve-volume-id',
         optional => 1,
         description => "Script that will be executed during various steps in the vms lifetime.",
+    },
+    heartbeat => {
+        type => 'string',
+        format => 'pve-qm-heartbeat',
+        optional => 1,
+        description => "Monitor the QEMU guest agent from the VM start on (requires 'agent').",
+        verbose_description => "Let qmeventd probe the QEMU guest agent from the start of the"
+            . " VM on. It reports when the agent comes up, is lost, recovers or never answers"
+            . " after a (re)boot, and tells a hung guest (no disk I/O) from a failed agent."
+            . " The state is shown as 'heartbeat' in the VM status.",
+    },
+    vmhook => {
+        type => 'string',
+        format => 'pve-qm-vmhook',
+        optional => 1,
+        description => "Built-in actions on guest events, e.g."
+            . " 'crash=screenshot+snapshot+notify+reset,hang=notify+reset'.",
     },
     ivshmem => {
         type => 'string',
@@ -2442,6 +2461,13 @@ sub destroy_vm {
 
     if (!$skiplock && !PVE::QemuConfig->has_lock($conf, 'suspended')) {
         PVE::QemuConfig->check_lock($conf);
+    }
+
+    # a replacement config means a restore over the VM, not its removal
+    if (!$replacement_conf) {
+        PVE::QemuServer::Events::emit($vmid, 'PRE_DESTROY', undef, $conf);
+        eval { PVE::QemuServer::VMHook::purge($vmid) };
+        log_warn("unable to remove vmhook data - $@") if $@;
     }
 
     if ($conf->{template}) {
@@ -4228,7 +4254,9 @@ sub config_to_command {
         if (!$guest_agent->{type} || $guest_agent->{type} eq 'virtio') {
             my $pciaddr = print_pci_addr("qga0", $bridges, $arch);
             push @$devices, '-device', "virtio-serial,id=qga0$pciaddr";
-            push @$devices, '-device', 'virtserialport,chardev=qga0,name=org.qemu.guest_agent.0';
+            # the id makes QEMU report the agent opening/closing its port (VSERPORT_CHANGE)
+            push @$devices, '-device',
+                'virtserialport,chardev=qga0,name=org.qemu.guest_agent.0,id=qgaport0';
         } elsif ($guest_agent->{type} eq 'isa') {
             push @$devices, '-device', "isa-serial,chardev=qga0";
         }
@@ -4320,6 +4348,15 @@ sub config_to_command {
         my $watchdog = $wdopts->{model} || 'i6300esb';
         push @$devices, '-device', "$watchdog$pciaddr";
         push @$devices, '-watchdog-action', $wdopts->{action} if $wdopts->{action};
+    }
+
+    # guest crash notification, part of the machine since 10.0+pve2
+    if (crash_notification_enabled($machine_version, $arch)) {
+        my $pciaddr = print_pci_addr("pvpanic", $bridges, $arch);
+        push @$devices, '-device', "pvpanic-pci,id=pvpanic$pciaddr";
+        # report the crash, but let the guest continue (e.g. to write its crash
+        # dump), the reaction is up to the vmhook / hookscript
+        push @$cmd, '-action', 'panic=none';
     }
 
     my $vollist = [];
@@ -5327,6 +5364,7 @@ sub foreach_volid {
 
 my $fast_plug_option = {
     'description' => 1,
+    'heartbeat' => 1,
     'hookscript' => 1,
     'lock' => 1,
     'migrate_downtime' => 1,
@@ -5338,6 +5376,7 @@ my $fast_plug_option = {
     'startup' => 1,
     'tags' => 1,
     'vmstatestorage' => 1,
+    'vmhook' => 1,
     'uuid' => 1,
 };
 
@@ -5670,6 +5709,29 @@ sub vmconfig_hotplug_pending {
     if ($hotplug_features->{cloudinit} && PVE::QemuServer::Cloudinit::has_changes($conf)) {
         PVE::QemuServer::vmconfig_update_cloudinit_drive($storecfg, $conf, $vmid);
     }
+
+    # heartbeat, hookscript and vmhook changes apply to the running VM at once
+    configure_events($vmid, $conf);
+}
+
+# pvpanic-pci + Hyper-V crash MSRs, guest visible: only with a new enough
+# machine version so running VMs keep their hardware on migration/restore
+sub crash_notification_enabled {
+    my ($machine_version, $arch) = @_;
+
+    return 0 if $arch eq 's390x'; # no PCI
+    return min_version($machine_version, 10, 0, 2);
+}
+
+sub configure_events {
+    my ($vmid, $conf, $wait) = @_;
+
+    eval {
+        PVE::QemuServer::Events::configure(
+            $vmid, $conf, parse_guest_agent($conf)->{enabled} ? 1 : 0, $wait,
+        );
+    };
+    warn "unable to configure qmeventd for VM $vmid - $@" if $@;
 }
 
 sub try_deallocate_drive {
@@ -6791,6 +6853,12 @@ sub vm_start_nolock {
     }
 
     PVE::GuestHelpers::exec_hookscript($conf, $vmid, 'post-start');
+    if ($migratedfrom) {
+        # `qm event STARTED` finds no config here yet (it moves at the end of
+        # the migration), so configure qmeventd with the source config now
+        configure_events($vmid, $conf, 1);
+        PVE::QemuServer::Events::emit($vmid, 'MIGRATE_IN', { source => $migratedfrom }, $conf);
+    }
 
     my ($current_machine, $is_deprecated) =
         PVE::QemuServer::Machine::get_current_qemu_machine($vmid);

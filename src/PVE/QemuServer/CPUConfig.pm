@@ -877,6 +877,12 @@ sub get_hyperv_enlightenments {
         }
     }
 
+    # Windows 8 and later report a bugcheck (code and parameters) through the
+    # Hyper-V crash MSRs, QEMU turns that into a GUEST_PANICKED event
+    if ($winversion >= 8 && min_version($machine_version, 10, 0, 2)) {
+        $flagfn->('hv_crash', undef, "guest crash notification (machine 10.0+pve2)");
+    }
+
     return $flags;
 }
 

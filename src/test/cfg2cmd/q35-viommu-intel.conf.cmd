@@ -14,6 +14,7 @@
   -vnc 'unix:/var/run/qemu-server/8006.vnc,password=on' \
   -cpu kvm64,enforce,+kvm_pv_eoi,+kvm_pv_unhalt,+lahf_lm,+sep \
   -m 512 \
+  -action 'panic=none' \
   -global 'ICH9-LPC.disable_s3=1' \
   -global 'ICH9-LPC.disable_s4=1' \
   -device 'intel-iommu,intremap=on,caching-mode=on' \
@@ -25,5 +26,6 @@
   -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
   -spice 'tls-port=61000,addr=127.0.0.1,tls-ciphers=HIGH,seamless-migration=on' \
   -device 'virtio-balloon-pci,id=balloon0,bus=pci.0,addr=0x3,free-page-reporting=on' \
+  -device 'pvpanic-pci,id=pvpanic,bus=pci.1,addr=0x1f' \
   -iscsi 'initiator-name=iqn.1993-08.org.debian:01:aabbccddeeff' \
-  -machine 'type=q35+pve1,kernel-irqchip=split'
+  -machine 'type=q35+pve2,kernel-irqchip=split'

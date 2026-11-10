@@ -26,6 +26,7 @@ use PVE::Tunnel;
 
 use PVE::QemuConfig;
 use PVE::QemuServer::CPUConfig;
+use PVE::QemuServer::Events;
 use PVE::QemuServer::Drive qw(checked_volume_format);
 use PVE::QemuServer::Helpers qw(min_version);
 use PVE::QemuServer::Machine;
@@ -792,6 +793,9 @@ sub phase1 {
 
     my $conf = $self->{vmconf};
 
+    $self->{migrate_event_data} = { target => $self->{node}, online => $self->{running} ? 1 : 0 };
+    PVE::QemuServer::Events::emit($vmid, 'PRE_MIGRATE', $self->{migrate_event_data}, $conf);
+
     # set migrate lock in config file
     $conf->{lock} = 'migrate';
     PVE::QemuConfig->write_config($vmid, $conf);
@@ -909,6 +913,7 @@ sub phase1_cleanup {
     my ($self, $vmid, $err) = @_;
 
     $self->log('info', "aborting phase 1 - cleanup resources");
+    $self->{migrate_event_error} = "$err";
 
     my $conf = $self->{vmconf};
     delete $conf->{lock};
@@ -1786,7 +1791,17 @@ sub phase3_cleanup {
 sub final_cleanup {
     my ($self, $vmid) = @_;
 
-    # nothing to do
+    # report the end of a migration that got past prepare
+    if (my $data = $self->{migrate_event_data}) {
+        if ($self->{errors} || $self->{migrate_event_error}) {
+            my $error = $self->{migrate_event_error} // 'migration finished with errors';
+            PVE::QemuServer::Events::emit(
+                $vmid, 'MIGRATE_FAILED', { %$data, error => $error }, $self->{vmconf},
+            );
+        } else {
+            PVE::QemuServer::Events::emit($vmid, 'POST_MIGRATE', $data, $self->{vmconf});
+        }
+    }
 }
 
 sub round_powerof2 {

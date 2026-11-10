@@ -7,6 +7,10 @@ Before=pve-guests.service
 [Service]
 ExecStart=/usr/sbin/qmeventd /var/run/qmeventd.sock
 Type=forking
+# event records go to stdout, the <N> prefix of each line sets the priority
+StandardOutput=journal
+StandardError=journal
+SyslogLevelPrefix=yes
 
 [Install]
 WantedBy=multi-user.target
