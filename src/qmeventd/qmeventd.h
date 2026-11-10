@@ -9,6 +9,8 @@
 #include <sys/syscall.h>
 #include <time.h>
 
+#include "qmeventd-log.h"
+
 #ifndef __NR_pidfd_open
 #define __NR_pidfd_open 434
 #endif
@@ -70,6 +72,25 @@ struct Client {
     ClientType type;
     ClientState state;
 
+    /* protocol error accounting: the first occurrence is logged, repeats are
+     * suppressed and reported in bounded summaries (one per threshold and once
+     * on close). 64-bit so a hostile peer cannot wrap the counter. */
+    unsigned long long proto_errors;
+    unsigned long long proto_suppressed;
+    time_t proto_first; /* first suppressed error, epoch seconds */
+    time_t proto_last;  /* most recent suppressed error, epoch seconds */
+    const char *proto_source; /* source= field used for the throttle summary */
+
+    /* per-connection storm control for whitelisted QMP events: at most
+     * LOG_STORM_BUDGET records per LOG_STORM_WINDOW is emitted; the rest are
+     * suppressed and summarised, so one VM cannot flood the whole journal */
+    unsigned long long storm_count;
+    unsigned long long storm_suppressed;
+    time_t storm_window_start;
+    time_t storm_first;
+    time_t storm_last;
+    char storm_last_event[32];
+
     // only relevant for type=CLIENT_QEMU
     struct {
         char vmid[16];
@@ -77,6 +98,8 @@ struct Client {
         unsigned short guest;
         bool term_check_queued;
         bool backup;
+        char last_status[16];   /* last query-status string, log dedup only */
+        bool term_deferred;     /* termination deferred by backup guard, log dedup only */
     } qemu;
 
     // only relevant for type=CLIENT_VZDUMP

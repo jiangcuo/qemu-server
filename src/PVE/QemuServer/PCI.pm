@@ -356,6 +356,8 @@ sub get_pci_addr_map {
             'pci.4' => { bus => 1, addr => 28 },
             'rng0' => { bus => 1, addr => 29 },
             'pci.2-igd' => { bus => 1, addr => 30 }, # replaces pci.2 in case a legacy IGD device is passed through
+            # dedicated, stable slot for the managed pvpanic-pci notification device
+            'pvpanic' => { bus => 1, addr => 31 },
             'virtio6' => { bus => 2, addr => 1 },
             'virtio7' => { bus => 2, addr => 2 },
             'virtio8' => { bus => 2, addr => 3 },

@@ -40,6 +40,7 @@
 #include <unistd.h>
 
 #include "qmeventd.h"
+#include "qmeventd-capture.h"
 
 #define DEFAULT_KILL_TIMEOUT 60
 
@@ -50,6 +51,10 @@ static const char *progname;
 GHashTable *vm_clients; // key=vmid (freed on remove), value=*Client (free manually)
 GSList *forced_cleanups;
 static int needs_cleanup = 0;
+
+/* Private supervised capture-worker bridge. NULL in unit tests that do not
+ * exercise it, and never required for the QMP control path. */
+static struct qmev_capture *capture_mod = NULL;
 
 /*
  * Helper functions
@@ -154,6 +159,158 @@ static bool must_write(int fd, const char *buf, size_t len) {
  * qmp handling functions
  */
 
+/*
+ * Whitelist of QMP events that are worth a journal record by default.
+ * Everything else stays silent (available via -v only), so the normal read
+ * loop never floods the journal.
+ */
+struct qmp_event_level {
+    const char *name;
+    QLogLevel level;
+};
+
+static const struct qmp_event_level qmp_event_levels[] = {
+    {"SHUTDOWN", QLOG_INFO},
+    {"RESET", QLOG_INFO},
+    {"STOP", QLOG_INFO},
+    {"RESUME", QLOG_INFO},
+    {"SUSPEND", QLOG_INFO},
+    {"SUSPEND_DISK", QLOG_INFO},
+    {"WAKEUP", QLOG_INFO},
+    {"GUEST_PANICKED", QLOG_ERROR},
+    /* GUEST_CRASHLOADED is the Windows pvpanic crash-dump notification. It is
+     * a separate fact from GUEST_PANICKED and does not mean the dump was
+     * written; the dump path must not be filtered out of the journal. */
+    {"GUEST_CRASHLOADED", QLOG_ERROR},
+    {"BLOCK_IO_ERROR", QLOG_ERROR},
+    {"BLOCK_JOB_ERROR", QLOG_ERROR},
+    {"WATCHDOG", QLOG_WARNING},
+};
+
+static const struct qmp_event_level *lookup_qmp_event_level(const char *name) {
+    size_t i;
+    if (!name) {
+        return NULL;
+    }
+    for (i = 0; i < sizeof(qmp_event_levels) / sizeof(qmp_event_levels[0]); i++) {
+        if (!strcmp(name, qmp_event_levels[i].name)) {
+            return &qmp_event_levels[i];
+        }
+    }
+    return NULL;
+}
+
+/*
+ * Best-effort vmid for logging. A connection that is not (yet) identified
+ * must never inherit another VM's id.
+ */
+static const char *client_vmid(struct Client *client) {
+    if (client->type == CLIENT_QEMU && client->qemu.vmid[0]) {
+        return client->qemu.vmid;
+    }
+    if (client->type == CLIENT_VZDUMP && client->vzdump.vmid[0]) {
+        return client->vzdump.vmid;
+    }
+    if (client->qemu.vmid[0]) {
+        return client->qemu.vmid;
+    }
+    /* a connection that already parsed a claimed VMID (e.g. a VZDump
+     * handshake that failed validation) keeps it for diagnostics */
+    if (client->vzdump.vmid[0]) {
+        return client->vzdump.vmid;
+    }
+    return NULL;
+}
+
+/*
+ * The QEMU PID for a connection, never the peer PID. For a VZDump connection
+ * the QEMU process is looked up through the VMID->client map; if there is no
+ * registered QEMU (unknown/live-restore case) this is 0, which the logger
+ * renders as "-".
+ */
+static pid_t client_qemu_pid(struct Client *client) {
+    if (client->type == CLIENT_QEMU) {
+        return client->pid;
+    }
+    if (client->type == CLIENT_VZDUMP && client->vzdump.vmid[0]) {
+        struct Client *vmc = (struct Client *)g_hash_table_lookup(vm_clients, client->vzdump.vmid);
+        if (vmc) {
+            return vmc->pid;
+        }
+    }
+    return 0;
+}
+
+/*
+ * A connection that keeps sending garbage must not flood the journal. The
+ * first protocol error is recorded in full; repeats are suppressed and
+ * reported in a summary every PROTO_SUPPRESS_REPORT_EVERY repeats and once
+ * more when the connection closes. Output is therefore bounded to one summary
+ * per threshold, with the real count and the first/last error timestamps.
+ */
+#define PROTO_SUPPRESS_REPORT_EVERY 100
+
+static const char *protocol_error_source(struct Client *client) {
+    return client->type == CLIENT_VZDUMP ? "vzdump" : "qmeventd";
+}
+
+static void emit_proto_summary(struct Client *client) {
+    struct json_object *s;
+    const char *source = client->proto_source ? client->proto_source : "qmeventd";
+    if (client->proto_suppressed == 0) {
+        return;
+    }
+    s = json_object_new_object();
+    json_object_object_add(s, "reason", json_object_new_string("repeated protocol errors"));
+    json_object_object_add(
+        s, "suppressed", json_object_new_int64((int64_t)client->proto_suppressed)
+    );
+    json_object_object_add(s, "first_s", json_object_new_int64((int64_t)client->proto_first));
+    json_object_object_add(s, "last_s", json_object_new_int64((int64_t)client->proto_last));
+    qmeventd_log_event(
+        client_vmid(client), client_qemu_pid(client), client->pid, QLOG_WARNING, source,
+        "PROTOCOL_ERROR", s
+    );
+    json_object_put(s);
+    client->proto_suppressed = 0;
+    client->proto_first = 0;
+}
+
+static void log_protocol_error(
+    struct Client *client, const char *source, const char *reason, const char *detail
+) {
+    struct json_object *payload = json_object_new_object();
+    time_t now = time(NULL);
+    json_object_object_add(payload, "reason", json_object_new_string(reason));
+    if (detail) {
+        json_object_object_add(payload, "detail", json_object_new_string(detail));
+    }
+
+    client->proto_errors++;
+    if (client->proto_errors == 1) {
+        /* first occurrence is always recorded in full */
+        client->proto_source = source;
+        json_object_object_add(payload, "count", json_object_new_int(1));
+        qmeventd_log_event(
+            client_vmid(client), client_qemu_pid(client), client->pid, QLOG_WARNING, source,
+            "PROTOCOL_ERROR", payload
+        );
+        json_object_put(payload);
+        return;
+    }
+
+    /* further repeats are suppressed and only summarised, never silently lost */
+    client->proto_suppressed++;
+    if (client->proto_first == 0) {
+        client->proto_first = now;
+    }
+    client->proto_last = now;
+    json_object_put(payload);
+    if (client->proto_suppressed >= PROTO_SUPPRESS_REPORT_EVERY) {
+        emit_proto_summary(client);
+    }
+}
+
 static void send_qmp_cmd(struct Client *client, const char *buf, size_t len) {
     if (!must_write(client->fd, buf, len - 1)) {
         fprintf(stderr, "%s: cannot send QMP message\n", client->qemu.vmid);
@@ -168,7 +325,11 @@ void handle_qmp_handshake(struct Client *client) {
     unsigned long vmid = get_vmid_from_pid(client->pid);
     int res = snprintf(client->qemu.vmid, sizeof(client->qemu.vmid), "%lu", vmid);
     if (vmid == 0 || res < 0 || res >= (int)sizeof(client->qemu.vmid)) {
-        fprintf(stderr, "could not get vmid from pid %d\n", client->pid);
+        /* no valid vmid was resolved: never reuse the "0" placeholder */
+        client->qemu.vmid[0] = '\0';
+        log_protocol_error(
+            client, protocol_error_source(client), "could not determine vmid from QEMU pid", NULL
+        );
         cleanup_client(client);
         return;
     }
@@ -180,16 +341,120 @@ void handle_qmp_handshake(struct Client *client) {
         fprintf(stderr, "%s: could not insert client into VMID->client table\n", client->qemu.vmid);
     }
 
+    qmeventd_log_event(
+        client->qemu.vmid, client->pid, client->pid, QLOG_INFO, "qmeventd", "QMP_CONNECTED", NULL
+    );
+
+    /* Forward the trusted identity (vmid + QEMU pid + /proc starttime) to the
+     * capture worker. A new connection starts a new generation. If the process
+     * start time cannot be read the identity is not trusted and is not sent. */
+    if (capture_mod) {
+        char starttime[24];
+        if (qmev_read_starttime(client->pid, starttime, sizeof(starttime)) == 0) {
+            qmev_capture_observe_connected(
+                capture_mod, client->qemu.vmid, client->pid, starttime
+            );
+        }
+    }
+
     static const char qmp_answer[] = "{\"execute\":\"qmp_capabilities\"}\n";
     send_qmp_cmd(client, qmp_answer, sizeof(qmp_answer));
 }
 
+/*
+ * Per-connection storm control for whitelisted QMP events. Normal (low
+ * frequency) events pass through untouched -- RESET is deliberately not
+ * de-duplicated -- but a single connection may emit at most LOG_STORM_BUDGET
+ * records per LOG_STORM_WINDOW. The suppressed remainder is summarised with
+ * the real count and first/last timestamps, so a storm is visible without
+ * being allowed to fill the journal. This is scoped per connection, so one VM
+ * cannot take the budget of another.
+ */
+#define LOG_STORM_BUDGET 200
+#define LOG_STORM_WINDOW 10
+#define LOG_STORM_SUMMARY_EVERY 500
+
+static void emit_storm_summary(struct Client *client) {
+    struct json_object *s;
+    if (!client->qemu.vmid[0] || client->storm_suppressed == 0) {
+        client->storm_suppressed = 0;
+        return;
+    }
+    s = json_object_new_object();
+    json_object_object_add(
+        s, "event",
+        json_object_new_string(client->storm_last_event[0] ? client->storm_last_event : "?")
+    );
+    json_object_object_add(
+        s, "suppressed", json_object_new_int64((int64_t)client->storm_suppressed)
+    );
+    json_object_object_add(s, "first_s", json_object_new_int64((int64_t)client->storm_first));
+    json_object_object_add(s, "last_s", json_object_new_int64((int64_t)client->storm_last));
+    qmeventd_log_event(
+        client->qemu.vmid, client->pid, client->pid, QLOG_WARNING, "qmp", "LOG_SUPPRESSED", s
+    );
+    json_object_put(s);
+    client->storm_suppressed = 0;
+}
+
+static void log_qmp_event_bounded(
+    struct Client *client, QLogLevel level, const char *event, struct json_object *obj
+) {
+    time_t now = time(NULL);
+
+    if (client->storm_window_start == 0 || now - client->storm_window_start >= LOG_STORM_WINDOW) {
+        if (client->storm_suppressed > 0) {
+            emit_storm_summary(client);
+        }
+        client->storm_window_start = now;
+        client->storm_count = 0;
+    }
+
+    if (client->storm_count < LOG_STORM_BUDGET) {
+        client->storm_count++;
+        qmeventd_log_event(
+            client->qemu.vmid[0] ? client->qemu.vmid : NULL, client->pid, client->pid, level,
+            "qmp", event, obj
+        );
+        return;
+    }
+
+    if (client->storm_suppressed == 0) {
+        client->storm_first = now;
+    }
+    client->storm_last = now;
+    client->storm_suppressed++;
+    snprintf(client->storm_last_event, sizeof(client->storm_last_event), "%s", event ? event : "?");
+    if (client->storm_suppressed >= LOG_STORM_SUMMARY_EVERY) {
+        emit_storm_summary(client);
+    }
+}
+
 void handle_qmp_event(struct Client *client, struct json_object *obj) {
     struct json_object *event;
+    const struct qmp_event_level *evlevel;
     if (!json_object_object_get_ex(obj, "event", &event)) {
         return;
     }
-    VERBOSE_PRINT("%s: got QMP event: %s\n", client->qemu.vmid, json_object_get_string(event));
+
+    /* Record the fact that the event was received before the business logic
+     * below may ignore it (e.g. events arriving after termination). */
+    evlevel = lookup_qmp_event_level(json_object_get_string(event));
+    if (evlevel) {
+        log_qmp_event_bounded(client, evlevel->level, json_object_get_string(event), obj);
+    } else {
+        VERBOSE_PRINT("%s: got QMP event: %s\n", client->qemu.vmid, json_object_get_string(event));
+    }
+
+    /* Forward lifecycle/panic/migration events to the capture worker,
+     * independent of the journal logging above (and its rate limiting). Only a
+     * validated CLIENT_QEMU identity is forwarded; an unknown vmid is dropped
+     * by the capture bridge itself. */
+    if (capture_mod && client->qemu.vmid[0]) {
+        qmev_capture_observe_event(
+            capture_mod, client->qemu.vmid, json_object_get_string(event), obj
+        );
+    }
 
     if (client->state == STATE_TERMINATING) {
         // QEMU sometimes sends a second SHUTDOWN after SIGTERM, ignore
@@ -230,12 +495,12 @@ void terminate_check(struct Client *client) {
 
 void handle_qmp_return(struct Client *client, struct json_object *data, bool error) {
     if (error) {
-        const char *msg = "n/a";
-        struct json_object *desc;
-        if (json_object_object_get_ex(data, "desc", &desc)) {
-            msg = json_object_get_string(desc);
-        }
-        fprintf(stderr, "%s: received error from QMP: %s\n", client->qemu.vmid, msg);
+        /* record the full error object (class/desc); this is a command error,
+         * not a transport failure */
+        qmeventd_log_event(
+            client->qemu.vmid[0] ? client->qemu.vmid : NULL, client->pid, client->pid,
+            QLOG_ERROR, "qmeventd", "QMP_ERROR", data
+        );
         client->state = STATE_IDLE;
         goto out;
     }
@@ -254,14 +519,38 @@ void handle_qmp_return(struct Client *client, struct json_object *data, bool err
     switch (client->state) {
     case STATE_EXPECT_STATUS_RESP:
         client->state = STATE_IDLE;
+        if (has_status) {
+            const char *status_str = json_object_get_string(status);
+            if (status_str && strcmp(status_str, client->qemu.last_status)) {
+                struct json_object *s = json_object_new_object();
+                json_object_object_add(s, "status", json_object_new_string(status_str));
+                qmeventd_log_event(
+                    client->qemu.vmid[0] ? client->qemu.vmid : NULL, client->pid, client->pid,
+                    QLOG_INFO, "qmeventd", "VM_STATUS_CHANGED", s
+                );
+                json_object_put(s);
+                snprintf(
+                    client->qemu.last_status, sizeof(client->qemu.last_status), "%s", status_str
+                );
+            }
+        }
         if (active) {
-            VERBOSE_PRINT("%s: got status: VM is active\n", client->qemu.vmid);
+            client->qemu.term_deferred = false;
         } else if (!client->qemu.backup) {
             terminate_client(client);
         } else {
             // if we're in a backup, don't do anything, vzdump will notify
             // us when the backup finishes
-            VERBOSE_PRINT("%s: not active, but running backup - keep alive\n", client->qemu.vmid);
+            if (!client->qemu.term_deferred) {
+                struct json_object *d = json_object_new_object();
+                json_object_object_add(d, "backup", json_object_new_boolean(1));
+                qmeventd_log_event(
+                    client->qemu.vmid[0] ? client->qemu.vmid : NULL, client->pid, client->pid,
+                    QLOG_INFO, "qmeventd", "TERMINATION_DEFERRED", d
+                );
+                json_object_put(d);
+                client->qemu.term_deferred = true;
+            }
         }
         break;
 
@@ -296,20 +585,22 @@ void handle_vzdump_handshake(struct Client *client, struct json_object *data) {
     json_bool has_vmid = data && json_object_object_get_ex(data, "vmid", &vmid_obj);
 
     if (!has_vmid) {
-        VERBOSE_PRINT("pid%d: invalid vzdump handshake: no vmid\n", client->pid);
+        log_protocol_error(client, "vzdump", "invalid vzdump handshake: no vmid", NULL);
         return;
     }
 
     const char *vmid_str = json_object_get_string(vmid_obj);
 
     if (!vmid_str) {
-        VERBOSE_PRINT("pid%d: invalid vzdump handshake: vmid is not a string\n", client->pid);
+        log_protocol_error(client, "vzdump", "invalid vzdump handshake: vmid is not a string", NULL);
         return;
     }
 
     int res = snprintf(client->vzdump.vmid, sizeof(client->vzdump.vmid), "%s", vmid_str);
     if (res < 0 || res >= (int)sizeof(client->vzdump.vmid)) {
-        VERBOSE_PRINT("pid%d: invalid vzdump handshake: vmid too long or invalid\n", client->pid);
+        /* never keep a truncated VMID: it would be attributed to a wrong VM */
+        client->vzdump.vmid[0] = '\0';
+        log_protocol_error(client, "vzdump", "invalid vzdump handshake: vmid too long", NULL);
         return;
     }
 
@@ -320,11 +611,23 @@ void handle_vzdump_handshake(struct Client *client, struct json_object *data) {
         // only mark as VZDUMP once we have set everything up, otherwise 'cleanup'
         // might try to access an invalid value
         client->type = CLIENT_VZDUMP;
-        VERBOSE_PRINT("%s: vzdump backup started\n", client->vzdump.vmid);
-    } else {
-        VERBOSE_PRINT(
-            "%s: vzdump requested backup start for unregistered VM\n", client->vzdump.vmid
+        /* this is the start of backup/restore protection, NOT proof of a
+         * successful backup: the same protocol is used by live restore and
+         * the guard is only released when the connection closes */
+        struct json_object *p = json_object_new_object();
+        json_object_object_add(p, "vmid", json_object_new_string(client->vzdump.vmid));
+        json_object_object_add(p, "protocol", json_object_new_string("vzdump"));
+        qmeventd_log_event(
+            client->vzdump.vmid, vmc->pid, client->pid, QLOG_INFO, "vzdump", "BACKUP_GUARD_ENTER", p
         );
+        json_object_put(p);
+        /* the backup observation carries the mapped QEMU identity, never the
+         * backup helper's PID */
+        if (capture_mod) {
+            qmev_capture_observe_backup(capture_mod, client->vzdump.vmid, true);
+        }
+    } else {
+        log_protocol_error(client, "vzdump", "vzdump guard requested for unregistered VM", NULL);
     }
 }
 
@@ -371,11 +674,28 @@ static void cleanup_qemu_client(struct Client *client) {
     char vmid[sizeof(client->qemu.vmid)];
     strncpy(vmid, client->qemu.vmid, sizeof(vmid));
     g_hash_table_remove(vm_clients, &vmid); // frees key, ignore errors
-    VERBOSE_PRINT("%s: executing cleanup (graceful: %d, guest: %d)\n", vmid, graceful, guest);
+
+    /* a cleanup run is requested here; a successful fork/exec is only proof
+     * that the request was made, not that cleanup completed */
+    struct json_object *p = json_object_new_object();
+    json_object_object_add(p, "graceful", json_object_new_int(graceful ? 1 : 0));
+    json_object_object_add(p, "guest", json_object_new_int(guest ? 1 : 0));
+    qmeventd_log_event(
+        vmid[0] ? vmid : NULL, client->pid, client->pid, QLOG_INFO, "qmeventd", "CLEANUP_REQUESTED",
+        p
+    );
+    json_object_put(p);
 
     int pid = fork();
     if (pid < 0) {
-        fprintf(stderr, "fork failed: %s\n", strerror(errno));
+        struct json_object *e = json_object_new_object();
+        json_object_object_add(e, "phase", json_object_new_string("fork"));
+        json_object_object_add(e, "error", json_object_new_string(strerror(errno)));
+        qmeventd_log_event(
+            vmid[0] ? vmid : NULL, client->pid, client->pid, QLOG_ERROR, "qmeventd",
+            "CLEANUP_START_ERROR", e
+        );
+        json_object_put(e);
         return;
     }
     if (pid == 0) {
@@ -384,7 +704,20 @@ static void cleanup_qemu_client(struct Client *client) {
         char *args[] = {script, "cleanup", vmid, graceful ? "1" : "0", guest ? "1" : "0", NULL};
 
         execvp(script, args);
-        perror("execvp");
+        /* Rebind to an independent stream and drop the parent's inherited
+         * queue before logging: the parent still owns and will deliver that
+         * queue, so resending it here would duplicate bytes on the same
+         * stream. Keep the known VMID and QEMU PID in the failure record. */
+        qmeventd_log_child_reset(STDERR_FILENO);
+        struct json_object *e = json_object_new_object();
+        json_object_object_add(e, "phase", json_object_new_string("exec"));
+        json_object_object_add(e, "script", json_object_new_string(script));
+        json_object_object_add(e, "error", json_object_new_string(strerror(errno)));
+        qmeventd_log_event(
+            vmid[0] ? vmid : NULL, client->pid, client->pid, QLOG_ERROR, "qmeventd",
+            "CLEANUP_START_ERROR", e
+        );
+        json_object_put(e);
         _exit(1);
     }
 }
@@ -396,13 +729,30 @@ void cleanup_client(struct Client *client) {
     struct Client *vmc;
     switch (client->type) {
     case CLIENT_QEMU:
+        /* forward the disconnect before the parent client is destroyed, so the
+         * worker can drop its per-generation state */
+        if (capture_mod && client->qemu.vmid[0]) {
+            qmev_capture_observe_disconnected(capture_mod, client->qemu.vmid);
+        }
+        /* the peer closed the socket; this alone does not prove QEMU crashed */
+        qmeventd_log_event(
+            client->qemu.vmid[0] ? client->qemu.vmid : NULL, client->pid, client->pid, QLOG_INFO,
+            "qmeventd", "QMP_DISCONNECTED", NULL
+        );
         cleanup_qemu_client(client);
         break;
 
     case CLIENT_VZDUMP:
         vmc = (struct Client *)g_hash_table_lookup(vm_clients, client->vzdump.vmid);
         if (vmc) {
-            VERBOSE_PRINT("%s: backup ended\n", client->vzdump.vmid);
+            /* guard released; this is not proof that the backup succeeded */
+            qmeventd_log_event(
+                client->vzdump.vmid, vmc->pid, client->pid, QLOG_INFO, "vzdump",
+                "BACKUP_GUARD_LEAVE", NULL
+            );
+            if (capture_mod) {
+                qmev_capture_observe_backup(capture_mod, client->vzdump.vmid, false);
+            }
             vmc->qemu.backup = false;
             terminate_check(vmc);
         }
@@ -413,17 +763,21 @@ void cleanup_client(struct Client *client) {
         break;
     }
 
+    /* report suppressed repeats and any suppressed QMP storm before the
+     * connection state is gone */
+    if (client->type == CLIENT_QEMU) {
+        emit_storm_summary(client);
+    }
+    emit_proto_summary(client);
+
     if (client->pidfd > 0) {
         (void)close(client->pidfd);
     }
-    VERBOSE_PRINT("removing %s from forced cleanups\n", client->qemu.vmid);
     forced_cleanups = g_slist_remove(forced_cleanups, client);
     free(client);
 }
 
 void terminate_client(struct Client *client) {
-    VERBOSE_PRINT("%s: terminating client (pid %d)\n", client->qemu.vmid, client->pid);
-
     client->state = STATE_TERMINATING;
 
     // open a pidfd before kill for later cleanup
@@ -450,11 +804,38 @@ void terminate_client(struct Client *client) {
 
     // try to send a 'quit' command first, fallback to SIGTERM of the pid
     static const char qmp_quit_command[] = "{\"execute\":\"quit\"}\n";
-    VERBOSE_PRINT("%s: sending 'quit' via QMP\n", client->qemu.vmid);
+    {
+        struct json_object *p = json_object_new_object();
+        json_object_object_add(p, "via", json_object_new_string("qmp"));
+        qmeventd_log_event(
+            client->qemu.vmid[0] ? client->qemu.vmid : NULL, client->pid, client->pid, QLOG_INFO,
+            "qmeventd", "QMP_QUIT_REQUESTED", p
+        );
+        json_object_put(p);
+    }
     if (!must_write(client->fd, qmp_quit_command, sizeof(qmp_quit_command) - 1)) {
-        VERBOSE_PRINT("%s: sending 'SIGTERM' to pid %d\n", client->qemu.vmid, client->pid);
+        struct json_object *p = json_object_new_object();
+        json_object_object_add(p, "pid", json_object_new_int((int)client->pid));
+        json_object_object_add(p, "reason", json_object_new_string("qmp quit not delivered"));
+        qmeventd_log_event(
+            client->qemu.vmid[0] ? client->qemu.vmid : NULL, client->pid, client->pid, QLOG_WARNING,
+            "qmeventd", "SIGTERM_FALLBACK", p
+        );
+        json_object_put(p);
         int err = kill(client->pid, SIGTERM);
-        log_neg(err, "kill");
+        if (err < 0) {
+            struct json_object *e = json_object_new_object();
+            json_object_object_add(e, "pid", json_object_new_int((int)client->pid));
+            json_object_object_add(
+                e, "signal", json_object_new_string("SIGTERM")
+            );
+            json_object_object_add(e, "error", json_object_new_string(strerror(errno)));
+            qmeventd_log_event(
+                client->qemu.vmid[0] ? client->qemu.vmid : NULL, client->pid, client->pid,
+                QLOG_ERROR, "qmeventd", "SIGTERM_FALLBACK", e
+            );
+            json_object_put(e);
+        }
     }
 
     time_t timeout = time(NULL) + kill_timeout;
@@ -476,7 +857,14 @@ void handle_client(struct Client *client) {
 
     if (len < 0) {
         if (!(errno == EAGAIN || errno == EWOULDBLOCK)) {
-            log_neg((int)len, "read");
+            struct json_object *e = json_object_new_object();
+            json_object_object_add(e, "phase", json_object_new_string("read"));
+            json_object_object_add(e, "error", json_object_new_string(strerror(errno)));
+            qmeventd_log_event(
+                client_vmid(client), client_qemu_pid(client), client->pid, QLOG_ERROR,
+                "qmeventd", "IPC_ERROR", e
+            );
+            json_object_put(e);
             cleanup_client(client);
         }
         return;
@@ -518,13 +906,21 @@ void handle_client(struct Client *client) {
             break;
         case json_tokener_continue:
             if (client->buflen >= sizeof(client->buf)) {
-                VERBOSE_PRINT("pid%d: msg too large, discarding buffer\n", client->pid);
+                log_protocol_error(
+                    client, protocol_error_source(client), "message too large", NULL
+                );
                 memset(client->buf, 0, sizeof(client->buf));
                 client->buflen = 0;
             } // else we have enough space try again after next read
             break;
         default:
-            VERBOSE_PRINT("pid%d: parse error: %d, discarding buffer\n", client->pid, jerr);
+            {
+                char detail[32];
+                snprintf(detail, sizeof(detail), "tokener error %d", (int)jerr);
+                log_protocol_error(
+                    client, protocol_error_source(client), "malformed JSON message", detail
+                );
+            }
             memset(client->buf, 0, client->buflen);
             client->buflen = 0;
             break;
@@ -552,12 +948,25 @@ static void sigkill(void *ptr, void *time_ptr) {
 
     if (err < 0) {
         if (errno != ESRCH) {
-            fprintf(
-                stderr, "SIGKILL cleanup of pid '%d' failed - %s\n", data->pid, strerror(errno)
+            struct json_object *e = json_object_new_object();
+            json_object_object_add(e, "pid", json_object_new_int((int)data->pid));
+            json_object_object_add(e, "signal", json_object_new_string("SIGKILL"));
+            json_object_object_add(e, "error", json_object_new_string(strerror(errno)));
+            qmeventd_log_event(
+                data->qemu.vmid[0] ? data->qemu.vmid : NULL, data->pid, data->pid, QLOG_ERROR,
+                "qmeventd", "SIGKILL_FALLBACK", e
             );
+            json_object_put(e);
         }
     } else {
-        fprintf(stderr, "cleanup failed, terminating pid '%d' with SIGKILL\n", data->pid);
+        struct json_object *p = json_object_new_object();
+        json_object_object_add(p, "pid", json_object_new_int((int)data->pid));
+        json_object_object_add(p, "signal", json_object_new_string("SIGKILL"));
+        qmeventd_log_event(
+            data->qemu.vmid[0] ? data->qemu.vmid : NULL, data->pid, data->pid, QLOG_WARNING,
+            "qmeventd", "SIGKILL_FALLBACK", p
+        );
+        json_object_put(p);
     }
 
     data->timeout = 0;
@@ -575,11 +984,49 @@ static void handle_forced_cleanup() {
     needs_cleanup = g_slist_length(forced_cleanups) > 0;
 }
 
+/*
+ * Timeout for the main epoll_wait(). A forced-cleanup deadline keeps the
+ * original 10 s granularity; a pending log backlog only *shortens* that wait
+ * so a recovered journal is drained promptly. It never changes a kill or
+ * cleanup deadline itself.
+ */
+static int daemon_wait_timeout_ms(void) {
+    int timeout_ms = -1;
+
+    if (needs_cleanup) {
+        timeout_ms = 10 * 1000;
+    }
+    if (qmeventd_log_has_pending() && (timeout_ms < 0 || timeout_ms > 200)) {
+        timeout_ms = 200;
+    }
+    /* the capture worker also needs a bounded tick (supervision/backoff); this
+     * only *shortens* the wait and never delays a kill/cleanup deadline */
+    if (capture_mod) {
+        int cap = qmev_capture_wait_timeout_ms(capture_mod);
+        if (cap >= 0 && (timeout_ms < 0 || cap < timeout_ms)) {
+            timeout_ms = cap;
+        }
+    }
+    return timeout_ms;
+}
+
+/*
+ * The daemon's own listen token. The capture worker's fds are registered and
+ * torn down by the capture module itself (qmev_capture_epoll_sync), which owns
+ * private dup()s of its volatile fds so a reused fd number can never be
+ * mis-DELeted or skipped.
+ */
+static int listen_token;
+
 int main(int argc, char *argv[]) {
     int opt;
     int daemonize = 1;
     char *socket_path = NULL;
     progname = argv[0];
+
+    /* key-event records go to the daemon's stdout, which systemd wires to the
+     * journal; delivery is non-blocking and never stalls the control loop */
+    qmeventd_log_init(STDOUT_FILENO);
 
     while ((opt = getopt(argc, argv, "hfvt:")) != -1) {
         switch (opt) {
@@ -628,12 +1075,12 @@ int main(int argc, char *argv[]) {
     unlink(socket_path);
     bail_neg(bind(sock, (struct sockaddr *)&addr, sizeof(addr)), "bind");
 
-    struct epoll_event ev, events[1];
+    struct epoll_event ev, events[8];
     epoll_fd = epoll_create1(EPOLL_CLOEXEC);
     bail_neg(epoll_fd, "epoll_create1");
 
     ev.events = EPOLLIN;
-    ev.data.fd = sock;
+    ev.data.ptr = &listen_token;
     bail_neg(epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sock, &ev), "epoll_ctl");
 
     bail_neg(listen(sock, 10), "listen");
@@ -644,26 +1091,47 @@ int main(int argc, char *argv[]) {
 
     vm_clients = g_hash_table_new_full(g_str_hash, g_str_equal, free, NULL);
 
+    /* The capture bridge is created here but spawns its worker lazily on the
+     * first observation, and never interferes with the QMP control path. */
+    capture_mod = qmev_capture_new(NULL);
+
     int nevents;
+    void *cap_io_tok = qmev_capture_io_token();
+    void *cap_pidfd_tok = qmev_capture_pidfd_token();
 
     for (;;) {
-        nevents = epoll_wait(epoll_fd, events, 1, needs_cleanup ? 10 * 1000 : -1);
+        int timeout_ms;
+        if (capture_mod) {
+            qmev_capture_epoll_sync(capture_mod, epoll_fd);
+        }
+        timeout_ms = daemon_wait_timeout_ms();
+        nevents = epoll_wait(epoll_fd, events, 8, timeout_ms);
         if (nevents < 0 && errno == EINTR) {
             continue;
         }
         bail_neg(nevents, "epoll_wait");
 
         for (int n = 0; n < nevents; n++) {
-            if (events[n].data.fd == sock) {
+            if (events[n].data.ptr == &listen_token) {
 
                 int conn_sock = accept4(sock, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
                 log_neg(conn_sock, "accept");
                 if (conn_sock > -1) {
                     add_new_client(conn_sock);
                 }
+            } else if (events[n].data.ptr == cap_io_tok) {
+                qmev_capture_handle_readable(capture_mod);
+            } else if (events[n].data.ptr == cap_pidfd_tok) {
+                qmev_capture_tick(capture_mod);
             } else {
                 handle_client((struct Client *)events[n].data.ptr);
             }
+        }
+        /* flush any log backlog (also on an idle timeout) and report drops */
+        qmeventd_log_flush_pending();
+        /* bounded capture-worker supervision: liveness, backoff, state replay */
+        if (capture_mod) {
+            qmev_capture_tick(capture_mod);
         }
         handle_forced_cleanup();
     }

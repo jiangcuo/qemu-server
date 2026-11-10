@@ -19,7 +19,8 @@ SOURCES=PCI.pm		\
 	QMPHelpers.pm	\
 	Spdk.pm	\
 	OVMF.pm	\
-	Virtiofs.pm
+	Virtiofs.pm	\
+	DiagnosticCapture.pm
 
 
 .PHONY: install

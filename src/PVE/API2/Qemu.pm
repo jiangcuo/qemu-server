@@ -750,6 +750,7 @@ my $hwtypeoptions = {
     'tablet' => 1,
     'vga' => 1,
     'watchdog' => 1,
+    'pvpanic' => 1,
     'audio0' => 1,
     'rng0' => 1,
 };
@@ -760,6 +761,7 @@ my $generaloptions = {
     'autostart' => 1,
     'bios' => 1,
     'description' => 1,
+    'diagnostic-capture' => 1,
     'gicversion' =>1,
     'kernel' =>1,
     'keyboard' => 1,
@@ -1413,6 +1415,27 @@ __PACKAGE__->register_method({
             my $realcmd = sub {
                 my $conf = $param;
                 my $arch = PVE::QemuServer::Helpers::get_vm_arch($conf);
+
+                # Decide the pvpanic / diagnostic-capture defaults for this new VM
+                # *before* any side effect (disk creation, config write). The
+                # managed pvpanic device must never be auto-enabled when the
+                # user's own args/cpu already conflict with it (the VM would then
+                # never start), and an explicit pvpanic request that cannot be
+                # honoured fails the create right here instead of persisting a
+                # broken configuration.
+                my $capture_plan =
+                    PVE::QemuServer::DiagnosticCapture::plan_create_capture_config(
+                        $conf,
+                        PVE::QemuServer::pvpanic_supported($conf, $arch),
+                        $conf->{args} ? PVE::Tools::split_args($conf->{args}) : [],
+                    );
+                for my $opt (sort keys %{ $capture_plan->{skipped} }) {
+                    warn "not enabling '$opt' for new VM $vmid:"
+                        . " $capture_plan->{skipped}->{$opt}\n";
+                }
+                for my $opt (sort keys %{ $capture_plan->{defaults} }) {
+                    $conf->{$opt} = $capture_plan->{defaults}->{$opt};
+                }
 
                 for my $opt (sort keys $param->%*) {
                     next if $opt !~ m/^scsi\d+$/;

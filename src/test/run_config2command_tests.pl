@@ -593,7 +593,14 @@ sub do_test($) {
             pass("$testname");
         }
     } else {
+        # A missing expected command file must never turn into a silent pass:
+        # writing the freshly generated command line and then comparing it with
+        # itself is a tautology. Write it for review, but fail the test so it
+        # cannot go unnoticed.
         file_set_contents($cmd_fn, $cmdline);
+        fail("$testname");
+        note("no expected command file '$cmd_fn' existed - refusing to auto-pass;"
+            . " the current output was written there, please review it and re-run");
     }
 }
 

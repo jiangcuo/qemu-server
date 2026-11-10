@@ -53,6 +53,7 @@ use PVE::Tools
 use PVE::QMPClient;
 use PVE::QemuConfig;
 use PVE::QemuConfig::NoWrite;
+use PVE::QemuServer::DiagnosticCapture;
 use PVE::QemuServer::Helpers qw(config_aware_timeout min_version kvm_user_version windows_version);
 use PVE::QemuServer::Cloudinit;
 use PVE::QemuServer::CGroup;
@@ -222,6 +223,24 @@ my $watchdog_fmt = {
     },
 };
 PVE::JSONSchema::register_format('pve-qm-watchdog', $watchdog_fmt);
+
+my $diagnostic_capture_fmt = {
+    panic => {
+        type => 'boolean',
+        default => 0,
+        optional => 1,
+        description => "Capture the virtual display on an explicit panic notification"
+            . " (GUEST_PANICKED / GUEST_CRASHLOADED).",
+    },
+    heartbeat => {
+        type => 'boolean',
+        default => 0,
+        optional => 1,
+        description => "Capture the virtual display after the QEMU guest agent stops responding"
+            . " (requires an enabled agent).",
+    },
+};
+PVE::JSONSchema::register_format('pve-qm-diagnostic-capture', $diagnostic_capture_fmt);
 
 my $agent_fmt = {
     enabled => {
@@ -646,6 +665,45 @@ EODESC
             "Create a virtual hardware watchdog device. Once enabled (by a guest"
             . " action), the watchdog must be periodically polled by an agent inside the guest or"
             . " else the watchdog will reset the guest (or execute the respective action specified)",
+    },
+    pvpanic => {
+        optional => 1,
+        type => 'boolean',
+        default => 0,
+        description => "Enable a pvpanic notification device for the guest.",
+        verbose_description => <<EODESC,
+Enable a pvpanic notification device for the guest. Missing is off, so existing
+VMs keep the old behaviour; new x86_64 i440fx/q35 VMs get it explicitly enabled on
+creation. The reported panic notification does not pause, reset or restart the
+guest (-action panic=none), no guest recovery behaviour is changed. The guest
+still needs a pvpanic driver (e.g. the virtio-win pvpanic driver on Windows) to
+send notifications.
+
+The device is a PCI device and is only wired up for x86_64 machines of type
+i440fx (pc) or q35; enabling it for another architecture or machine type is
+rejected with an error instead of silently leaving the guest without the
+device. Requires QEMU 6.0 or newer for both pvpanic-pci and '-action panic='
+(the qemu-server package already requires pve-qemu-kvm 7.1 or newer). Changing
+this option requires a full VM restart.
+EODESC
+    },
+    'diagnostic-capture' => {
+        optional => 1,
+        type => 'string',
+        format => 'pve-qm-diagnostic-capture',
+        description => "Diagnostic display capture policy (panic / heartbeat screenshots).",
+        verbose_description => <<EODESC,
+Selectively enable diagnostic display capture. The value is a comma separated
+list of 'panic=<0|1>' and 'heartbeat=<0|1>'. Missing is off, so existing VMs keep
+the old behaviour; new VMs get it explicitly enabled on creation unless
+overridden. A panic capture requires a configured panic notification device (see
+'pvpanic'); a heartbeat capture additionally requires an enabled guest agent.
+Captures may contain sensitive screen content and are stored locally on the node.
+
+Unlike 'pvpanic' this option only selects what the node-local capture collector
+records; it never changes a guest device, so changing it on a running VM takes
+effect immediately and does not require a restart.
+EODESC
     },
     startdate => {
         optional => 1,
@@ -2205,6 +2263,62 @@ sub parse_vga {
     return $res;
 }
 
+sub parse_diagnostic_capture {
+    my ($conf) = @_;
+
+    return { panic => 0, heartbeat => 0 } if !defined($conf->{'diagnostic-capture'});
+
+    return PVE::QemuServer::DiagnosticCapture::parse_capture_string(
+        $conf->{'diagnostic-capture'});
+}
+
+# Support gate for the managed pvpanic device: x86_64 i440fx/q35 only.
+sub pvpanic_supported {
+    my ($conf, $arch) = @_;
+
+    $arch //= PVE::QemuServer::Helpers::get_vm_arch($conf);
+    return 0 if $arch ne 'x86_64';
+
+    my $machine_conf = PVE::QemuServer::Machine::parse_machine($conf->{machine});
+    my $type = $machine_conf->{type} // 'pc';
+
+    return PVE::QemuServer::DiagnosticCapture::machine_supports_pvpanic($type, $arch);
+}
+
+# Build and atomically publish the normalized runtime capture policy for $vmid
+# from the effective configuration.
+sub publish_capture_policy {
+    my ($vmid, $conf) = @_;
+
+    my $capture = parse_diagnostic_capture($conf);
+    my $agent = parse_guest_agent($conf)->{enabled} ? 1 : 0;
+
+    my $policy = PVE::QemuServer::DiagnosticCapture::normalize_policy(
+        $vmid,
+        capture => $capture,
+        agent => $agent,
+        maintenance => 0,
+    );
+
+    PVE::QemuServer::DiagnosticCapture::publish_policy($vmid, $policy);
+    return $policy;
+}
+
+# Republish only for VMs running on this node; a shared-cluster config write for
+# a VM hosted elsewhere must not create node-local state here.
+sub publish_capture_policy_if_running {
+    my ($vmid, $conf) = @_;
+
+    return if !PVE::QemuServer::Helpers::vm_running_locally($vmid);
+    return publish_capture_policy($vmid, $conf);
+}
+
+sub remove_capture_policy {
+    my ($vmid) = @_;
+
+    return PVE::QemuServer::DiagnosticCapture::remove_policy($vmid);
+}
+
 sub qemu_created_version_fixups {
     my ($conf, $forcemachine, $kvmver) = @_;
 
@@ -2427,6 +2541,10 @@ sub destroy_vm {
     } else {
         PVE::QemuConfig->destroy_config($vmid);
     }
+
+    # never let a stale capture policy survive VM deletion / VMID reuse
+    eval { remove_capture_policy($vmid) };
+    warn $@ if $@;
 }
 
 my $fleecing_section_schema = {
@@ -4233,6 +4351,34 @@ sub config_to_command {
         push @$devices, '-watchdog-action', $wdopts->{action} if $wdopts->{action};
     }
 
+    if ($conf->{pvpanic}) {
+        my $pvpanic_machine = PVE::QemuServer::Machine::parse_machine($conf->{machine});
+        my $machine_type = $pvpanic_machine->{type} // 'pc';
+
+        # A configuration that enables pvpanic on an unsupported machine or
+        # architecture is a hard error: silently omitting the device (while the
+        # config still claims pvpanic is on, and a migration target might differ)
+        # would hide the misconfiguration. Existing VMs never get pvpanic
+        # enabled implicitly, so this only triggers for an explicit request.
+        die "pvpanic is enabled, but the configured machine/architecture does not support"
+            . " the pvpanic-pci device\n"
+            if !PVE::QemuServer::DiagnosticCapture::machine_supports_pvpanic(
+                $machine_type, $arch);
+
+        my $args = $conf->{args} ? PVE::Tools::split_args($conf->{args}) : [];
+        my $conflict = PVE::QemuServer::DiagnosticCapture::find_pvpanic_conflict(
+            $args, $conf->{cpu});
+        die "pvpanic is enabled but $conflict - refusing to silently override the"
+            . " explicitly configured QEMU arguments\n"
+            if $conflict;
+
+        my $pciaddr = print_pci_addr("pvpanic", $bridges, $arch);
+        push @$devices, '-device',
+            PVE::QemuServer::DiagnosticCapture::pvpanic_device_string($pciaddr);
+        # report-only: never pause/reset/restart the guest on a panic notification
+        push @$devices, PVE::QemuServer::DiagnosticCapture::pvpanic_action_args();
+    }
+
     my $vollist = [];
     my $scsicontroller = {};
     my $ahcicontroller = {};
@@ -5238,6 +5384,7 @@ sub foreach_volid {
 
 my $fast_plug_option = {
     'description' => 1,
+    'diagnostic-capture' => 1,
     'hookscript' => 1,
     'lock' => 1,
     'migrate_downtime' => 1,
@@ -6301,6 +6448,11 @@ sub vm_start_nolock {
         print "Resuming suspended VM\n";
     }
 
+    # Publish the effective diagnostic capture policy before the VM starts; a
+    # failure here must only disable diagnostics, never block the VM.
+    eval { publish_capture_policy($vmid, $conf) };
+    warn "unable to publish diagnostic capture policy for VM $vmid - $@" if $@;
+
     # Note that for certain cases like templates, the configuration is minimized, so need to ensure
     # the rest of the function here uses the same configuration that was used to build the command
     (my $cmd, my $vollist, my $spice_port, my $pci_devices, $conf) = config_to_command(
@@ -6851,6 +7003,10 @@ sub vm_stop_cleanup {
         foreach my $ext (qw(mon qmp pid vnc qga)) {
             unlink "/var/run/qemu-server/${vmid}.$ext";
         }
+
+        # the VM no longer runs locally, drop any stale capture policy
+        eval { remove_capture_policy($vmid) };
+        warn $@ if $@;
 
         if ($conf->{ivshmem}) {
             my $ivshmem = parse_property_string($ivshmem_fmt, $conf->{ivshmem});

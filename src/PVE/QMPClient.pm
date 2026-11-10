@@ -6,6 +6,7 @@ use warnings;
 use IO::Multiplex;
 use IO::Socket::UNIX;
 use JSON;
+use Fcntl qw(:DEFAULT :flock);
 use POSIX qw(EINTR EAGAIN);
 use Scalar::Util qw(weaken);
 use Time::HiRes qw(usleep gettimeofday tv_interval);
@@ -51,6 +52,85 @@ my $qga_allow_close_cmds = {
     'guest-suspend-disk' => 1,
     'guest-suspend-hybrid' => 1,
 };
+
+# Shared QGA arbitration lock.
+#
+# The qmeventd diagnostic capture worker holds the same flock on
+# <VMID>.qga.lock while probing the guest agent, so heartbeat probes never
+# interleave with backup/VSS freeze/thaw, guest-exec or shutdown commands on
+# the single guest agent channel. The worker only ever try-locks (a busy
+# channel means "skip", not "guest down"); the synchronous guest-* requests
+# here wait for the lock up to their own operation timeout and always release
+# it, including on every error path.
+#
+# The directory is overridable for tests only.
+our $QGA_LOCK_DIR;
+
+sub qga_lock_path {
+    my ($vmid) = @_;
+
+    my $dir = $QGA_LOCK_DIR
+        || $PVE::QemuServer::Helpers::var_run_tmpdir
+        || "/run/qemu-server";
+
+    return "${dir}/${vmid}.qga.lock";
+}
+
+# Acquire the per-VM lock, waiting up to $timeout seconds. Dies on timeout or
+# if the lock file cannot be opened safely. The lock file is always closed
+# before dying, so no descriptor leaks on any error path.
+sub qga_lock_acquire {
+    my ($vmid, $timeout) = @_;
+
+    $timeout = 5 if !defined($timeout) || $timeout <= 0;
+
+    my $path = qga_lock_path($vmid);
+
+    # O_NOFOLLOW so a symlinked lock path is refused instead of followed.
+    my $fh;
+    sysopen($fh, $path, O_RDWR | O_CREAT | O_NOFOLLOW, 0600)
+        or die "unable to open QGA lock '$path' - $!\n";
+
+    # close-on-exec so a later fork/exec cannot inherit the lock descriptor; a
+    # failure here must not be swallowed (the fd would leak into children).
+    if (!fcntl($fh, F_SETFD, FD_CLOEXEC)) {
+        my $fcntl_err = $!;
+        close($fh);
+        die "unable to set close-on-exec on QGA lock '$path' - $fcntl_err\n";
+    }
+    # Keep the lock file root-private even if it pre-existed with a looser
+    # mode. Applied to the already-opened file handle (fchmod) so no second
+    # path lookup can be raced against a swapped file; a failure must not be
+    # swallowed, otherwise a world-writable lock file could remain.
+    if (!chmod(0600, $fh)) {
+        my $chmod_err = $!;
+        close($fh);
+        die "unable to set 0600 on QGA lock '$path' - $chmod_err\n";
+    }
+
+    my $starttime = [gettimeofday];
+    for (;;) {
+        return $fh if flock($fh, LOCK_EX | LOCK_NB);
+        my $elapsed = tv_interval($starttime, [gettimeofday]);
+        if ($elapsed >= $timeout) {
+            close($fh);
+            die "timeout acquiring QGA lock for VM $vmid\n";
+        }
+        usleep(50000);
+    }
+}
+
+sub qga_lock_release {
+    my ($fh) = @_;
+
+    return if !$fh;
+
+    flock($fh, LOCK_UN);
+    close($fh);
+
+    return;
+}
+
 
 my $push_cmd_to_queue = sub {
     my ($self, $vmid, $cmd) = @_;
@@ -141,7 +221,20 @@ sub cmd {
         }
     }
 
-    $self->queue_execute($timeout, 2);
+    # Guest agent commands share a single channel: serialize them with the
+    # qmeventd capture worker via the per-VM QGA lock. Normal QMP commands are
+    # never locked.
+    my $qga = ($cmd->{execute} =~ /^guest\-+/) ? 1 : 0;
+
+    my $lock;
+    $lock = qga_lock_acquire($vmid, $timeout) if $qga;
+
+    my $err;
+    eval { $self->queue_execute($timeout, 2); 1; } or $err = $@;
+
+    qga_lock_release($lock) if $lock;
+
+    die $err if $err;
 
     die "VM $vmid qmp command '$cmd->{execute}' failed - $queue_info->{error}"
         if defined($queue_info->{error});

@@ -8,5 +8,14 @@ Before=pve-guests.service
 ExecStart=/usr/sbin/qmeventd /var/run/qmeventd.sock
 Type=forking
 
+# Key-event records are written to the daemon's standard output. Ship them to
+# the journal and let the per-record *bare severity* prefix (<6>=info,
+# <4>=warning, <3>=error) drive the journal PRIORITY. A facility-encoded value
+# such as <14> is not parsed by systemd for standard streams and would leave
+# PRIORITY at the default. No -v is enabled by default.
+StandardOutput=journal
+StandardError=journal
+SyslogLevelPrefix=yes
+
 [Install]
 WantedBy=multi-user.target

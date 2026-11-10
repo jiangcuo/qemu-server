@@ -104,21 +104,41 @@ sub check_conflict {
     }
 }
 
-my $pci_map = PVE::QemuServer::PCI::get_pci_addr_map();
-while (my ($id, $what) = each %$pci_map) {
-    check_conflict($id, $what);
+# NOTE: get_pci_addr_map() called *without* an architecture argument actually
+# returns the aarch64 map (the function treats any arch != x86_64 as non-x86).
+# The x86_64 map - which is the one the managed pvpanic-pci device uses - was
+# therefore never conflict-checked. Check both architectures explicitly.
+sub check_arch_conflicts {
+    my ($arch) = @_;
+
+    $addr_map = {};
+
+    my $arch_pci_map = PVE::QemuServer::PCI::get_pci_addr_map($arch);
+    while (my ($id, $what) = each %$arch_pci_map) {
+        check_conflict($id, $what);
+    }
+
+    my $arch_pcie_map = PVE::QemuServer::PCI::get_pcie_addr_map();
+    while (my ($id, $what) = each %$arch_pcie_map) {
+        check_conflict($id, $what);
+    }
 }
 
-my $pcie_map = PVE::QemuServer::PCI::get_pcie_addr_map();
-while (my ($id, $what) = each %$pcie_map) {
-    check_conflict($id, $what);
+sub check_conflict_free {
+    my ($arch) = @_;
+
+    check_arch_conflicts($arch);
+
+    my $pve_cfg = slurp_qemu_config("$qemu_cfg_base_path/pve-q35.cfg");
+    my $pve_cfg_map = extract_qemu_config_addrs($pve_cfg);
+    while (my ($id, $what) = each %$pve_cfg_map) {
+        check_conflict($id, $what);
+    }
 }
 
-my $pve_qm_cfg = slurp_qemu_config("$qemu_cfg_base_path/pve-q35.cfg");
-my $pve_qm_cfg_map = extract_qemu_config_addrs($pve_qm_cfg);
-while (my ($id, $what) = each %$pve_qm_cfg_map) {
-    check_conflict($id, $what);
-}
+# x86_64 first so the shipped pve-q35 qemu config is cross-checked against the
+# map that actually applies on x86_64.
+check_conflict_free('x86_64');
 
 # FIXME: restart with clean conflict $addr_map with only get_pci*_addr_map ones?
 my $pve_qm4_cfg = slurp_qemu_config("$qemu_cfg_base_path/pve-q35-4.0.cfg");
@@ -132,10 +152,30 @@ while (my ($id, $what) = each %$pve_qm_usb_cfg_map) {
     check_conflict($id, $what, 1);
 }
 
+# the aarch64 map is checked on its own as well
+check_arch_conflicts('aarch64');
+
 if ($fail) {
     fail("PCI(e) address conflict check, ignored: $ignored, conflicts: $fail");
 } else {
     pass("PCI(e) address conflict check, ignored: $ignored");
 }
+
+# the managed pvpanic-pci device lives on a fixed, dedicated x86_64 slot
+my $x86_map = PVE::QemuServer::PCI::get_pci_addr_map('x86_64');
+is_deeply(
+    $x86_map->{pvpanic},
+    { bus => 1, addr => 31 },
+    'x86_64 pvpanic slot is the fixed pci.1 addr 0x1f',
+);
+is(
+    PVE::QemuServer::PCI::print_pci_addr('pvpanic', undef, 'x86_64'),
+    ',bus=pci.1,addr=0x1f',
+    'x86_64 pvpanic prints the fixed address',
+);
+
+# pvpanic-pci must not be usable on architectures it is not wired for
+my $arm_map = PVE::QemuServer::PCI::get_pci_addr_map('aarch64');
+ok(!exists $arm_map->{pvpanic}, 'aarch64 has no pvpanic slot');
 
 done_testing();

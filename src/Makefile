@@ -10,11 +10,13 @@ install:
 
 .PHONY: test
 test:
+	$(MAKE) -C qmeventd $@
 	$(MAKE) -C test
 	$(MAKE) -C bin $@
 
 .PHONY: clean
 clean:
+	$(MAKE) -C qmeventd $@
 	$(MAKE) -C test $@
 	$(MAKE) -C bin $@
 

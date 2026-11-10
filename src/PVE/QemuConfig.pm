@@ -597,7 +597,16 @@ sub write_config {
         return $conf->write_config($vmid, $conf);
     }
 
-    return $class->SUPER::write_config($vmid, $conf);
+    my $res = $class->SUPER::write_config($vmid, $conf);
+
+    # Keep the node-local runtime capture policy in sync with the effective
+    # configuration for VMs that run on this node. Template (NoWrite) configs
+    # never reach this point (their write_config dies) and config writes for VMs
+    # hosted elsewhere must not create node-local state - hence the running gate.
+    eval { PVE::QemuServer::publish_capture_policy_if_running($vmid, $conf) };
+    warn "unable to publish capture policy for VM $vmid - $@" if $@;
+
+    return $res;
 }
 
 # END implemented abstract methods from PVE::AbstractConfig

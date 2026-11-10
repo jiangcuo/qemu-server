@@ -1,6 +1,13 @@
 all: test
 
-test: test_snapshot test_cfg_to_cmd test_pci_addr_conflicts test_qemu_img_convert test_migration test_restore_config test_parse_config
+test: test_diagnostic_capture test_qga_lock test_snapshot test_cfg_to_cmd test_pci_addr_conflicts test_qemu_img_convert test_migration test_restore_config test_parse_config
+
+.PHONY: test_diagnostic_capture test_qga_lock
+test_diagnostic_capture: run_diagnostic_capture_tests.pl
+	perl -I../ ./run_diagnostic_capture_tests.pl
+
+test_qga_lock: run_qga_lock_tests.pl
+	perl -I../ ./run_qga_lock_tests.pl
 
 test_snapshot: run_snapshot_tests.pl
 	./run_snapshot_tests.pl
