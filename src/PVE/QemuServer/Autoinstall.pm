@@ -211,23 +211,34 @@ sub get_target_disk {
     return;
 }
 
-# Language of the Windows image on the attached installation ISO. Setup shows the language
-# selection if the configured language is not available in the image.
-sub get_install_locale {
-    my ($conf, $edition) = @_;
+# Detected operating systems of the attached ISOs, the detection is optional, e.g. without
+# pxvirt-isoinfo installed.
+sub get_install_iso_infos {
+    my ($conf) = @_;
 
-    return if !PVE::Storage->can('get_iso_info');
+    return [] if !PVE::Storage->can('get_iso_info');
 
     my $storecfg = PVE::Storage::config();
+    my $infos = [];
     for my $ds (sort keys %$conf) {
         next if $ds !~ m/^(?:ide|sata|scsi)\d+$/;
         my $drive = PVE::QemuServer::Drive::parse_drive($ds, $conf->{$ds});
         next if !PVE::QemuServer::Drive::drive_is_cdrom($drive, 1);
         next if $drive->{file} eq 'none' || $drive->{file} eq 'cdrom';
 
-        # detection is optional, e.g. pxvirt-isoinfo is not installed
         my $info = eval { PVE::Storage::get_iso_info($storecfg, $drive->{file}) };
-        next if !$info || ($info->{type} // '') ne 'windows';
+        push @$infos, $info if $info;
+    }
+    return $infos;
+}
+
+# Language of the Windows image on the attached installation ISO. Setup shows the language
+# selection if the configured language is not available in the image.
+sub get_install_locale {
+    my ($conf, $edition) = @_;
+
+    for my $info (get_install_iso_infos($conf)->@*) {
+        next if ($info->{type} // '') ne 'windows';
 
         # prefer the selected image, all images of an ISO usually have the same language
         my @images = grep { ($_->{languages} // [])->[0] } ($info->{images} // [])->@*;
@@ -242,6 +253,19 @@ sub get_install_locale {
     }
 
     return;
+}
+
+# Whether the kickstart environment group installs a graphical session. The ISO detection
+# knows it from the packages of the environment, else guess from its name.
+sub is_graphical_environment {
+    my ($conf, $environment) = @_;
+
+    for my $info (get_install_iso_infos($conf)->@*) {
+        my ($env) = grep { $_->{id} eq $environment } ($info->{environments} // [])->@*;
+        return $env->{graphical} ? 1 : 0 if $env;
+    }
+
+    return $environment =~ m/(?:graphical|desktop|gui|workstation)/i ? 1 : 0;
 }
 
 sub get_host_timezone {
@@ -308,6 +332,7 @@ sub get_settings {
         rdp => $ai->{rdp} ? 1 : 0,
         domain => scalar(get_domain_settings($conf)),
         edition => $ai->{edition},
+        environment => $ai->{environment},
         arch => PVE::QemuServer::Helpers::get_vm_arch($conf),
         uefi => ($conf->{bios} // '') eq 'ovmf' ? 1 : 0,
         winversion => PVE::QemuServer::Helpers::windows_version($conf->{ostype}),
@@ -375,7 +400,8 @@ sub generate_kickstart {
     $ks .= "keyboard --xlayouts='$s->{keyboard}'\n";
     $ks .= "timezone $s->{timezone} --utc\n";
     $ks .= "firstboot --disable\n";
-    $ks .= "skipx\n";
+    # graphical environments boot into the graphical session
+    $ks .= $s->{graphical} ? "xconfig --startxonboot\n" : "skipx\n";
 
     my $nameservers = join(',', $s->{nameservers}->@*);
     for my $net ($s->{networks}->@*) {
@@ -437,7 +463,9 @@ sub generate_kickstart {
     $ks .= "services --enabled=sshd,qemu-guest-agent\n";
     # eject the installation media, so the guest boots from disk afterwards
     $ks .= "reboot --eject\n";
-    $ks .= "\n%packages\n\@core\nqemu-guest-agent\n%end\n";
+    # only the core group, unless an environment group is selected
+    my $packages = $s->{environment} ? "\@^$s->{environment}" : '@core';
+    $ks .= "\n%packages\n$packages\nqemu-guest-agent\n%end\n";
 
     return $ks;
 }
@@ -941,6 +969,9 @@ sub get_files {
     my $settings = get_settings($conf, $vmid, $ai, $type);
 
     my $extra_files = {};
+    if ($type eq 'kickstart' && $settings->{environment}) {
+        $settings->{graphical} = is_graphical_environment($conf, $settings->{environment});
+    }
     if ($type eq 'windows') {
         $settings->{locale} = get_install_locale($conf, $settings->{edition});
         if (!defined($settings->{timezone})) {

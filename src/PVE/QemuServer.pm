@@ -1009,6 +1009,14 @@ my $autoinstall_fmt = {
         optional => 1,
         description => 'Windows product key.',
     },
+    environment => {
+        type => 'string',
+        format_description => 'id',
+        pattern => '[A-Za-z0-9_.-]+',
+        optional => 1,
+        description => 'Kickstart: environment group to install, e.g.'
+            . ' `server-product-environment`. Defaults to the `core` group only.',
+    },
     edition => {
         type => 'string',
         format_description => 'index|name',
