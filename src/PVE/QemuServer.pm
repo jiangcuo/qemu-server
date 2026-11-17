@@ -278,6 +278,15 @@ my $vga_fmt = {
         enum => ['vnc'],
         optional => 1,
     },
+    rendernode => {
+        description => "DRM render node of the OpenGL rendering of 'virtio-gl', for example"
+            . " 'renderD129' for '/dev/dri/renderD129'. 'auto' lets QEMU pick one.",
+        type => 'string',
+        pattern => '(?:auto|renderD\d+)',
+        format_description => 'auto|renderD<N>',
+        default => 'auto',
+        optional => 1,
+    },
 };
 
 my $ivshmem_fmt = {
@@ -308,6 +317,50 @@ my $audio_fmt = {
         default => 'spice',
         optional => 1,
         description => "Driver backend for the audio device.",
+    },
+};
+
+my $rdp_enhancements_fmt = {
+    encoder => {
+        type => 'string',
+        enum => ['auto', 'openh264', 'vaapi'],
+        default => 'auto',
+        optional => 1,
+        description => "H.264 encoder: 'openh264' encodes on the CPU, 'vaapi' on the GPU"
+            . " and falls back to 'openh264' when VA-API is unavailable. 'auto' uses"
+            . " 'vaapi' for a VirGL display, on the render node of its OpenGL context,"
+            . " else 'openh264'.",
+    },
+    encodernode => {
+        type => 'string',
+        pattern => '(?:auto|renderD\d+)',
+        format_description => 'auto|renderD<N>',
+        default => 'auto',
+        optional => 1,
+        description => "DRM render node of the 'vaapi' encoder, for example 'renderD128' for"
+            . " '/dev/dri/renderD128'. 'auto' uses the render node of the OpenGL context"
+            . " of a VirGL display.",
+    },
+    maxfps => {
+        type => 'integer',
+        minimum => 1,
+        maximum => 120,
+        default => 60,
+        optional => 1,
+        description => "Maximum frame rate per display.",
+    },
+    bitrate => {
+        type => 'integer',
+        minimum => 1,
+        maximum => 1000,
+        optional => 1,
+        description => "Maximum video bitrate in Mbit/s. Default is automatic.",
+    },
+    resizeonconnect => {
+        type => 'boolean',
+        default => 1,
+        optional => 1,
+        description => "Adapt the guest resolution to the client when it connects.",
     },
 };
 
@@ -838,6 +891,12 @@ EODESCR
         type => 'string',
         format => $spice_enhancements_fmt,
         description => "Configure additional enhancements for SPICE.",
+        optional => 1,
+    },
+    rdp_enhancements => {
+        type => 'string',
+        format => $rdp_enhancements_fmt,
+        description => "Configure additional enhancements for RDP.",
         optional => 1,
     },
     tags => {
@@ -1546,6 +1605,17 @@ sub pve_verify_hotplug_features {
     return if $noerr;
 
     die "unable to parse hotplug option\n";
+}
+
+sub get_render_node_path {
+    my ($node) = @_;
+
+    return undef if !$node || $node eq 'auto';
+
+    my $path = "/dev/dri/$node";
+    die "DRM render node '$path' does not exist\n" if !-e $path;
+
+    return $path;
 }
 
 sub assert_clipboard_config {
@@ -4157,10 +4227,43 @@ sub config_to_command {
                     print_vga_device($conf, $vga, $arch, $machine_version, undef, $qxlnum, $bridges);
             }
         }
-        push @$cmd, '-display', 'egl-headless,gl=core' if $vga->{type} eq 'virtio-gl'; # VIRGL
+        my $rdp_enhancement_str = $conf->{rdp_enhancements} // '';
+        my $rdp_enhancement = parse_property_string($rdp_enhancements_fmt, $rdp_enhancement_str);
 
         my $socket = PVE::QemuServer::Helpers::vnc_socket($vmid);
         push @$cmd, '-vnc', "unix:$socket,password=on";
+
+        my $pfamily = PVE::Tools::get_host_address_family($nodename);
+        my @nodeaddrs = PVE::Tools::getaddrinfo_all('localhost', family => $pfamily);
+        die "failed to get an ip address of type $pfamily for 'localhost'\n" if !@nodeaddrs;
+
+        my $localhost = PVE::Network::addr_to_ip($nodeaddrs[0]->{addr});
+        my $rdp_port = PVE::Tools::next_rdp_port($pfamily, $localhost);
+
+        # the node certificate, as for SPICE: rdpproxy returns its fingerprint
+        my $rdp_opts = "addr=$localhost,port=$rdp_port"
+            . ",x509-cert-file=/etc/pve/local/pve-ssl.pem"
+            . ",x509-key-file=/etc/pve/local/pve-ssl.key";
+        # RDP owns the OpenGL context of VIRGL, instead of egl-headless
+        my $rdp_gl = $vga->{type} eq 'virtio-gl';
+        my $rdp_encoder = $rdp_enhancement->{encoder} // 'auto';
+        $rdp_encoder = $rdp_gl ? 'vaapi' : 'openh264' if $rdp_encoder eq 'auto';
+        $rdp_opts .= ",encoder=$rdp_encoder" if $rdp_encoder ne 'openh264';
+        $rdp_opts .= ",max-fps=$rdp_enhancement->{maxfps}" if $rdp_enhancement->{maxfps};
+        $rdp_opts .= ",bitrate=" . $rdp_enhancement->{bitrate} * 1000
+            if $rdp_enhancement->{bitrate};
+        $rdp_opts .= ",resize-on-connect=off"
+            if defined($rdp_enhancement->{resizeonconnect}) && !$rdp_enhancement->{resizeonconnect};
+        if ($rdp_gl) {
+            my $rendernode = get_render_node_path($vga->{rendernode});
+            $rdp_opts .= ",gl=on";
+            $rdp_opts .= ",rendernode=$rendernode" if $rendernode;
+        }
+        if ($rdp_encoder eq 'vaapi') {
+            my $encodernode = get_render_node_path($rdp_enhancement->{encodernode});
+            $rdp_opts .= ",encoder-node=$encodernode" if $encodernode;
+        }
+        push @$devices, '-rdp', "$rdp_opts";
     } else {
         push @$cmd, '-vga', 'none' if $vga->{type} eq 'none';
         push @$cmd, '-nographic';
@@ -4596,6 +4699,14 @@ sub spice_port {
     my $res = mon_cmd($vmid, 'query-spice');
 
     return $res->{'tls-port'} || $res->{'port'} || die "no spice port\n";
+}
+
+sub rdp_port {
+    my ($vmid) = @_;
+
+    my $res = mon_cmd($vmid, 'query-rdp');
+
+    return $res->{'port'} || die "no rdp port\n";
 }
 
 sub vm_devices_list {

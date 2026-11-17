@@ -19,6 +19,7 @@
   -device 'vmgenid,guid=bdd46b98-fefc-11e9-97b4-d72c378e0f96' \
   -device 'usb-tablet,id=tablet,bus=ehci.0,port=1' \
   -device 'VGA,id=vga,bus=pcie.0,addr=0x1' \
+  -rdp 'addr=127.0.0.1,port=62000,x509-cert-file=/etc/pve/local/pve-ssl.pem,x509-key-file=/etc/pve/local/pve-ssl.key' \
   -object 'rng-random,filename=/dev/urandom,id=rng0' \
   -device 'virtio-rng-pci,rng=rng0,max-bytes=1024,period=1000,bus=pci.1,addr=0x1d' \
   -device 'virtio-serial,id=spice,bus=pci.0,addr=0x9' \

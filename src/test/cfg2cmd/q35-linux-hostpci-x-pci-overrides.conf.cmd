@@ -30,6 +30,7 @@
   -device 'vfio-pci,host=0000:00:ff.1,id=hostpci0,bus=pci.0,addr=0x10,x-pci-vendor-id=0x1234,x-pci-device-id=0x5678,x-pci-sub-vendor-id=0x2233,x-pci-sub-device-id=0x0000' \
   -device 'vfio-pci,host=0000:d0:13.0,id=hostpci1,bus=ich9-pcie-port-2,addr=0x0,x-pci-vendor-id=0x1234,x-pci-device-id=0x5678' \
   -device 'VGA,id=vga,bus=pcie.0,addr=0x1' \
+  -rdp 'addr=127.0.0.1,port=62000,x509-cert-file=/etc/pve/local/pve-ssl.pem,x509-key-file=/etc/pve/local/pve-ssl.key' \
   -device 'virtio-serial,id=spice,bus=pci.0,addr=0x9' \
   -chardev 'spicevmc,id=vdagent,name=vdagent' \
   -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \

@@ -304,6 +304,11 @@ $pve_common_tools->mock(
 
         return '61000';
     },
+    next_rdp_port => sub {
+        my ($family, $address) = @_;
+
+        return '62000';
+    },
     getaddrinfo_all => sub {
         my ($hostname, @opts) = @_;
         die "need stable hostname" if $hostname ne 'localhost';

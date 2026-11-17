@@ -14,6 +14,7 @@ use URI::Escape;
 use Socket qw(SOCK_STREAM);
 
 use PVE::APIClient::LWP;
+use PVE::Certificate;
 use PVE::CGroup;
 use PVE::Cluster qw (cfs_read_file cfs_write_file);
 use PVE::RRD;
@@ -1634,6 +1635,7 @@ __PACKAGE__->register_method({
             { subdir => 'unlink' },
             { subdir => 'vncproxy' },
             { subdir => 'termproxy' },
+            { subdir => 'rdpproxy' },
             { subdir => 'migrate' },
             { subdir => 'resize' },
             { subdir => 'move' },
@@ -3384,6 +3386,244 @@ __PACKAGE__->register_method({
         my $port = $param->{port};
 
         PVE::AccessControl::verify_vnc_ticket($param->{vncticket}, $authuser, $authpath, $port);
+
+        my $conf = PVE::QemuConfig->load_config($vmid, $node); # VM exists ?
+
+        return { port => $port };
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'rdpproxy',
+    path => '{vmid}/rdpproxy',
+    method => 'POST',
+    protected => 1,
+    permissions => {
+        check => ['perm', '/vms/{vmid}', ['VM.Console']],
+    },
+    description => "Creates a TCP RDP proxy connection.",
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            vmid => get_standard_option('pve-vmid'),
+            websocket => {
+                optional => 1,
+                type => 'boolean',
+                description => "Prepare for websocket upgrade (listen on localhost only),"
+                    . " otherwise clients connect directly.",
+            },
+        },
+    },
+    returns => {
+        additionalProperties => 0,
+        properties => {
+            user => { type => 'string' },
+            ticket => { type => 'string' },
+            password => {
+                description => "One-time password used for authentication within the RDP"
+                    . " protocol. Consists of letters, digits, '-', '_' and '.'.",
+                type => 'string',
+            },
+            fingerprint => {
+                description => "SHA-256 fingerprint of the node certificate the RDP server"
+                    . " uses.",
+                type => 'string',
+            },
+            'ws-fingerprint' => {
+                description => "SHA-256 fingerprint of the certificate of this node's API"
+                    . " (pveproxy), for the 'rdpwebsocket' connection.",
+                type => 'string',
+            },
+            port => { type => 'integer' },
+            upid => { type => 'string' },
+            username => {
+                description => "One-time user name used for authentication within the RDP"
+                    . " protocol.",
+                type => 'string',
+            },
+            host => {
+                description => "FQDN of the node to connect to.",
+                type => 'string',
+            },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+
+        my $rpcenv = PVE::RPCEnvironment::get();
+
+        my $authuser = $rpcenv->get_user();
+
+        my $vmid = $param->{vmid};
+        my $node = $param->{node};
+        my $websocket = $param->{websocket};
+
+        my $conf = PVE::QemuConfig->load_config($vmid, $node); # check if VM exists
+
+        my $authpath = "/vms/$vmid";
+
+        # the RDP server uses the node certificate, as SPICE does
+        my $certnode = $node eq 'localhost' ? PVE::INotify::nodename() : $node;
+        my $fingerprint =
+            PVE::Certificate::get_certificate_fingerprint("/etc/pve/nodes/$certnode/pve-ssl.pem");
+
+        my $family;
+        my $remcmd = [];
+
+        if ($node ne 'localhost' && $node ne PVE::INotify::nodename()) {
+            (undef, $family) = PVE::Cluster::remote_node_ip($node);
+            my $sshinfo = PVE::SSHInfo::get_ssh_info($node);
+            # NOTE: kvm RDP traffic is already TLS encrypted
+            $remcmd = PVE::SSHInfo::ssh_info_to_command($sshinfo, '-T');
+        } else {
+            $family = PVE::Tools::get_host_address_family($node);
+        }
+
+        my $port = PVE::Tools::next_vnc_port($family);
+
+        my $ticket = PVE::AccessControl::assemble_vnc_ticket($authuser, $authpath, $port);
+        my $username = PVE::Ticket::generate_rdp_username();
+        my $password = PVE::Ticket::generate_rdp_password();
+
+        # the .vds file is downloaded and then opened: give it the password's 30 seconds
+        my $timeout = 30;
+
+        my $realcmd = sub {
+            my $upid = shift;
+
+            syslog('info', "starting rdp proxy $upid\n");
+
+            $ENV{LC_PVE_TICKET} = $password; # set RDP protocol password with "qm rdpproxy"
+            $ENV{LC_PVE_RDP_USER} = $username;
+
+            my $cmd = [@$remcmd, "/usr/sbin/qm", 'rdpproxy', $vmid];
+
+            # no TLS, RDP does its own
+            my $socket_params = {
+                ReuseAddr => 1,
+                Listen => 1,
+                LocalPort => $port,
+                Proto => 'tcp',
+                GetAddrInfoFlags => 0,
+            };
+            # listen for localhost only
+            $socket_params->{LocalHost} = 'localhost' if $param->{websocket};
+
+            my $sock = IO::Socket::IP->new($socket_params->%*)
+                or die "failed to create socket: $!\n";
+
+            # Inside the worker we shouldn't have any previous alarms
+            # running anyway...:
+            alarm(0);
+            local $SIG{ALRM} = sub { die "connection timed out\n" };
+            alarm $timeout;
+            accept(my $cli, $sock) or die "connection failed: $!\n";
+            alarm(0);
+            close($sock);
+            if (
+                PVE::Tools::run_command(
+                    $cmd,
+                    output => '>&' . fileno($cli),
+                    input => '<&' . fileno($cli),
+                    noerr => 1,
+                ) != 0
+            ) {
+                die "Failed to run rdpproxy.\n";
+            }
+
+            return;
+        };
+
+        my $upid = $rpcenv->fork_worker('rdpproxy', $vmid, $authuser, $realcmd, 1);
+
+        PVE::Tools::wait_for_vnc_port($port);
+
+        # the node listening, named as in its certificate
+        my $host = `hostname -f` || PVE::INotify::nodename();
+        chomp $host;
+
+        my $res = {
+            user => $authuser,
+            ticket => $ticket,
+            password => $password,
+            port => $port,
+            upid => $upid,
+            fingerprint => $fingerprint,
+            'ws-fingerprint' => PVE::Cluster::get_node_fingerprint(PVE::INotify::nodename()),
+            username => $username,
+            host => $host,
+        };
+
+        return $res;
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'rdpwebsocket',
+    path => '{vmid}/rdpwebsocket',
+    method => 'GET',
+    permissions => {
+        description => "You need to pass a valid ticket (rdpticket) for a user with VM.Console"
+            . " on the VM. No login is needed, so that RDP clients can connect.",
+        user => 'world',
+    },
+    description => "Opens a websocket for RDP traffic.",
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            node => get_standard_option('pve-node'),
+            vmid => get_standard_option('pve-vmid'),
+            authid => {
+                description => "UserId or token the ticket was issued to ('user' from rdpproxy).",
+                type => 'string',
+                maxLength => 64,
+            },
+            rdpticket => {
+                description => "Ticket from previous call to rdpproxy.",
+                type => 'string',
+                maxLength => 512,
+            },
+            port => {
+                description => "Port number returned by previous rdpproxy call.",
+                type => 'integer',
+                minimum => 5900,
+                maximum => 5999,
+            },
+        },
+    },
+    returns => {
+        type => "object",
+        properties => {
+            port => { type => 'string' },
+        },
+    },
+    code => sub {
+        my ($param) = @_;
+
+        my $rpcenv = PVE::RPCEnvironment::get();
+
+        my $auth_id = $param->{authid};
+
+        my $vmid = $param->{vmid};
+        my $node = $param->{node};
+
+        my $authpath = "/vms/$vmid";
+
+        my $port = $param->{port};
+
+        # as the 'vncticket' endpoint: the ticket stands in for the login
+        eval {
+            PVE::AccessControl::verify_vnc_ticket($param->{rdpticket}, $auth_id, $authpath, $port);
+            die "no permission ($authpath, VM.Console)\n"
+                if !$rpcenv->check($auth_id, $authpath, ['VM.Console'], 1);
+        };
+        if (my $err = $@) {
+            my $clientip = $rpcenv->get_client_ip() || '';
+            syslog('err', "authentication failure; rhost=$clientip user=$auth_id msg=$err");
+            # do not return any info to prevent user enumeration attacks
+            die PVE::Exception->new("authentication failure\n", code => 401);
+        }
 
         my $conf = PVE::QemuConfig->load_config($vmid, $node); # VM exists ?
 

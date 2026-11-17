@@ -26,6 +26,7 @@
   -device 'usb-redir,chardev=usbredirchardev5,id=usbredirdev5,bus=xhci.0,port=6' \
   -device 'usb-host,bus=xhci.0,port=14,hostbus=1,hostport=14,id=usb13' \
   -device 'qxl-vga,id=vga,max_outputs=4,bus=pci.0,addr=0x2' \
+  -rdp 'addr=127.0.0.1,port=62000,x509-cert-file=/etc/pve/local/pve-ssl.pem,x509-key-file=/etc/pve/local/pve-ssl.key' \
   -device 'virtio-serial,id=spice,bus=pci.0,addr=0x9' \
   -chardev 'spicevmc,id=vdagent,name=vdagent' \
   -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \

@@ -9,6 +9,7 @@ use Getopt::Long qw(:config no_getopt_compat);
 use Fcntl ':flock';
 use File::Path;
 use IO::Select;
+use IO::Socket::IP;
 use IO::Socket::UNIX;
 use JSON;
 use POSIX qw(strftime);
@@ -64,6 +65,47 @@ sub run_vnc_proxy {
     my $s = IO::Socket::UNIX->new(Peer => $path, Timeout => 120);
 
     die "unable to connect to socket '$path' - $!" if !$s;
+
+    my $select = IO::Select->new();
+
+    $select->add(\*STDIN);
+    $select->add($s);
+
+    my $timeout = 60 * 15; # 15 minutes
+
+    my @handles;
+    while (
+        $select->count
+        && scalar(@handles = $select->can_read($timeout))
+    ) {
+        foreach my $h (@handles) {
+            my $buf;
+            my $n = $h->sysread($buf, 4096);
+
+            if ($h == \*STDIN) {
+                if ($n) {
+                    syswrite($s, $buf);
+                } else {
+                    exit(0);
+                }
+            } elsif ($h == $s) {
+                if ($n) {
+                    syswrite(\*STDOUT, $buf);
+                } else {
+                    exit(0);
+                }
+            }
+        }
+    }
+    exit(0);
+}
+
+sub run_rdp_proxy {
+    my ($port) = @_;
+
+    my $s = IO::Socket::IP->new(PeerHost => 'localhost', PeerPort => $port, Timeout => 120);
+
+    die "unable to connect to port '$port' - $!" if !$s;
 
     my $select = IO::Select->new();
 
@@ -366,6 +408,51 @@ __PACKAGE__->register_method({
         }
 
         run_vnc_proxy($vnc_socket);
+
+        return;
+    },
+});
+
+__PACKAGE__->register_method({
+    name => 'rdpproxy',
+    path => 'rdpproxy',
+    method => 'PUT',
+    description => "Proxy VM RDP traffic to stdin/stdout",
+    parameters => {
+        additionalProperties => 0,
+        properties => {
+            vmid => get_standard_option(
+                'pve-vmid',
+                { completion => \&PVE::QemuServer::complete_vmid_running },
+            ),
+        },
+    },
+    returns => { type => 'null' },
+    code => sub {
+        my ($param) = @_;
+
+        my $vmid = $param->{vmid};
+        PVE::QemuConfig::assert_config_exists_on_node($vmid);
+        my $rdp_port = PVE::QemuServer::rdp_port($vmid);
+
+        # NOTE: ssh on debian only pass LC_* variables
+        my ($ticket, $username) = ($ENV{LC_PVE_TICKET}, $ENV{LC_PVE_RDP_USER});
+        if ($ticket && $username) {
+            # one connection per proxy: the password is used up by its login
+            mon_cmd(
+                $vmid, "set_password",
+                protocol => 'rdp',
+                username => $username,
+                password => $ticket,
+                'one-time' => JSON::true,
+            );
+            mon_cmd($vmid, "expire_password", protocol => 'rdp', time => "+30");
+        } else {
+            die "LC_PVE_TICKET or LC_PVE_RDP_USER not set, RDP proxy without username"
+                . " and password is forbidden\n";
+        }
+
+        run_rdp_proxy($rdp_port);
 
         return;
     },
@@ -1371,6 +1458,8 @@ our $cmddef = {
     sendkey => ["PVE::API2::Qemu", 'vm_sendkey', ['vmid', 'key'], {%node}],
 
     vncproxy => [__PACKAGE__, 'vncproxy', ['vmid']],
+
+    rdpproxy => [__PACKAGE__, 'rdpproxy', ['vmid']],
 
     wait => [__PACKAGE__, 'wait', ['vmid']],
 

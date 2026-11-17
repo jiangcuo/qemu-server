@@ -24,6 +24,7 @@
   -chardev 'spicevmc,id=usbredirchardev1,name=usbredir' \
   -device 'usb-redir,chardev=usbredirchardev1,id=usbredirdev1,bus=xhci.0' \
   -device 'qxl-vga,id=vga,bus=pci.0,addr=0x2' \
+  -rdp 'addr=127.0.0.1,port=62000,x509-cert-file=/etc/pve/local/pve-ssl.pem,x509-key-file=/etc/pve/local/pve-ssl.key' \
   -device 'qxl,id=vga1,ram_size=67108864,vram_size=33554432,bus=pci.0,addr=0x18' \
   -device 'virtio-serial,id=spice,bus=pci.0,addr=0x9' \
   -chardev 'spicevmc,id=vdagent,name=vdagent' \

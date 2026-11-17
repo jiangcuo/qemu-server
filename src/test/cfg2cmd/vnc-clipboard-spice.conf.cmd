@@ -20,6 +20,7 @@
   -device 'pci-bridge,id=pci.2,chassis_nr=2,bus=pci.0,addr=0x1f' \
   -device 'piix3-usb-uhci,id=uhci,bus=pci.0,addr=0x1.0x2' \
   -device 'qxl-vga,id=vga,max_outputs=4,bus=pci.0,addr=0x2' \
+  -rdp 'addr=127.0.0.1,port=62000,x509-cert-file=/etc/pve/local/pve-ssl.pem,x509-key-file=/etc/pve/local/pve-ssl.key' \
   -device 'virtio-serial,id=spice,bus=pci.0,addr=0x9' \
   -chardev 'qemu-vdagent,id=vdagent,name=vdagent,clipboard=on' \
   -device 'virtserialport,chardev=vdagent,name=com.redhat.spice.0' \
