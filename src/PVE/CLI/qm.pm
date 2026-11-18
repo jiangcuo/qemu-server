@@ -107,6 +107,12 @@ sub run_rdp_proxy {
 
     die "unable to connect to port '$port' - $!" if !$s;
 
+    # unlike the VNC unix socket, both ends are TCP: without TCP_NODELAY small RDP
+    # messages (input, frame acknowledgements) wait for the peer's delayed ACK
+    $s->setsockopt(Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1);
+    # STDOUT is the client socket, or a pipe through ssh where this fails
+    setsockopt(\*STDOUT, Socket::IPPROTO_TCP(), Socket::TCP_NODELAY(), 1);
+
     my $select = IO::Select->new();
 
     $select->add(\*STDIN);
